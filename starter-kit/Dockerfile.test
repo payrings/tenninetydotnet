@@ -1,0 +1,60 @@
+# Pin a specific SDK patch. For full reproducibility use a digest:
+# FROM mcr.microsoft.com/dotnet/sdk@sha256:<digest>.
+FROM mcr.microsoft.com/dotnet/sdk:10.0.100
+
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Provide a non-root user at the host UID/GID so bind-mounted files keep normal
+# host ownership. Newer .NET SDK base images already ship a user (for example
+# app) at UID 1000, so we cannot assume the UID is free. Handle both cases and
+# normalize the result to a user named agent with home /home/agent, so the
+# USER/ENV lines below are stable regardless of the base image.
+RUN set -eux; \
+    existing_group="$(getent group "${HOST_GID}" | cut -d: -f1 || true)"; \
+    if [ -z "$existing_group" ]; then \
+        groupadd -g "${HOST_GID}" agent; \
+        existing_group=agent; \
+    fi; \
+    existing_user="$(getent passwd "${HOST_UID}" | cut -d: -f1 || true)"; \
+    if [ -z "$existing_user" ]; then \
+        useradd -m -u "${HOST_UID}" -g "$existing_group" -s /bin/bash agent; \
+    elif [ "$existing_user" != "agent" ]; then \
+        usermod -l agent -d /home/agent -m -s /bin/bash "$existing_user"; \
+        usermod -g "$existing_group" agent; \
+    else \
+        usermod -g "$existing_group" agent; \
+    fi
+
+RUN git config --system --add safe.directory /workspace
+
+
+# Pre-create the NuGet home owned by the agent user so a named volume mounted
+# at /home/agent/.nuget/packages inherits agent ownership instead of being
+# root-owned.
+RUN mkdir -p /home/agent/.nuget/packages \
+    && chown -R "${HOST_UID}:${HOST_GID}" /home/agent/.nuget
+
+# Bake a valid user-level NuGet.Config into the image so the SDK never has to
+# author one at runtime (a partial/interrupted write there produced an empty
+# "Root element is missing" config). This path is NOT covered by the cache
+# volume (only .nuget/packages is mounted), so it is recreated cleanly each run.
+RUN mkdir -p /home/agent/.nuget/NuGet \
+    && printf '%s\n' \
+       '<?xml version="1.0" encoding="utf-8"?>' \
+       '<configuration>' \
+       '  <packageSources>' \
+       '    <clear />' \
+       '    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />' \
+       '  </packageSources>' \
+       '</configuration>' > /home/agent/.nuget/NuGet/NuGet.Config \
+    && chown -R "${HOST_UID}:${HOST_GID}" /home/agent/.nuget
+
+
+USER agent
+ENV HOME=/home/agent
+WORKDIR /workspace

@@ -1,0 +1,27 @@
+repos:
+  - repo: local
+    hooks:
+      - id: no-raw-sql
+        name: block raw SQL strings in C#
+        entry: >
+          bash -c '! grep -rnE
+          "new SqlConnection\(|new SqlCommand\(|\.CommandText\s*="
+          src/ --include="*.cs"
+          --exclude-dir=bin --exclude-dir=obj
+          | grep -v "// allow-raw-sql"'
+        language: system
+        pass_filenames: false
+      - id: signature-drift
+        name: block signature changes without .cline/rules/architecture.md update
+        entry: dotnet script scripts/check_signatures.csx -- --staged
+        language: system
+        pass_filenames: false
+      - id: dotnet-format
+        name: verify code formatting
+        entry: dotnet format --verify-no-changes --severity warn
+        language: system
+        pass_filenames: false
+        # 'files' regex rather than 'types: [csharp]': pre-commit's identify
+        # database tags .cs files as "c#", and an unknown tag makes pre-commit
+        # reject the whole config.
+        files: '\.cs$'

@@ -1,0 +1,479 @@
+// Copyright 2026 G. Paganelli
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// CANONICAL GOLDEN HARNESS — DO NOT let an agent author or edit this file.
+//
+// This file is shipped, pre-tested, by the 10/90 framework and instantiated by
+// `dev.sh write-golden-harness`, which replaces the single token __PROJECT__
+// with your PascalCase project name. The harness — the code that decides whether
+// a case "passes" — is the strongest correctness gate in the pipeline, so it is
+// deliberately NOT written by the local Coder: a subtly loose comparison
+// (double vs decimal, culture-dependent parsing, reference equality) would
+// silently let broken code pass. Keep this file read-only to agents.
+//
+// It loads tests/fixtures/critical_logic_golden.json (schema below) from the
+// build output, reflectively invokes the documented production entry point for
+// each case, and asserts an exact, deterministic comparison against `expected`
+// (a return value) or `expectedError` (an exception type name).
+//
+// Fixture schema — two accepted shapes:
+//
+//   (A) MULTIPLE entry points (preferred). A module with more than one public
+//       entry point golden-tests all of them in one fixture:
+//   {
+//     "groups": [
+//       {
+//         "entryPoint": "Namespace.Type.Method",
+//         "cases": [
+//           { "name": "id",  "input": { "paramName": value }, "expected": value },
+//           { "name": "id2", "input": { "paramName": value }, "expectedError": "ArgumentOutOfRangeException" }
+//         ]
+//       },
+//       { "entryPoint": "Namespace.OtherType.Method", "cases": [ /* ... */ ] }
+//     ]
+//   }
+//
+//   (B) SINGLE entry point (legacy, still supported). Equivalent to one group:
+//   {
+//     "entryPoint": "Namespace.Type.Method",
+//     "cases": [ { "name": "id", "input": { /* ... */ }, "expected": value } ]
+//   }
+//
+// Each case supplies EXACTLY ONE of `expected` (compare the return value) or
+// `expectedError` (assert the entry point throws that exception type). A case
+// with both, or neither, is a fixture error and fails loudly.
+//
+// Case `name` is the test ID and MUST be unique across the WHOLE fixture (not
+// just within a group), so a failure names a single case unambiguously.
+//
+// entryPoint resolves against the production assembly (__PROJECT__). It may be a
+// public static or public instance method; for an instance method the type must
+// have a public parameterless constructor. Input keys match parameter names
+// exactly; every parameter must be supplied. Return comparison is by canonical
+// JSON form of the actual value versus `expected`, so numeric types, strings,
+// booleans, arrays and object shapes are all compared exactly and
+// culture-independently.
+//
+// NOTE: Task / Task<T> / ValueTask / ValueTask<T> results are awaited to
+// completion before comparison. For expectedError on an async method, the
+// awaited exception is asserted (the AggregateException/TargetInvocationException
+// that reflection produces is unwrapped first).
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Xunit;
+
+namespace __PROJECT__.Golden;
+
+public sealed class CriticalLogicGoldenTests
+{
+    private const string FixtureFileName = "critical_logic_golden.json";
+
+    private static readonly JsonSerializerOptions CanonicalJson = new()
+    {
+        // Deterministic, culture-independent, no formatting differences.
+        WriteIndented = false,
+        PropertyNamingPolicy = null,
+    };
+
+    public static IEnumerable<object[]> Cases()
+    {
+        List<Group> groups = LoadFixture().Normalise();
+
+        var seenNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Group g in groups)
+        {
+            if (string.IsNullOrWhiteSpace(g.EntryPoint))
+                throw new GoldenFixtureException("A fixture group has a missing or empty 'entryPoint'.");
+            if (g.Cases is null || g.Cases.Count == 0)
+                throw new GoldenFixtureException($"Group '{g.EntryPoint}' contains no cases.");
+
+            foreach (GoldenCase c in g.Cases)
+            {
+                if (string.IsNullOrWhiteSpace(c.Name))
+                    throw new GoldenFixtureException("A fixture case has a missing or empty 'name' (names are the case IDs and must be unique).");
+                if (!seenNames.Add(c.Name))
+                    throw new GoldenFixtureException($"Duplicate fixture case ID: '{c.Name}' (case names must be unique across the whole fixture).");
+
+                bool hasExpected = c.Expected.ValueKind != JsonValueKind.Undefined;
+                if (hasExpected == c.HasExpectedError)
+                    throw new GoldenFixtureException(
+                        $"Case '{c.Name}' must specify EXACTLY ONE of 'expected' or 'expectedError'.");
+            }
+        }
+
+        foreach (Group g in groups)
+            foreach (GoldenCase c in g.Cases!)
+                yield return new object[] { c.Name };
+    }
+
+    [Theory]
+    [MemberData(nameof(Cases))]
+    [Trait("Category", "Golden")]
+    public void Case_ProducesExpectedOutput(string caseName)
+    {
+        List<Group> groups = LoadFixture().Normalise();
+
+        (Group group, GoldenCase testCase) = groups
+            .SelectMany(g => g.Cases!.Select(c => (group: g, @case: c)))
+            .Single(t => t.@case.Name == caseName);
+
+        (MethodInfo method, object? instance) = ResolveEntryPoint(group.EntryPoint!);
+        object?[] args = BindArguments(method, testCase);
+
+        if (testCase.HasExpectedError)
+        {
+            AssertThrows(method, instance, args, testCase, group.EntryPoint!);
+            return;
+        }
+
+        object? actual = InvokeAndUnwrap(method, instance, args);
+
+        // Compare by canonical JSON. This is exact and culture-independent: 2.50m
+        // and 2.5m serialise differently only if the production type differs, and
+        // string/collection/shape mismatches all surface here. Reference equality
+        // is never used.
+        string expectedJson = Canonicalise(testCase.Expected);
+        string actualJson = Canonicalise(JsonSerializer.SerializeToElement(actual, CanonicalJson));
+
+        Assert.True(
+            expectedJson == actualJson,
+            $"Golden case '{caseName}' failed.\n  entryPoint: {group.EntryPoint}\n  expected: {expectedJson}\n  actual:   {actualJson}");
+    }
+
+    // --- invocation ------------------------------------------------------
+
+    // Invoke the entry point and, if it returns a Task/Task<T>/ValueTask,
+    // await it to completion and return the result (or null for a bare Task).
+    // Reflection wraps any thrown exception in TargetInvocationException; the
+    // awaited path may add AggregateException. Both are unwrapped so a real
+    // production exception surfaces as itself.
+    private static object? InvokeAndUnwrap(MethodInfo method, object? instance, object?[] args)
+    {
+        object? raw;
+        try
+        {
+            raw = method.Invoke(instance, args);
+        }
+        catch (TargetInvocationException tie) when (tie.InnerException is not null)
+        {
+            throw tie.InnerException;
+        }
+        return AwaitIfNeeded(raw);
+    }
+
+    private static object? AwaitIfNeeded(object? raw)
+    {
+        switch (raw)
+        {
+            case null:
+                return null;
+            case Task task:
+                try { task.GetAwaiter().GetResult(); }
+                catch (AggregateException ae) when (ae.InnerException is not null)
+                { throw ae.InnerException; }
+                Type t = task.GetType();
+                if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(Task<>))
+                    return t.GetProperty("Result")!.GetValue(task);
+                return null;
+            default:
+                // ValueTask / ValueTask<T>: convert to Task via AsTask() and await.
+                Type vt = raw.GetType();
+                if ((vt.IsGenericType && vt.GetGenericTypeDefinition() == typeof(ValueTask<>))
+                    || vt == typeof(ValueTask))
+                {
+                    MethodInfo? asTask = vt.GetMethod("AsTask", Type.EmptyTypes);
+                    if (asTask is not null)
+                        return AwaitIfNeeded(asTask.Invoke(raw, null));
+                }
+                return raw;
+        }
+    }
+
+    private static void AssertThrows(
+        MethodInfo method, object? instance, object?[] args, GoldenCase testCase, string entryPoint)
+    {
+        string expectedType = testCase.ExpectedError!.Trim();
+        try
+        {
+            InvokeAndUnwrap(method, instance, args);
+        }
+        catch (Exception ex)
+        {
+            string actualType = ex.GetType().Name;
+            string actualFull = ex.GetType().FullName ?? actualType;
+            bool match = expectedType == actualType
+                         || expectedType == actualFull
+                         || actualFull.EndsWith("." + expectedType, StringComparison.Ordinal);
+            Assert.True(
+                match,
+                $"Golden case '{testCase.Name}' threw the wrong exception.\n  entryPoint: {entryPoint}\n  expectedError: {expectedType}\n  actual:        {actualFull}: {ex.Message}");
+            return;
+        }
+
+        Assert.Fail(
+            $"Golden case '{testCase.Name}' expected exception '{expectedType}' but none was thrown.\n  entryPoint: {entryPoint}");
+    }
+
+    // --- fixture loading -------------------------------------------------
+
+    private static Fixture LoadFixture()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, FixtureFileName);
+        if (!File.Exists(path))
+            throw new GoldenFixtureException(
+                $"Golden fixture not found at '{path}'. Ensure the Golden project links " +
+                $"'../fixtures/{FixtureFileName}' with CopyToOutputDirectory=PreserveNewest.");
+
+        string json = File.ReadAllText(path);
+        Fixture? fixture;
+        try
+        {
+            fixture = JsonSerializer.Deserialize<Fixture>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+            });
+        }
+        catch (JsonException ex)
+        {
+            throw new GoldenFixtureException($"Golden fixture is not valid JSON: {ex.Message}");
+        }
+
+        return fixture ?? throw new GoldenFixtureException("Golden fixture deserialised to null.");
+    }
+
+    private static Assembly ProductionAssembly()
+    {
+        // The Golden project references the production project (__PROJECT__), so
+        // its assembly is loaded. Resolve it by name rather than via a marker
+        // type, keeping this harness free of any production-code dependency.
+        const string name = "__PROJECT__";
+        Assembly? asm = AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(a => string.Equals(a.GetName().Name, name, StringComparison.Ordinal));
+        if (asm is not null) return asm;
+        try { return Assembly.Load(name); }
+        catch (Exception ex)
+        {
+            throw new GoldenFixtureException(
+                $"Production assembly '{name}' is not loaded and could not be loaded: {ex.Message}. " +
+                $"Ensure the Golden project references the production project.");
+        }
+    }
+
+    // --- entry-point resolution -----------------------------------------
+
+    private static (MethodInfo, object?) ResolveEntryPoint(string entryPoint)
+    {
+        int lastDot = entryPoint.LastIndexOf('.');
+        if (lastDot <= 0 || lastDot == entryPoint.Length - 1)
+            throw new GoldenFixtureException(
+                $"entryPoint '{entryPoint}' must be a fully-qualified 'Namespace.Type.Method'.");
+
+        string typeName = entryPoint[..lastDot];
+        string methodName = entryPoint[(lastDot + 1)..];
+
+        // Resolve the type from the production assembly (the one under test).
+        Assembly production = ProductionAssembly();
+        Type? type = production.GetType(typeName)
+                     ?? Type.GetType(typeName);
+        if (type is null)
+            throw new GoldenFixtureException(
+                $"entryPoint type '{typeName}' not found in assembly '{production.GetName().Name}'.");
+
+        MethodInfo? method;
+        try
+        {
+            method = type.GetMethod(
+                methodName,
+                BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+        }
+        catch (AmbiguousMatchException)
+        {
+            throw new GoldenFixtureException(
+                $"entryPoint method '{methodName}' on type '{typeName}' is overloaded. " +
+                $"Give the golden entry point a single unambiguous overload (or split the overloads into distinct methods).");
+        }
+        if (method is null)
+            throw new GoldenFixtureException(
+                $"entryPoint method '{methodName}' not found (public) on type '{typeName}'.");
+
+        object? instance = null;
+        if (!method.IsStatic)
+        {
+            instance = Activator.CreateInstance(type)
+                       ?? throw new GoldenFixtureException(
+                           $"Could not construct '{typeName}' for an instance entryPoint. " +
+                           $"It needs a public parameterless constructor, or make the entry point static.");
+        }
+
+        return (method, instance);
+    }
+
+    private static object?[] BindArguments(MethodInfo method, GoldenCase testCase)
+    {
+        ParameterInfo[] parameters = method.GetParameters();
+        var args = new object?[parameters.Length];
+
+        for (int i = 0; i < parameters.Length; i++)
+        {
+            ParameterInfo p = parameters[i];
+            string name = p.Name ?? throw new GoldenFixtureException("A parameter has no name (cannot bind by name).");
+
+            if (testCase.Input is null || !testCase.Input.TryGetValue(name, out JsonElement value))
+                throw new GoldenFixtureException(
+                    $"Case '{testCase.Name}': no input provided for parameter '{name}'.");
+
+            args[i] = Deserialise(value, p.ParameterType, testCase.Name!, name);
+        }
+
+        return args;
+    }
+
+    private static object? Deserialise(JsonElement value, Type targetType, string caseName, string paramName)
+    {
+        try
+        {
+            return value.Deserialize(targetType, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString,
+            });
+        }
+        catch (JsonException ex)
+        {
+            throw new GoldenFixtureException(
+                $"Case '{caseName}': input '{paramName}' could not be converted to {targetType.Name}: {ex.Message}");
+        }
+    }
+
+    // --- canonical comparison -------------------------------------------
+
+    private static string Canonicalise(JsonElement element)
+    {
+        // Re-serialise through a stable, sorted representation so that key order
+        // in the fixture never affects equality, and numbers/strings compare by
+        // value in an invariant culture.
+        using var doc = JsonDocument.Parse(WriteSorted(element));
+        return JsonSerializer.Serialize(doc.RootElement, CanonicalJson);
+    }
+
+    private static string WriteSorted(JsonElement element)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+            WriteSortedElement(element, writer);
+        return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static void WriteSortedElement(JsonElement element, Utf8JsonWriter writer)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                writer.WriteStartObject();
+                foreach (JsonProperty prop in element.EnumerateObject().OrderBy(p => p.Name, StringComparer.Ordinal))
+                {
+                    writer.WritePropertyName(prop.Name);
+                    WriteSortedElement(prop.Value, writer);
+                }
+                writer.WriteEndObject();
+                break;
+            case JsonValueKind.Array:
+                writer.WriteStartArray();
+                foreach (JsonElement item in element.EnumerateArray())
+                    WriteSortedElement(item, writer);
+                writer.WriteEndArray();
+                break;
+            case JsonValueKind.Number:
+                // Preserve the exact numeric text so decimals aren't lossily
+                // widened to double.
+                writer.WriteRawValue(element.GetRawText(), skipInputValidation: true);
+                break;
+            case JsonValueKind.String:
+                writer.WriteStringValue(element.GetString());
+                break;
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                writer.WriteBooleanValue(element.GetBoolean());
+                break;
+            case JsonValueKind.Null:
+            case JsonValueKind.Undefined:
+                writer.WriteNullValue();
+                break;
+            default:
+                throw new GoldenFixtureException($"Unsupported JSON kind: {element.ValueKind}");
+        }
+    }
+
+    // --- fixture model ---------------------------------------------------
+
+    private sealed class Fixture
+    {
+        // Shape (A): multiple groups.
+        public List<Group>? Groups { get; set; }
+
+        // Shape (B): a single top-level entry point (legacy).
+        public string? EntryPoint { get; set; }
+        public List<GoldenCase>? Cases { get; set; }
+
+        // Collapse either shape into a uniform list of groups. Fail loudly if
+        // both shapes (or neither) are present, so an ambiguous fixture can't
+        // silently run only half its cases.
+        public List<Group> Normalise()
+        {
+            bool hasGroups = Groups is { Count: > 0 };
+            bool hasSingle = !string.IsNullOrWhiteSpace(EntryPoint) || Cases is { Count: > 0 };
+
+            if (hasGroups && hasSingle)
+                throw new GoldenFixtureException(
+                    "Fixture defines both top-level 'entryPoint'/'cases' and 'groups'. Use one shape, not both.");
+            if (hasGroups)
+                return Groups!;
+            if (hasSingle)
+                return new List<Group> { new() { EntryPoint = EntryPoint, Cases = Cases } };
+
+            throw new GoldenFixtureException(
+                "Fixture is empty: provide 'groups' (preferred) or a top-level 'entryPoint' + 'cases'.");
+        }
+    }
+
+    private sealed class Group
+    {
+        public string? EntryPoint { get; set; }
+        public List<GoldenCase>? Cases { get; set; }
+    }
+
+    private sealed class GoldenCase
+    {
+        public string? Name { get; set; }
+        public Dictionary<string, JsonElement>? Input { get; set; }
+
+        // Default (Undefined) when the key is absent, which is how we detect
+        // "no 'expected' provided" vs. an explicit JSON null.
+        public JsonElement Expected { get; set; }
+
+        public string? ExpectedError { get; set; }
+        public bool HasExpectedError => !string.IsNullOrWhiteSpace(ExpectedError);
+    }
+
+    private sealed class GoldenFixtureException : Exception
+    {
+        public GoldenFixtureException(string message) : base(message) { }
+    }
+}

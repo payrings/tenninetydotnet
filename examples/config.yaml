@@ -1,0 +1,51 @@
+# Explicit model repositories and tested quantisations.
+#
+# PINNING NOTE — READ THIS. The `-hf <repo>:<quant>` form below always pulls the
+# CURRENT contents of that Hugging Face repo. llama.cpp has no `@<sha>` revision
+# argument, so this convenient form is NOT reproducibly pinned: if the repo owner
+# re-uploads the GGUF, your model can change silently. For real reproducibility,
+# download the exact GGUF once, record its SHA-256, and serve it from a local
+# path with `--model`. Both models below show the pinned local-path form,
+# commented out, beneath the convenient `-hf` form. To pin:
+#
+#   hf download unsloth/Qwen3.6-27B-MTP-GGUF Qwen3.6-27B-MTP-Q4_K_M.gguf \
+#     --local-dir ~/models/qwen-coder
+#   sha256sum ~/models/qwen-coder/Qwen3.6-27B-MTP-Q4_K_M.gguf   # record this
+#
+# then switch the `cmd:` to the `--model` line and keep the checksum somewhere
+# under version control (e.g. a MODELS.sha256 file) so drift is detectable.
+
+models:
+  qwen-coder:
+    cmd: |
+      llama-server --port ${PORT}
+      -hf unsloth/Qwen3.6-27B-MTP-GGUF:Q4_K_M
+      -ngl 999 -fa on -c 114688 --jinja --reasoning on
+      --chat-template-kwargs '{"preserve_thinking": true}'
+      -b 2048 -ub 2048
+      --cache-type-k q8_0
+      --cache-type-v q8_0
+      --spec-type draft-mtp
+      --spec-draft-n-max 2
+      --spec-draft-n-min 0
+      --spec-draft-ngl 999
+      --spec-draft-type-k q8_0
+      --spec-draft-type-v q8_0
+      --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --repeat-penalty 1.0
+    ttl: 600
+    # Pinned (reproducible) alternative — download + checksum once, then use:
+    #   --model /home/<you>/models/qwen-coder/Qwen3.6-27B-MTP-Q4_K_M.gguf
+    #   (replace the -hf line above with the --model line; keep all other flags)
+
+  devstral-reviewer:
+    cmd: |
+      llama-server --port ${PORT}
+      -hf unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF:UD-Q4_K_XL
+      -ngl 999 -fa on -c 65536 --jinja
+      -b 2048 -ub 2048
+      --cache-type-k q8_0
+      --cache-type-v q8_0
+      --temp 0.15 --top-k 64 --min-p 0.01 --repeat-penalty 1.0
+    # Pinned (reproducible) alternative:
+    #   --model /home/<you>/models/devstral-reviewer/Devstral-Small-2-24B-Instruct-2512-UD-Q4_K_XL.gguf
+    ttl: 600

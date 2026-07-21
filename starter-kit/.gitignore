@@ -1,0 +1,17 @@
+bin/
+obj/
+*.user
+.vs/
+*.suo
+__pycache__/
+*.pyc
+.DS_Store
+
+# Orchestrator runtime artefacts (host-side, not project code)
+.escalations.json
+escalation-notes.md
+frontier-fix-*.md
+.dev-runtime/
+
+# Secrets — never commit the API key
+.env
