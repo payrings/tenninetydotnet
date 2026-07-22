@@ -627,7 +627,7 @@ paid API secret. A mode-600 `.env` read only by `escalate.py` is tighter:
 ```bash
 mkdir -p ~/.config/tenninety
 umask 077
-printf 'OPENROUTER_API_KEY=sk-or-v1-...\nFRONTIER_MODEL=anthropic/claude-opus-4.8\n' \
+printf 'OPENROUTER_API_KEY=sk-or-v1-...\nFRONTIER_MODEL=z-ai/glm-5.2\n' \
   > ~/.config/tenninety/.env
 chmod 600 ~/.config/tenninety/.env   # belt and braces
 ```
@@ -642,7 +642,7 @@ and it warns if the `.env` is group/world readable. Keep any project-local
 for one session):
 
 ```bash
-sed -i 's#^FRONTIER_MODEL=.*#FRONTIER_MODEL=z-ai/glm-5.2#' ~/.config/tenninety/.env
+sed -i 's#^FRONTIER_MODEL=.*#FRONTIER_MODEL=anthropic/claude-opus-4.8#' ~/.config/tenninety/.env
 ```
 
 ### 8.2 – Install Python dependencies and the escalation script
