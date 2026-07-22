@@ -61,6 +61,7 @@ for symbol in "${CHANGED_SYMBOLS[@]}"; do
     # leading cap per word (HttpClient, not HTTPClient) to keep the two in sync.
     consumer_module=$(basename "$consumer_file" .cs \
       | sed -E 's/([a-z0-9])([A-Z])/\1-\2/g' \
+      | sed -E 's/([A-Z]+)([A-Z][a-z])/\1-\2/g' \
       | tr '[:upper:]' '[:lower:]')
 
     if grep -q "| $consumer_module |" "$WORKSPACE/REVIEW_QUEUE.md" 2>/dev/null; then
