@@ -881,7 +881,7 @@ cmd_check_coverage() {
     if ! printf '%s\n' "$allowed" | grep -qxF "$f"; then
       orphans="$orphans$f"$'\n'
     fi
-  done < <(cd "$WORKSPACE" && git ls-files 'src/*.cs' 2>/dev/null)
+  done < <(cd "$WORKSPACE" && git ls-files 'src/**/*.cs' 2>/dev/null)
 
   if [ -n "$orphans" ]; then
     echo "MANIFEST COVERAGE: these src/ files are not listed in any module manifest:" >&2
