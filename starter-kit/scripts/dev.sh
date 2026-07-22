@@ -493,6 +493,7 @@ cmd_review() {
 
 cmd_test() {
   local module_id="$1"
+  [ -n "$module_id" ] || { echo "usage: dev.sh test <module-id>"; return 1; }
   # Scope-gate before the test container touches the tree: a bare `dev.sh test`
   # after `dev.sh write` would otherwise restore/build an unvetted tree.
   if [ -n "$module_id" ] && git -C "$WORKSPACE" rev-parse -q --verify \
