@@ -26,7 +26,7 @@ from pathlib import Path
 from openai import OpenAI
 
 ESCALATION_LOG = Path(".escalations.json")
-FRONTIER_MODEL = os.environ.get("FRONTIER_MODEL", "anthropic/claude-opus-4.8")
+FRONTIER_MODEL = os.environ.get("FRONTIER_MODEL", "z-ai/glm-5.2:floor")
 
 
 def load_env_file(path=None):
