@@ -947,7 +947,7 @@ cmd_broadcast() {
     > "$WORKSPACE/BROADCAST.md"
     echo "Cleared BROADCAST.md"
   else
-    echo "## $(date -Iminutes)" >> "$WORKSPACE/BROADCAST.md"
+    echo "## $(date '+%Y-%m-%dT%H:%M%z')" >> "$WORKSPACE/BROADCAST.md"
     echo "$note" >> "$WORKSPACE/BROADCAST.md"
     echo "" >> "$WORKSPACE/BROADCAST.md"
     echo "Added broadcast note."
