@@ -1099,7 +1099,10 @@ cmd_write_golden_harness() {
   fi
 
   # Substitute the single token and write the harness, then freeze it.
-  sed "s/__PROJECT__/$project_name/g" "$template" > "$destination/$filename" || {
+  # Escape sed-special characters in the project name for safe substitution.
+  local escaped_name
+  escaped_name=$(printf '%s' "$project_name" | sed 's/[&/\]/\\&/g')
+  sed "s/__PROJECT__/${escaped_name}/g" "$template" > "$destination/$filename" || {
     echo "ERROR: failed to write $destination/$filename"; return 1; }
   chmod 444 "$destination/$filename"
   echo "Wrote canonical golden harness: $destination/$filename (frozen read-only)."
