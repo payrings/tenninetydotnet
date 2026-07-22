@@ -24,8 +24,8 @@ fi
 # text to parse).
 mapfile -t CHANGED_SYMBOLS < <(
   cd "$WORKSPACE" && dotnet script scripts/check_signatures.csx -- \
-    --since "$BASE_TAG" --names-only 2>/dev/null
-)
+    --since "$BASE_TAG" --names-only 2>&1
+) || { echo "ERROR: signature checker failed."; exit 1; }
 
 if [ "${#CHANGED_SYMBOLS[@]}" -eq 0 ]; then
   echo "No public-API changes since $BASE_TAG."
