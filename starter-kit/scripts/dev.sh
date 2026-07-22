@@ -471,6 +471,7 @@ cmd_start() {
 
 cmd_write() {
   local task="$*"
+  [ -n "$task" ] || { echo 'usage: dev.sh write "<task>"'; return 1; }
   preflight_llama_swap || return 1
   run_agent "$CODER_PROFILE" "$(broadcast_prefix)$task" rw
 }
@@ -803,8 +804,10 @@ cmd_escalate() {
 
 cmd_reject() {
   local module_id="$1"
+  [ -n "$module_id" ] || { echo "usage: dev.sh reject <module-id> \"<feedback>\""; return 1; }
   shift
   local feedback="$*"
+  [ -n "$feedback" ] || { echo "usage: dev.sh reject <module-id> \"<feedback>\""; return 1; }
   mkdir -p "$WORKSPACE/review-feedback"
   echo "$feedback" > "$WORKSPACE/review-feedback/$module_id.md"
   # Increment the rejection count in the same edit that sets the status, so the
@@ -826,8 +829,10 @@ cmd_reject() {
 }
 
 cmd_approve() {
+  local module_id="$1"
+  [ -n "$module_id" ] || { echo "usage: dev.sh approve <module-id>"; return 1; }
   sed -i "s/| $1 | [^|]* |/| $1 | approved |/" "$WORKSPACE/REVIEW_QUEUE.md"
-  echo "Approved $1"
+  echo "Approved $module_id"
 }
 
 cmd_status() {
