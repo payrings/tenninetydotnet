@@ -41,7 +41,7 @@ models:
     cmd: |
       llama-server --port ${PORT}
       -hf unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF:UD-Q4_K_XL
-      -ngl 999 -fa on -c 65536 --jinja
+      -fa on -c 65536 --jinja
       -b 2048 -ub 2048
       --cache-type-k q8_0
       --cache-type-v q8_0
