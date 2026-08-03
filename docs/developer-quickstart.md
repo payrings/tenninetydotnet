@@ -10,7 +10,7 @@ Work through the phases in order; they are sequential by design, and each one's 
 2. Follow Phase 1 (base system and .NET SDK), Phase 2 (GPU runtime; reboot when told to), and Phase 3 (build the inference engine and verify it sees your GPU).
 3. Follow Phase 4 to install and launch the model server with the tested repositories and quantisations, then run a direct completion smoke test against each model. Leave that terminal running and do everything else in a second one, as the guide instructs.
 4. Follow Phase 5 (Docker plus the firewall rule; do not skip the firewall part, because it is the most common cause of "the agent can't reach the models") and Phase 6 (build both container images and check the three version numbers).
-5. Follow Phase 7 to create the two Cline profiles, one per model, and run the readability check at the end of that phase.
+5. Follow Phase 7 to install the two aider profiles, one per model, and run the smoke checks at the end of that phase.
 6. Follow Phase 8 to set your OpenRouter key and chosen frontier model, and run the escalation smoke test. Even though your spec already exists, you still want escalation working before you need it mid-project.
 
 ## 2. Scaffold the project (one-time)

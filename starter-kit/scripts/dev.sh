@@ -1,25 +1,21 @@
 #!/bin/bash
-# Copyright 2026 G. Paganelli
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 # scripts/dev.sh – single entry point for the local coding loop (C# / .NET).
 # Usage: dev.sh <subcommand> [args]
+#
+# Agent runtime: aider (https://aider.chat), invoked single-shot inside the
+# aider-sandboxed container via `aider --message-file`. Unlike an agentic CLI,
+# aider does not run a read/run loop of its own, so this script injects ALL
+# context explicitly: the spec and skill files are attached (--read or
+# editable), the module's manifest files are attached editable to the Coder,
+# and the module diff is inlined into the Reviewer's prompt. Nothing is
+# auto-loaded.
 
 # Framework version this orchestrator ships with. Bump on every tagged release
 # (keep in step with CHANGELOG.md and the git tag). Because users COPY dev.sh
 # into their projects, this is how a project records which framework version it
 # is running; `dev.sh version` and `dev.sh help` print it.
-DEV_SH_VERSION="0.1.0"
+DEV_SH_VERSION="0.2.0"
 
 set -uo pipefail
 
@@ -59,7 +55,7 @@ require_cwd_in_workspace() {
   return 1
 }
 
-AGENT_IMAGE="cline-sandboxed"
+AGENT_IMAGE="aider-sandboxed"
 
 # Host-reachable llama-swap endpoint for preflight checks. After Phase 4 the
 # server binds to the Docker bridge gateway; override if yours differs.
@@ -67,13 +63,20 @@ LLAMA_SWAP_HOST_URL="${LLAMA_SWAP_HOST_URL:-http://172.17.0.1:8090}"
 # Set DEV_SKIP_PREFLIGHT=1 to skip the pre-call model health check.
 DEV_SKIP_PREFLIGHT="${DEV_SKIP_PREFLIGHT:-0}"
 
-CODER_PROFILE="$HOME/.cline-coder"
-REVIEWER_PROFILE="$HOME/.cline-reviewer"
+CODER_PROFILE="$HOME/.aider-coder"
+REVIEWER_PROFILE="$HOME/.aider-reviewer"
 
-# Containers run as a baked-in non-root user matching the host UID/GID (see
-# Phase 6), so files stay host-owned and :ro mounts can't be written through.
-# The Cline profile lives at /home/node/.cline inside the image's real HOME.
-CONTAINER_CLINE="/home/node/.cline"
+# The aider profile (aider.conf.yml + model-settings.yml + model-metadata.json)
+# is config-only, so it mounts read-only at /conf. Containers run as a baked-in
+# non-root user matching the host UID/GID (see Phase 6), so files stay
+# host-owned and :ro mounts can't be written through.
+CONTAINER_CONF="/conf"
+
+# Endpoint the agent container uses to reach llama-swap on the host, plus the
+# dummy key llama-swap ignores. aider routes any `openai/<model>` model through
+# OPENAI_API_BASE.
+OPENAI_API_BASE="${OPENAI_API_BASE:-http://host.docker.internal:8090/v1}"
+OPENAI_API_KEY="${OPENAI_API_KEY:-local-llm}"
 
 # --- Agent egress posture ------------------------------------------------
 # The agent container only ever needs to reach llama-swap on the host at
@@ -170,16 +173,30 @@ RO_MOUNTS=()
 [ -n "$GOLDEN_DIR" ] && RO_MOUNTS+=(-v "$WORKSPACE/tests/$GOLDEN_DIR:/workspace/tests/$GOLDEN_DIR:ro")
 RO_MOUNTS+=(-v "$WORKSPACE/tests/fixtures:/workspace/tests/fixtures:ro")
 RO_MOUNTS+=(-v "$WORKSPACE/Directory.Packages.props:/workspace/Directory.Packages.props:ro")
-[ -f "$WORKSPACE/.cline/rules/architecture.original.md" ] && RO_MOUNTS+=(-v "$WORKSPACE/.cline/rules/architecture.original.md:/workspace/.cline/rules/architecture.original.md:ro")
+[ -f "$WORKSPACE/.agent/rules/architecture.original.md" ] && RO_MOUNTS+=(-v "$WORKSPACE/.agent/rules/architecture.original.md:/workspace/.agent/rules/architecture.original.md:ro")
 
+# --- aider invocation ----------------------------------------------------
+# run_agent <profile> <mode: code|ask> <writable: rw|ro> <prompt> [file-specs...]
+#
+# File specs attach workspace files to the aider chat:
+#   --edit:<workspace-relative path>   attach editable (code mode only)
+#   --read:<workspace-relative path>   attach read-only context
+# In ask mode every file is attached read-only regardless of the spec, and
+# nonexistent paths are skipped (new manifest files are named in the prompt
+# for the Coder to create).
 run_agent() {
-  local profile="$1" task="$2" writable="${3:-rw}"
-  local mount_args=()
+  local profile="$1" mode="$2" writable="$3" prompt="$4"
+  shift 4
 
+  [ -f "$profile/aider.conf.yml" ] || {
+    echo "ERROR: aider profile not found at $profile – see SETUP_GUIDE.md Phase 7." >&2
+    return 1
+  }
+
+  local mount_args=()
   if [ "$writable" = "ro" ]; then
     # Reviewer: entire workspace read-only, INCLUDING .git. The orchestrator
-    # is the sole owner of Git state; the reviewer only needs to *read* the
-    # diff, and `git diff` against a committed baseline does not write to .git.
+    # is the sole owner of Git state.
     mount_args+=(-v "$WORKSPACE:/workspace:ro")
   else
     # Coder: workspace writable so it can edit src/, but .git is mounted
@@ -191,18 +208,58 @@ run_agent() {
     fi
   fi
 
+  local file_args=() spec path
+  for spec in "$@"; do
+    case "$spec" in
+      --edit:*|--read:*)
+        path="${spec#--*:}"
+        [ -f "$WORKSPACE/$path" ] || continue
+        if [ "$mode" = "code" ] && [[ "$spec" == --edit:* ]]; then
+          file_args+=("/workspace/$path")
+        else
+          file_args+=(--read "/workspace/$path")
+        fi
+        ;;
+    esac
+  done
+
+  local mode_args=()
+  [ "$mode" = "ask" ] && mode_args+=(--chat-mode ask)
+
+  # The prompt travels as a mounted file: no quoting limits, no stdin.
+  local prompt_file
+  prompt_file="$(mktemp "${TMPDIR:-/tmp}/tenninety-prompt.XXXXXX")"
+  printf '%s\n' "$prompt" > "$prompt_file"
+
   # GIT_OPTIONAL_LOCKS=0 stops even incidental .git writes (e.g. index refresh)
-  # from a read-only .git mount.
+  # from a read-only .git mount. --no-git keeps aider itself away from Git.
+  # History files are redirected to /tmp so the workspace stays clean.
   local net_args; agent_net_args net_args
+  local rc=0
   docker run --rm -i \
     -e GIT_OPTIONAL_LOCKS=0 \
-    -e CLINE_SESSION_BACKEND_MODE=local \
-    -e AI_SDK_LOG_WARNINGS=false \
+    -e OPENAI_API_BASE="$OPENAI_API_BASE" \
+    -e OPENAI_API_KEY="$OPENAI_API_KEY" \
     "${mount_args[@]}" \
     "${RO_MOUNTS[@]}" \
-    -v "$profile:$CONTAINER_CLINE" \
+    -v "$profile:$CONTAINER_CONF:ro" \
+    -v "$prompt_file:/task.md:ro" \
     "${net_args[@]}" \
-    "$AGENT_IMAGE" "$task" </dev/null
+    "$AGENT_IMAGE" \
+      --config "$CONTAINER_CONF/aider.conf.yml" \
+      --model-settings-file "$CONTAINER_CONF/model-settings.yml" \
+      --model-metadata-file "$CONTAINER_CONF/model-metadata.json" \
+      --message-file /task.md \
+      --no-git \
+      --yes-always \
+      --chat-history-file /tmp/aider-chat-history.md \
+      --input-history-file /tmp/aider-input-history \
+      --llm-history-file /tmp/aider-llm-history.txt \
+      "${mode_args[@]}" \
+      "${file_args[@]}" \
+      </dev/null || rc=$?
+  rm -f "$prompt_file"
+  return "$rc"
 }
 
 broadcast_prefix() {
@@ -225,11 +282,11 @@ stage_untracked() {
 }
 
 # --- Deterministic scope gate -------------------------------------------
-# The module manifest in .cline/rules/architecture.md is the authoritative
+# The module manifest in .agent/rules/architecture.md is the authoritative
 # scope. Rather than trust the Reviewer model to catch out-of-scope edits,
 # the orchestrator parses the manifest itself and hard-fails on any changed
 # path not listed under the module's Implementation files / Shared
-# integration files. `.cline/rules/architecture.md` is the sole global
+# integration files. `.agent/rules/architecture.md` is the sole global
 # exception (a deliberate interface change).
 #
 # Manifest format (from the blueprint, rigidly specified):
@@ -242,7 +299,7 @@ stage_untracked() {
 manifest_allowed_paths() {
   # manifest_allowed_paths <module-id> -> allowed paths, one per line.
   local module_id="$1"
-  local spec="$WORKSPACE/.cline/rules/architecture.md"
+  local spec="$WORKSPACE/.agent/rules/architecture.md"
   [ -f "$spec" ] || return 0
   awk -v id="$module_id" '
     # Enter this module block when its Module ID line matches exactly.
@@ -283,13 +340,13 @@ scope_check() {
   local allowed
   allowed="$(manifest_allowed_paths "$module_id")"
   if [ -z "$allowed" ]; then
-    echo "SCOPE ERROR: no Implementation/Shared files found for Module ID '$module_id' in .cline/rules/architecture.md." >&2
+    echo "SCOPE ERROR: no Implementation/Shared files found for Module ID '$module_id' in .agent/rules/architecture.md." >&2
     echo "  Check the ID exists and its manifest lists paths under those headings." >&2
     return 1
   fi
   # The architecture file itself is always allowed (interface-change exception).
   allowed="$allowed
-.cline/rules/architecture.md"
+.agent/rules/architecture.md"
 
   local changed
   changed="$(git -C "$WORKSPACE" diff --name-only "$tag" 2>/dev/null)"
@@ -321,7 +378,7 @@ EOF
 # edited in the same diff as a signature change. That alone can be satisfied by
 # the Coder itself editing both the signature and the spec in one pass, with no
 # human in the loop. This gate makes a spec change a HUMAN decision: if a
-# module's diff touches .cline/rules/architecture.md, finalise/commit refuse
+# module's diff touches .agent/rules/architecture.md, finalise/commit refuse
 # unless the human passes --allow-spec-change, and print the change against the
 # frozen architecture.original.md so it can be reviewed deliberately.
 spec_changed_in_module() {
@@ -331,7 +388,7 @@ spec_changed_in_module() {
   git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/$tag" >/dev/null || return 1
   stage_untracked
   git -C "$WORKSPACE" diff --name-only "$tag" 2>/dev/null \
-    | grep -qx '.cline/rules/architecture.md'
+    | grep -qx '.agent/rules/architecture.md'
 }
 
 # Enforce the human gate. Returns 0 to proceed, 1 to refuse.
@@ -346,16 +403,16 @@ require_spec_change_ack() {
     return 0
   fi
 
-  echo "REFUSING $cmd: this module's diff changes .cline/rules/architecture.md (an interface change)." >&2
+  echo "REFUSING $cmd: this module's diff changes .agent/rules/architecture.md (an interface change)." >&2
   echo "" >&2
   echo "Interface changes must be a deliberate human decision, not slipped in by the Coder." >&2
-  local orig="$WORKSPACE/.cline/rules/architecture.original.md"
+  local orig="$WORKSPACE/.agent/rules/architecture.original.md"
   if [ -f "$orig" ]; then
     echo "Change vs the frozen original (architecture.original.md):" >&2
     echo "------------------------------------------------------------" >&2
     ( cd "$WORKSPACE" && git --no-pager diff --no-index -- \
-        .cline/rules/architecture.original.md \
-        .cline/rules/architecture.md 2>/dev/null ) >&2 || true
+        .agent/rules/architecture.original.md \
+        .agent/rules/architecture.md 2>/dev/null ) >&2 || true
     echo "------------------------------------------------------------" >&2
   else
     echo "(No architecture.original.md found to diff against.)" >&2
@@ -469,11 +526,66 @@ cmd_start() {
   echo "Started module '$module_id' at base commit ${base:0:12} (tag module-start-$module_id)."
 }
 
+# Build the file-spec list for a Coder invocation: the architecture spec
+# (editable – a spec change is possible but gated on the human at
+# finalise/commit), the coder+tester skills (read-only), and every existing
+# file in the module's manifest (editable). Manifest files that don't exist
+# yet are skipped here and named in the task for the Coder to create.
+coder_file_specs() {
+  local module_id="$1"
+  printf '%s\n' \
+    "--edit:.agent/rules/architecture.md" \
+    "--read:.agent/skills/coder.md" \
+    "--read:.agent/skills/tester.md"
+  local p
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in .agent/rules/architecture.md) continue ;; esac
+    [ -f "$WORKSPACE/$p" ] && printf '%s\n' "--edit:$p"
+  done < <(manifest_allowed_paths "$module_id")
+}
+
+# Run the Reviewer with the module diff inlined. aider runs single-shot and
+# cannot run `git diff` itself, so the orchestrator (sole Git owner) generates
+# the diff on the host – after stage_untracked, so new files appear in full –
+# and embeds it in the prompt.
+run_review() {
+  # run_review <module-id>
+  local module_id="$1"
+  local tag="module-start-$module_id"
+  local diff_text
+  if git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    diff_text="$(git -C "$WORKSPACE" diff --no-color "$tag")"
+  else
+    diff_text="$(git -C "$WORKSPACE" diff --no-color)"
+  fi
+  local prompt
+  prompt="$(cat <<EOF
+Read the attached .agent/skills/reviewer.md and review the module diff below against its checklist and the attached .agent/rules/architecture.md.
+
+The diff was generated on the host with 'git diff $tag' (new files appear in full via intent-to-add). You cannot run commands; this diff and the attached files are your complete evidence. End your response with a single verdict line that is exactly 'VERDICT: PASS' or 'VERDICT: FAIL' (list specific issues above it if it fails).
+
+----- BEGIN MODULE DIFF -----
+$diff_text
+----- END MODULE DIFF -----
+EOF
+)"
+  run_agent "$REVIEWER_PROFILE" ask ro "$prompt" \
+    "--read:.agent/rules/architecture.md" \
+    "--read:.agent/skills/reviewer.md"
+}
+
 cmd_write() {
+  local module_id="${1:-}"
+  [ -n "$module_id" ] || { echo 'usage: dev.sh write <module-id> "<task>"'; return 1; }
+  shift || true
   local task="$*"
-  [ -n "$task" ] || { echo 'usage: dev.sh write "<task>"'; return 1; }
+  [ -n "$task" ] || { echo 'usage: dev.sh write <module-id> "<task>"'; return 1; }
+  require_started "$module_id" || return 1
   preflight_llama_swap || return 1
-  run_agent "$CODER_PROFILE" "$(broadcast_prefix)$task" rw
+  local specs=()
+  mapfile -t specs < <(coder_file_specs "$module_id")
+  run_agent "$CODER_PROFILE" code rw "$(broadcast_prefix)$task" "${specs[@]}"
 }
 
 cmd_review() {
@@ -487,9 +599,8 @@ cmd_review() {
       return 1
     fi
   fi
-  local task="Read .cline/skills/reviewer.md. Run 'git diff module-start-$module_id' in the terminal to see the actual changes (fall back to plain 'git diff' if that tag doesn't exist), then review against reviewer.md's checklist. End your response with a single verdict line that is exactly 'VERDICT: PASS' or 'VERDICT: FAIL' (list specific issues above it if it fails)."
   preflight_llama_swap || return 1
-  run_agent "$REVIEWER_PROFILE" "$task" ro
+  run_review "$module_id"
 }
 
 cmd_test() {
@@ -568,14 +679,18 @@ $feedback"
 
     echo ""
     echo "==> Pass $attempt: WRITE"
+    # Recompute the attachment set every attempt: files the Coder created in a
+    # previous attempt now exist and must be attached editable to be edited.
+    local specs=()
+    mapfile -t specs < <(coder_file_specs "$module_id")
     local write_out
-    write_out=$(run_agent "$CODER_PROFILE" "$(broadcast_prefix)$task" rw 2>&1) || true
+    write_out=$(run_agent "$CODER_PROFILE" code rw "$(broadcast_prefix)$task" "${specs[@]}" 2>&1) || true
     echo "$write_out"
 
     if echo "$write_out" | grep -qiE "spec is ambiguous|architecture\.md doesn't say|I don't know (whether|if)|the specification doesn't say"; then
       echo ""
       echo "WARNING: Spec gap suspected – inspect the Coder output above."
-      echo "  Consider revising .cline/rules/architecture.md before the next iteration."
+      echo "  Consider revising .agent/rules/architecture.md before the next iteration."
     fi
 
     echo ""
@@ -597,13 +712,13 @@ $(echo "$scope_out" | tail -n "$FEEDBACK_MAX_LINES")"
     echo "==> Pass $attempt: REVIEW"
     # Files were already staged by scope_check so the reviewer's diff sees them.
     local review_out
-    review_out=$(run_agent "$REVIEWER_PROFILE" "Read .cline/skills/reviewer.md. Run 'git diff module-start-$module_id' (fall back to 'git diff' if that tag doesn't exist) and review against reviewer.md's checklist. End your response with a single verdict line that is exactly 'VERDICT: PASS' or 'VERDICT: FAIL' (list specific issues above it if it fails)." ro 2>&1) || true
+    review_out=$(run_review "$module_id" 2>&1) || true
     echo "$review_out"
 
-    # Fail-closed: only the LAST 'VERDICT:' line counts, and it must be exactly
-    # 'VERDICT: PASS'. A pass verdict quoted earlier in prose, in the echoed
-    # prompt, or inside a code comment in the diff cannot wave the module
-    # through; a missing or garbled verdict fails.
+    # Fail-closed: only an exactly-once 'VERDICT: PASS' line counts. A pass
+    # verdict quoted earlier in prose, in the echoed prompt, or inside a code
+    # comment in the diff cannot wave the module through; a missing, duplicated
+    # or garbled verdict fails.
     if [ "$(parse_verdict "$review_out")" != "PASS" ]; then
       echo ""
       echo "==> Review FAILED – back to Write (no Test run this iteration)."
@@ -662,7 +777,7 @@ $(echo "$test_out" | tail -n "$FEEDBACK_MAX_LINES")"
   echo "  (1) dev.sh escalate $module_id $test_log                          # frontier PLAN (no --override)"
   echo "  (2) dev.sh escalate $module_id $test_log --override               # deliberate 2nd plan after review"
   echo "  (3) dev.sh escalate $module_id $test_log --override --write-code   # frontier writes the fix"
-  echo "  (4) Revise .cline/rules/architecture.md for this module"
+  echo "  (4) Revise .agent/rules/architecture.md for this module"
   echo "  (5) dev.sh reset $module_id"
   echo ""
   echo "The script will not proceed automatically."
@@ -856,7 +971,7 @@ cmd_status() {
 # file — code that no module owns and no scope gate protects — is caught.
 # Prints orphaned paths and returns 1 if any exist.
 all_manifest_paths() {
-  local spec="$WORKSPACE/.cline/rules/architecture.md"
+  local spec="$WORKSPACE/.agent/rules/architecture.md"
   [ -f "$spec" ] || return 0
   awk '
     /^###[[:space:]]+(Implementation files|Shared integration files)([[:space:]]|$)/ { grab = 1; next }
@@ -875,7 +990,7 @@ cmd_check_coverage() {
 
   local allowed; allowed="$(all_manifest_paths)"
   if [ -z "$allowed" ]; then
-    echo "WARNING: no manifest paths found in .cline/rules/architecture.md; cannot check coverage." >&2
+    echo "WARNING: no manifest paths found in .agent/rules/architecture.md; cannot check coverage." >&2
     return 0
   fi
 
@@ -960,10 +1075,10 @@ cmd_notes() {
 
 stage_llm_test_files() {
   # Have the Coder author test files with the workspace mounted READ-ONLY and a
-  # separate writable /workspace/.cline-output. During generation the agent cannot write anywhere
-  # in the workspace at all – not src/, not other tests, not the existing
-  # contract suite. The host then validates what was produced and moves it into
-  # place, read-only.
+  # separate writable /staging directory as aider's working directory. During
+  # generation the agent cannot write anywhere in the workspace at all – not
+  # src/, not other tests, not the existing contract suite. The host then
+  # validates what was produced and moves it into place, read-only.
   #
   # Usage: stage_llm_test_files <destination_dir> <task> [exact_name]
   #
@@ -979,29 +1094,49 @@ stage_llm_test_files() {
   # the destination untouched.
   local destination_dir="$1" task="$2" exact_name="${3:-}"
   preflight_llama_swap || return 1
+  [ -f "$CODER_PROFILE/aider.conf.yml" ] || {
+    echo "ERROR: aider profile not found at $CODER_PROFILE – see SETUP_GUIDE.md Phase 7." >&2
+    return 1
+  }
   local staging
   staging=$(mktemp -d)
 
-  mkdir -p "$WORKSPACE/.cline-output"
+  local prompt_file
+  prompt_file="$(mktemp "${TMPDIR:-/tmp}/tenninety-prompt.XXXXXX")"
+  printf '%s\n' "$task" > "$prompt_file"
 
   local net_args; agent_net_args net_args
+  local rc=0
   docker run --rm -i \
-    -e GIT_OPTIONAL_LOCKS=0 \
-    -e CLINE_SESSION_BACKEND_MODE=local \
-    -e AI_SDK_LOG_WARNINGS=false \
+    -e OPENAI_API_BASE="$OPENAI_API_BASE" \
+    -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+    -w /staging \
     -v "$WORKSPACE:/workspace:ro" \
-    -v "$staging:/workspace/.cline-output:rw" \
-    -v "$CODER_PROFILE:$CONTAINER_CLINE" \
+    -v "$staging:/staging:rw" \
+    -v "$CODER_PROFILE:$CONTAINER_CONF:ro" \
+    -v "$prompt_file:/task.md:ro" \
     "${net_args[@]}" \
-    "$AGENT_IMAGE" "$task" </dev/null
-  local rc=$?
+    "$AGENT_IMAGE" \
+      --config "$CONTAINER_CONF/aider.conf.yml" \
+      --model-settings-file "$CONTAINER_CONF/model-settings.yml" \
+      --model-metadata-file "$CONTAINER_CONF/model-metadata.json" \
+      --message-file /task.md \
+      --no-git \
+      --yes-always \
+      --chat-history-file /tmp/aider-chat-history.md \
+      --input-history-file /tmp/aider-input-history \
+      --llm-history-file /tmp/aider-llm-history.txt \
+      --read /workspace/.agent/rules/architecture.md \
+      --read /workspace/.agent/skills/coder.md \
+      </dev/null || rc=$?
+  rm -f "$prompt_file"
   if [ "$rc" -ne 0 ]; then rm -rf "$staging"; return "$rc"; fi
 
   local generated=()
-  while IFS= read -r f; do generated+=("$f"); done < <(find "$staging" -maxdepth 1 -type f -name '*.cs' | sort)
+  while IFS= read -r f; do generated+=("$f"); done < <(find "$staging" -type f -name '*.cs' | sort)
 
   if [ "${#generated[@]}" -eq 0 ]; then
-    echo "ERROR: the agent staged no .cs files in /workspace/.cline-output."
+    echo "ERROR: the agent staged no .cs files in /staging."
     rm -rf "$staging"
     return 1
   fi
@@ -1011,8 +1146,8 @@ stage_llm_test_files() {
   for f in "${generated[@]}"; do
     base=$(basename "$f")
     if [ -n "$exact_name" ] && { [ "${#generated[@]}" -ne 1 ] || [ "$base" != "$exact_name" ]; }; then
-      echo "ERROR: expected exactly /workspace/.cline-output/$exact_name; got:"
-      find "$staging" -maxdepth 1 -type f -printf '  %f\n'
+      echo "ERROR: expected exactly /staging/$exact_name; got:"
+      find "$staging" -type f -printf '  %P\n'
       rm -rf "$staging"
       return 1
     fi
@@ -1052,7 +1187,7 @@ cmd_write_contract() {
   # exposes, so the agent derives one contract file per entry point rather than
   # having a single name imposed on it. The write-once guarantee is enforced
   # per file inside stage_llm_test_files.
-  local task="Read .cline/rules/architecture.md and .cline/skills/coder.md. Locate the module manifest whose Module ID is exactly '$module_id'; that manifest is the authoritative scope. Identify every public entry point the manifest documents for this module – a type that consumers outside the module call directly. For EACH entry point, write one xUnit contract test file to /workspace/.cline-output/ named <TypeName>Tests.cs (PascalCase type name, no other files). Do not create a file for types that are only reachable through another entry point. In each file, check every documented public type, constructor, method overload, generic arity, parameter name/type/order, return type, nullability, property type and relevant static/instance distinction for that entry point. Use exact reflection lookups with parameter-type arrays; never use GetMethod(name) alone when overloads are possible. Add [Trait(\"Category\", \"Contract\")] to every test. If a contract test for an entry point already exists in the repository, do not write that file again. Do not write implementation code. Do not modify anything under /workspace except /workspace/.cline-output."
+  local task="Read the attached .agent/rules/architecture.md and .agent/skills/coder.md. Locate the module manifest whose Module ID is exactly '$module_id'; that manifest is the authoritative scope. Identify every public entry point the manifest documents for this module – a type that consumers outside the module call directly. For EACH entry point, create one NEW xUnit contract test file in the current directory named <TypeName>Tests.cs (PascalCase type name, bare filename, no directories, no other files). Do not create a file for types that are only reachable through another entry point. In each file, check every documented public type, constructor, method overload, generic arity, parameter name/type/order, return type, nullability, property type and relevant static/instance distinction for that entry point. Use exact reflection lookups with parameter-type arrays; never use GetMethod(name) alone when overloads are possible. Add [Trait(\"Category\", \"Contract\")] to every test. If a contract test for an entry point already exists in the repository (see /workspace/tests), do not write that file again. Do not write implementation code. Write files ONLY into the current directory; the workspace under /workspace is mounted read-only."
 
   stage_llm_test_files "$destination" "$(broadcast_prefix)$task"
 }
@@ -1130,13 +1265,13 @@ cmd_help() {
   echo "dev.sh version $DEV_SH_VERSION"
   echo ""
   cat <<'EOF'
-dev.sh – orchestrator for the local coding loop (C# / .NET)
+dev.sh – orchestrator for the local coding loop (C# / .NET, aider runtime)
 
 Usage: dev.sh <subcommand> [args]
 
 Subcommands:
   start <module-id>                          Create module-start-<module-id> tag (needs clean tree)
-  write "<task>"                        Run the Coder with a task
+  write <module-id> "<task>"                 Run the Coder with a task
   review [module-id]                         Run the Reviewer on the current diff
   test <module-id>                           Run the fast test tier
   iterate <module-id> "<task>"               Full loop: write->review->test (3 attempts)
@@ -1162,7 +1297,7 @@ Subcommands:
 Example workflow for a new module:
   dev.sh start <module-id>
   dev.sh write-contract <module-id>
-  dev.sh iterate <module-id> "Implement the complete <ModuleName> module (Module ID: <module-id>) exactly as defined in .cline/rules/architecture.md. Create or edit only the files listed in that module manifest."
+  dev.sh iterate <module-id> "Implement the complete <ModuleName> module (Module ID: <module-id>) exactly as defined in .agent/rules/architecture.md. Create or edit only the files listed in that module manifest."
   dev.sh finalise <module-id>
   dev.sh queue <module-id>
 

@@ -59,21 +59,21 @@ To run both the local Coder and Reviewer models on-premises without cloud API co
     - **OS:** The step-by-step commands in this guide are written and tested for **Arch-based Linux (CachyOS)** on an **AMD RX 7900 XTX**. They use Arch-specific tooling throughout — `pacman`, the AUR (`paru`), ROCm, `ufw`, and the Fish shell. The *architecture* (governance hooks, container sandboxing, deterministic gates) is OS- and hardware-agnostic, but the concrete commands are not: on macOS, other Linux distributions, or Windows/WSL2 you will need to translate package installs and the GPU runtime yourself (e.g. Homebrew + Metal on macOS, `apt` + CUDA on Ubuntu/NVIDIA, skipping the ROCm phase where it doesn't apply). Treat this guide as a reference implementation to adapt, not a portable script.
     - **Containerisation:** Docker Engine with non-root user mapping and volume-mount permissions.
     - **Local inference server:** A backend capable of memory-resident model swapping (e.g., `llama-swap`, `llama.cpp`, or `Ollama`) configured to bind to port `8090`.
-    - **Host tooling:** Git, Node.js (v22+), Python 3.11+, and your target engineering SDK (.NET 10.x.x, Node, Python, etc.).
+    - **Host tooling:** Git, Python 3.11+, and your target engineering SDK (.NET 10.x.x).
     - **Cloud access:** An OpenRouter API key (or equivalent OpenAI-compatible endpoint) with access to a high-reasoning frontier model (e.g., Claude Opus) for specification authoring (working guide, Phase 10) and structured escalation.
 
 ### What works regardless (platform and hardware agnostic)
 
 Even if your setup differs from the target hardware above, such as developing on a laptop without a discrete GPU, using a different operating system, or targeting a different programming language, the core *architecture* remains fully functional — though on a non-Arch platform you will have to translate the concrete install commands in this guide (see the OS note above). What is portable is the design:
 - **The mechanical governance and hooks:** The pre-commit verification scripts and AST signature-drift rules execute entirely on the host CPU and work across all OS environments.
-- **Container sandboxing:** The zero-trust container boundaries (`cline-sandboxed` and `test-runner`), read-only bind mounts (`:ro`), and locked dependency manifests will enforce supply-chain security on any machine running Docker.
+- **Container sandboxing:** The zero-trust container boundaries (`aider-sandboxed` and `test-runner`), read-only bind mounts (`:ro`), and locked dependency manifests will enforce supply-chain security on any machine running Docker.
 - **Deterministic test gates:** The rule of _"Zero AI at test runtime"_ holds universally. The host-driven test orchestration, contract testing, and golden-fixture harnesses rely purely on standard compiler SDKs.
 - **Flexible compute routing:** If your local machine lacks 24 GB of VRAM, you can easily shift the 10/90 compute ratio. The orchestration scripts can be pointed to smaller local models (e.g., 8B parameter models), CPU/Vulkan fallbacks, or even external cloud API endpoints for the coding and review passes without altering the repository's rules or workflow.
 
 ---
 ### A note on software staleness
 
-Package names, container image tags, and command-line interface flags for fast-moving projects, including ROCm, `llama.cpp`, `llama-swap`, Cline, OpenRouter's model catalogue, and the .NET SDK, shift regularly. The configurations in this repository reflect the current state as of mid-2026. If a package build fails or a specific runtime flag is rejected, check `--help` on the local binary or consult the upstream project documentation.
+Package names, container image tags, and command-line interface flags for fast-moving projects, including ROCm, `llama.cpp`, `llama-swap`, aider, OpenRouter's model catalogue, and the .NET SDK, shift regularly. The configurations in this repository reflect the current state as of mid-2026. If a package build fails or a specific runtime flag is rejected, check `--help` on the local binary or consult the upstream project documentation.
 
 ---
 
@@ -82,7 +82,7 @@ Package names, container image tags, and command-line interface flags for fast-m
 ```
 ┌──────────────────────┐        one-time authoring        ┌──────────────────────────┐
 │  Frontier model      │ ───────────────────────────────▶│  Rules + skills under    │
-│  (via OpenRouter –   │       + on-demand escalation     │  .cline/                 │
+│  (via OpenRouter –   │       + on-demand escalation     │  .agent/                 │
 │  model chosen by you)│     (+ --write-code tier for     │                          │
 └──────────────────────┘      genuinely stuck pieces)     └──────────────────────────┘
                                                                       │
@@ -97,7 +97,7 @@ Package names, container image tags, and command-line interface flags for fast-m
                                                                       │
                                                                       ▼
                                                           ┌──────────────────────────┐
-                                                          │  Cline CLI, inside a     │
+                                                          │  aider CLI, inside a     │
                                                           │  Docker sandbox          │
                                                           │  (tests/contracts and    │
                                                           │   tests/fixtures :ro)    │
@@ -130,7 +130,7 @@ Package names, container image tags, and command-line interface flags for fast-m
 - [ ] An OpenRouter account and API key (openrouter.ai/keys)
 - [ ] BIOS: confirm the RX 7900 XTX is the primary GPU
 - [ ] Konsole terminal running Fish shell
-- [ ] Node.js 22+ available (required for the Cline CLI installed in Phase 6)
+- [ ] Python 3.11+ available (needed in Phase 8 for the escalation script and pre-commit; the aider CLI itself runs inside its container)
 - [ ] This repository cloned to `~/tenninetydotnet` (see *Path conventions* above)
 
 ---
@@ -142,7 +142,7 @@ Open a terminal. This phase only requires a single terminal window.
 ```bash
 sudo pacman -Syu
 sudo pacman -S --needed base-devel git wget curl cmake ninja \
-  unzip jq nodejs npm ripgrep nano
+  unzip jq ripgrep nano python-pip
 ```
 
 If you have not already cloned this repository, do it now. Every `cp starter-kit/...` and `cp examples/...` command in later phases is run from inside this clone:
@@ -522,10 +522,10 @@ to your LAN.
 
 The framework uses two isolated Docker containers:
 
-- **`cline-sandboxed`** – executes the AI coding agent. Needs Node (for Cline) and git (so the agent can run `git diff` to inspect its own changes, but it does **not** commit; the orchestrator owns all Git state). It does **not** get the .NET SDK, test tools, Docker access, or any API keys.
+- **`aider-sandboxed`** – executes the AI coding agent. Needs Python (for the aider CLI) and git (so the agent can run `git diff` read-only if a prompt ever tells it to, but it does **not** commit; the orchestrator owns all Git state). It does **not** get the .NET SDK, test tools, Docker access, or any API keys.
 - **`test-runner`** – executes deterministic builds and tests. Contains the .NET 10 SDK and mounts the workspace read-write, but has no LLM tooling. Test execution is split in two: `dotnet restore --locked-mode` runs with network access to populate the NuGet cache (no test code runs in this step), then `dotnet build` and `dotnet test` run in a second invocation with `--network=none`, so the arbitrary Coder-written code that executes during build and test has no network at all and cannot exfiltrate the workspace or reach a model.
 
-Both images run as a **non-root user whose UID/GID match your host user**, baked in at build time. This keeps agent-created files (and `bin/`, `obj/`, test output) owned by you on the host, keeps file permissions meaningful, and, since the container user isn't root, a bind mount marked `:ro` can't be written through with root's mode-bit override. The real immutability boundary remains the Docker `:ro` mount; non-root is what stops the guarantees from being quietly defeated. Because the user has a real home directory in the image, the Cline profile mounts cleanly at `$HOME/.cline` with nothing else to work around.
+Both images run as a **non-root user whose UID/GID match your host user**, baked in at build time. This keeps agent-created files (and `bin/`, `obj/`, test output) owned by you on the host, keeps file permissions meaningful, and, since the container user isn't root, a bind mount marked `:ro` can't be written through with root's mode-bit override. The real immutability boundary remains the Docker `:ro` mount; non-root is what stops the guarantees from being quietly defeated. Because the user has a real home directory in the image, the aider profile mounts cleanly at `/conf` with nothing else to work around.
 
 The images are **machine-global**: Docker stores them by tag, every project on this machine uses the same two images, and you only rebuild if a Dockerfile changes. Build them directly from your clone of this repository. No project directory is needed at this stage. The `$(...)` substitutions below work identically in Fish (3.4+) and Bash:
 
@@ -534,7 +534,7 @@ cd ~/tenninetydotnet
 docker build \
   --build-arg HOST_UID=$(id -u) \
   --build-arg HOST_GID=$(id -g) \
-  -t cline-sandboxed -f starter-kit/Dockerfile.cline .
+  -t aider-sandboxed -f starter-kit/Dockerfile.aider .
 
 docker build \
   --build-arg HOST_UID=$(id -u) \
@@ -545,69 +545,81 @@ docker build \
 Verify both builds returned valid binaries:
 
 ```bash
-docker run --rm cline-sandboxed --version
-docker run --rm --entrypoint git cline-sandboxed --version
+docker run --rm aider-sandboxed --version
+docker run --rm --entrypoint git aider-sandboxed --version
 docker run --rm test-runner dotnet --version
 ```
 
-The `test-runner` command must print `10.x.x`. The other two commands must print valid Cline and Git versions.
+The `test-runner` command must print `10.x.x`. The other two commands must print valid aider and Git versions.
 
 ---
 
-## Phase 7 – Point Cline at both local models
+## Phase 7 – Point aider at both local models
+
+aider is configured with plain YAML/JSON files, not an interactive login. The
+starter kit ships one ready-made profile per role under `starter-kit/aider-conf/`;
+install them as your two machine-global profile directories:
 
 ```bash
-mkdir -p ~/.cline-coder ~/.cline-reviewer
-
-docker run --rm -it \
-  -v ~/.cline-coder:/home/node/.cline \
-  --add-host host.docker.internal:host-gateway \
-  cline-sandboxed auth
+mkdir -p ~/.aider-coder ~/.aider-reviewer
+cd ~/tenninetydotnet
+cp starter-kit/aider-conf/coder/aider.conf.yml \
+   starter-kit/aider-conf/coder/model-settings.yml \
+   starter-kit/aider-conf/coder/model-metadata.json \
+   ~/.aider-coder/
+cp starter-kit/aider-conf/reviewer/aider.conf.yml \
+   starter-kit/aider-conf/reviewer/model-settings.yml \
+   starter-kit/aider-conf/reviewer/model-metadata.json \
+   ~/.aider-reviewer/
 ```
 
-This opens an interactive menu. **Do not pick any of the first three options.**
+Each profile holds exactly three files:
 
-1. Press the down arrow three times to reach **"Bring your own provider,"** then press Enter.
-2. From the provider list, choose **"OpenAI Compatible."**
-3. Fill in the three fields **exactly in this order**:
-   - Base URL: `http://host.docker.internal:8090/v1`
-   - Azure API Version: leave this **empty**
-   - API key: `local-llm`
+- `aider.conf.yml` – which model to use, plus non-interactive defaults
+  (`yes-always`, no auto-commits, no repo map, no update checks or analytics).
+- `model-settings.yml` – behaviour overrides for models aider's registry
+  doesn't know (edit format, no client-side temperature).
+- `model-metadata.json` – context-window and cost metadata for those models.
 
-4. Press Enter to save. Set **Model ID** to `qwen-coder`.
-
-Repeat the configuration for the reviewer profile:
+**Check the model ids.** The part after `openai/` in each `model:` line must
+exactly match a model id in `~/llama-swap/config.yaml`:
 
 ```bash
-docker run --rm -it \
-  -v ~/.cline-reviewer:/home/node/.cline \
+grep -E '^(weak-)?model:' ~/.aider-coder/aider.conf.yml ~/.aider-reviewer/aider.conf.yml
+grep -E '^  [a-z]' ~/llama-swap/config.yaml
+```
+
+The first command must print `openai/qwen-coder` for the coder profile and
+`openai/devstral-reviewer` for the reviewer profile, and the second must list
+`qwen-coder:` and `devstral-reviewer:` under `models:`. If your llama-swap ids
+differ, edit the `model:` and `weak-model:` lines in `aider.conf.yml` and the
+`name:` lines in `model-settings.yml` / `model-metadata.json` to match. Also
+confirm `max_input_tokens` in `model-metadata.json` does not exceed each
+model's `-c` value in the llama-swap config.
+
+**Smoke-test each profile with a real completion.** This starts the model (the
+first call may take minutes while llama-swap loads weights) and proves the
+profile, the endpoint and the model id all line up:
+
+```bash
+docker run --rm \
+  -v ~/.aider-coder:/conf:ro \
   --add-host host.docker.internal:host-gateway \
-  cline-sandboxed auth
+  -e OPENAI_API_BASE=http://host.docker.internal:8090/v1 \
+  -e OPENAI_API_KEY=local-llm \
+  aider-sandboxed \
+  --config /conf/aider.conf.yml \
+  --model-settings-file /conf/model-settings.yml \
+  --model-metadata-file /conf/model-metadata.json \
+  --no-git --yes-always --chat-mode ask \
+  --message "Reply with exactly OK"
 ```
 
-Same steps, but set **Model ID** to `devstral-reviewer`.
-
-**Verify that the profile is readable by the non-root container user.** Cline may store its configuration beneath a `data` subdirectory, so recursively list the mounted profile rather than checking only its top level:
-
-```fish
-docker run --rm \
-  -v ~/.cline-coder:/home/node/.cline \
-  --entrypoint find \
-  cline-sandboxed /home/node/.cline -maxdepth 5 -ls
-```
-
-The command should list `/home/node/.cline`, its `data` directory, and any files created by the `auth` step. The entries should be owned by `node:node`, and there should be no `Permission denied` errors.
-
-Repeat the check for the reviewer profile:
-
-```fish
-docker run --rm \
-  -v ~/.cline-reviewer:/home/node/.cline \
-  --entrypoint find \
-  cline-sandboxed /home/node/.cline -maxdepth 5 -ls
-```
-
-If either profile contains only empty directories and no files, rerun its `cline-sandboxed auth` command before continuing.
+Repeat the same command with `~/.aider-reviewer` mounted instead; the second
+call triggers a model swap. Each run must print a short reply containing `OK`.
+If aider reports the model is unknown or llama-swap returns a 404, the model id
+in the profile does not match the llama-swap config – fix the profile and retry
+before continuing.
 
 ---
 
@@ -700,10 +712,10 @@ Run this once at the end of machine setup. Every item must pass before starting 
 - [ ] `llama-swap` lists both `qwen-coder` and `devstral-reviewer` at `http://172.17.0.1:8090/v1/models` (the bridge-gateway bind, not `0.0.0.0`), **and** each returns a real completion from `/v1/chat/completions` (Phase 4.3) — listing alone does not prove a model loads
 - [ ] each model in `~/llama-swap/config.yaml` is served either by `-hf <repo>:<quant>` (convenient, not reproducibly pinned) or by a local `--model <path>.gguf` whose SHA-256 you have recorded (reproducibly pinned); no active line contains an unreplaced `<...>` placeholder
 - [ ] context window is 65536 for both models
-- [ ] both images build: `docker run --rm cline-sandboxed --version`, `docker run --rm --entrypoint git cline-sandboxed --version`, and `docker run --rm test-runner dotnet --version` all print versions
+- [ ] both images build: `docker run --rm aider-sandboxed --version`, `docker run --rm --entrypoint git aider-sandboxed --version`, and `docker run --rm test-runner dotnet --version` all print versions
 - [ ] both images run as non-root and create host-user-owned files: a file created inside a throwaway container's mounted directory is owned by you, not root
-- [ ] a throwaway container with `~/.cline-coder` mounted at `/home/node/.cline` can list the profile's files without permission errors and can reach `http://host.docker.internal:8090/v1/models`
-- [ ] a throwaway container with `~/.cline-reviewer` mounted resolves to `devstral-reviewer`, not `qwen-coder`
+- [ ] a throwaway container with `~/.aider-coder` mounted at `/conf` runs a real completion against `qwen-coder` (the Phase 7 smoke test) and can reach `http://host.docker.internal:8090/v1/models`
+- [ ] the `~/.aider-reviewer` profile resolves to `devstral-reviewer`, not `qwen-coder` (check its `aider.conf.yml`, or run the Phase 7 smoke test with it mounted)
 - [ ] the agent container sees only its mounted directories (not your host home, no Docker socket, no API keys)
 - [ ] `OPENROUTER_API_KEY` is available to `escalate.py` (via a mode-600 `.env` or an exported var) and `FRONTIER_MODEL` is set, and the Phase 8.3 `--dry-run` smoke test returned a real triage response without leaving artefacts in the clone
 - [ ] `dotnet script --version` and `pre-commit --version` both print versions in a fresh terminal
@@ -721,7 +733,9 @@ Run this once at the end of machine setup. Every item must pass before starting 
 | `cp: cannot stat 'starter-kit/...'`                                               | you're not inside your clone of this repo – `cd ~/tenninetydotnet` first (see *Path conventions*)                                 |
 | `(id -u)` syntax error in bash                                                    | the guide's build commands use `$(id -u)`, which works in bash and fish alike – check you copied the current version             |
 | ROCm doesn't see the GPU on CachyOS                                               | groups + reboot → `HIP_VISIBLE_DEVICES` → `HSA_OVERRIDE_GFX_VERSION` → fall back to Vulkan                                       |
-| Cline container can't reach llama-swap                                            | confirm `--add-host host.docker.internal:host-gateway`; confirm llama-swap bound to `172.17.0.1:8090` (the bridge gateway); check ufw rule for port 8090; in restricted mode confirm the `tenninety-agent` egress rule still allows 8090 |
+| aider container can't reach llama-swap                                            | confirm `--add-host host.docker.internal:host-gateway`; confirm llama-swap bound to `172.17.0.1:8090` (the bridge gateway); check ufw rule for port 8090; in restricted mode confirm the `tenninety-agent` egress rule still allows 8090 |
+| aider says the model is unknown, or llama-swap returns 404 for it                 | the `openai/<id>` in the profile's `aider.conf.yml` doesn't match the id in `~/llama-swap/config.yaml` – fix the profile (Phase 7) |
+| aider edits repeatedly "fail to apply"                                            | switch `edit_format` to `udiff` (or `whole`) in both `~/.aider-*/aider.conf.yml` and `~/.aider-*/model-settings.yml`             |
 | `docker run curlimages/curl ... host.docker.internal:8090` times out              | classic ufw rule missing – `sudo ufw status verbose` and check for port 8090                                                     |
 | `request exceeds available context size (32768 tokens)`                           | set `--ctx-size 65536` in `~/llama-swap/config.yaml`                                                                             |
 | Devstral review output looks garbled or loops                                     | fall back to `unsloth/Devstral-Small-2507-GGUF`                                                                                  |

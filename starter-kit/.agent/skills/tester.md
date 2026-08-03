@@ -5,6 +5,8 @@ build`, `dotnet test`, `dotnet restore`, or `dotnet format` yourself:
 none of them exist in your environment, and trying will only produce
 "command not found" errors.
 
+Tests exercise public contracts and observable module behaviour; they do not select or "test" individual production source files.
+
 Your responsibilities are exactly two:
 1. When a task hands you a test failure log, treat it as ground truth and
    fix the code it describes; do not dispute the log or attempt to

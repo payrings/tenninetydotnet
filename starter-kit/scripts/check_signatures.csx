@@ -74,11 +74,11 @@ changes = changes
 if (isStaged && changes.Count > 0)
 {
     var architectureStaged = GitLines("diff", "--cached", "--name-only")
-        .Contains(".cline/rules/architecture.md");
+        .Contains(".agent/rules/architecture.md");
 
     if (!architectureStaged)
     {
-        Console.WriteLine("BLOCK: a declared C# type/member signature changed without .cline/rules/architecture.md in the same commit.");
+        Console.WriteLine("BLOCK: a declared C# type/member signature changed without .agent/rules/architecture.md in the same commit.");
         Console.WriteLine("Changed API entries:");
         foreach (var change in changes)
             Console.WriteLine($"  {change.Signature}");

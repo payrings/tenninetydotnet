@@ -6,6 +6,51 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-03
+
+Agent runtime migrated from the Cline CLI to aider. `DEV_SH_VERSION` in
+`starter-kit/scripts/dev.sh` is `0.2.0`; tag this commit `v0.2.0` so the
+constant, the tag, and this entry agree.
+
+### Changed
+- **Agent runtime:** the Cline CLI (Node.js) is replaced by aider
+  (`aider-chat` 0.86.2, Python). `starter-kit/Dockerfile.cline` is removed and
+  replaced by `starter-kit/Dockerfile.aider`; the agent image is renamed
+  `cline-sandboxed` → `aider-sandboxed`.
+- **Spec/skills directory renamed** `.cline/` → `.agent/`; every script, hook,
+  template, and guide now reads from `.agent/rules/architecture.md` and
+  `.agent/skills/`.
+- **`dev.sh` agent invocations** are now single-shot `aider --message-file`
+  calls with fully explicit context: the spec and skill files are attached
+  (`--read`), the module's manifest files are attached editable to the Coder,
+  and the module diff is generated on the host and inlined into the Reviewer's
+  prompt (aider is single-shot, not agentic – nothing is auto-loaded).
+- **`dev.sh write` now requires a Module ID**: `dev.sh write <module-id>
+  "<task>"`, so the manifest's files can be attached to the Coder call.
+- **`write-contract` staging** now uses an out-of-workspace `/staging` working
+  directory instead of the in-workspace `.cline-output` directory.
+- **Machine profiles** are now plain YAML/JSON at `~/.aider-coder` and
+  `~/.aider-reviewer` (installed from `starter-kit/aider-conf/`), mounted
+  read-only at `/conf`; the interactive `cline auth` step is gone.
+- **Host requirements:** Node.js is no longer required on the host (aider runs
+  inside its container).
+
+### Added
+- `starter-kit/Dockerfile.aider` (Python 3.12 + `aider-chat` 0.86.2, non-root
+  UID/GID mapping, `aider-sandboxed` image).
+- `starter-kit/aider-conf/coder/` and `starter-kit/aider-conf/reviewer/`
+  profile templates (`aider.conf.yml`, `model-settings.yml`,
+  `model-metadata.json`), installed to `~/.aider-coder` / `~/.aider-reviewer`
+  in SETUP_GUIDE Phase 7 and mounted read-only at `/conf`.
+- Explicit per-call context assembly in `dev.sh`: spec + skills attached, the
+  target module's manifest files attached editable to the Coder, and the
+  host-generated module diff inlined into the Reviewer prompt.
+
+### Removed
+- `starter-kit/Dockerfile.cline` and the Cline CLI runtime (and with it the
+  host Node.js requirement and the interactive `cline auth` profile setup).
+- `starter-kit/.cline/` (renamed to `starter-kit/.agent/`).
+
 ## [0.1.0] - 2026-07-21
 
 Initial public release. `DEV_SH_VERSION` in `starter-kit/scripts/dev.sh` is
@@ -32,5 +77,6 @@ Initial public release. `DEV_SH_VERSION` in `starter-kit/scripts/dev.sh` is
 - CI (ShellCheck, `bash -n`, markdown link check, Python compile, and a hermetic
   scaffold smoke test) and this changelog.
 
-[Unreleased]: https://github.com/payrings/tenninetydotnet/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/payrings/tenninetydotnet/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/payrings/tenninetydotnet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/payrings/tenninetydotnet/releases/tag/v0.1.0

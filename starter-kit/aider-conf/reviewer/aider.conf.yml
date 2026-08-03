@@ -1,0 +1,30 @@
+# aider profile for the Reviewer role – mounted read-only at /conf by dev.sh and
+# selected with `--config /conf/aider.conf.yml`.
+#
+# The part after `openai/` MUST exactly match the model id in
+# ~/llama-swap/config.yaml. aider routes `openai/*` models to the
+# OpenAI-compatible endpoint in OPENAI_API_BASE (set by dev.sh).
+model: openai/devstral-reviewer
+weak-model: openai/devstral-reviewer
+
+# Search/replace edit blocks; the most robust format for 24–27B local models.
+# If edits repeatedly fail to apply, try `udiff` or `whole` here AND in
+# model-settings.yml.
+edit-format: diff
+
+# Non-interactive, single-shot operation under dev.sh:
+yes-always: true            # never prompt; dev.sh runs aider unattended
+auto-commits: false         # the orchestrator owns all Git state
+auto-lint: false            # lint/build/test happen in host-side gates
+auto-test: false
+suggest-shell-commands: false
+map-tokens: 0               # no repo map – the spec is the context
+timeout: 900                # first call after a model swap can block for minutes
+
+# Keep the sandbox quiet and offline except for the model endpoint:
+check-update: false
+show-release-notes: false
+analytics: false
+notifications: false
+pretty: false
+fancy-input: false

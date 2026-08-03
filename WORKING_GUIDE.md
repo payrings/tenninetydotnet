@@ -1,7 +1,7 @@
 # 10/90 .NET – Working Guide
 ## Per-project operations (Phases 9–13)
 
-This guide covers everything you repeat **for each project** built with the 10/90 framework: scaffolding the solution, installing the frontier-authored specification, running the module loop, and reviewing the queue. It assumes the machine has already passed the **setup verification checklist** at the end of `SETUP_GUIDE.md` (Phases 0–8). That checklist covers the GPU runtime, `llama-swap` serving both models, both Docker images, both Cline profiles, frontier access, and host tooling. Nothing from that guide is repeated per project.
+This guide covers everything you repeat **for each project** built with the 10/90 framework: scaffolding the solution, installing the frontier-authored specification, running the module loop, and reviewing the queue. It assumes the machine has already passed the **setup verification checklist** at the end of `SETUP_GUIDE.md` (Phases 0–8). That checklist covers the GPU runtime, `llama-swap` serving both models, both Docker images, both aider profiles, frontier access, and host tooling. Nothing from that guide is repeated per project.
 
 Phase numbering continues from the setup guide (starting at 9) so cross-references from other documents remain stable.
 
@@ -28,7 +28,7 @@ Replace `[ProjectName]` throughout the documentation and starter-kit manifests w
 ├── REVIEW_QUEUE.md                    # Phase 9.3 – consumed by Phases 11–12
 ├── BROADCAST.md                       # Phase 11 – broadcast notes to Coders
 ├── review-feedback/                   # Phase 9.3 – populated as modules get rejected (Phase 12)
-├── .cline/
+├── .agent/
 │   ├── rules/
 │   │   ├── architecture.md            # Phase 10 – full blueprint + interface change policy
 │   │   └── architecture.original.md   # Phase 10 – frozen audit-trail copy
@@ -237,10 +237,10 @@ prefer `$PATH`, keep only the active project's scripts on it
 
 This phase requires a one-time authoring session with your frontier model. Use the blueprint prompt template in **Appendix A** to generate five essential blocks of text:
 
-1. `.cline/rules/architecture.md` – the single architectural specification
-2. `.cline/skills/coder.md` – must name every approved NuGet package explicitly (package and version); this becomes `Directory.Packages.props`.
-3. `.cline/skills/reviewer.md`
-4. `.cline/skills/tester.md`
+1. `.agent/rules/architecture.md` – the single architectural specification
+2. `.agent/skills/coder.md` – must name every approved NuGet package explicitly (package and version); this becomes `Directory.Packages.props`.
+3. `.agent/skills/reviewer.md`
+4. `.agent/skills/tester.md`
 5. A golden test fixture saved to `tests/fixtures/critical_logic_golden.json`
 
 ### 10.1 – Copy the specification templates and populate them
@@ -249,21 +249,21 @@ The starter kit ships annotated template versions of every specification file, s
 
 ```bash
 cd ~/tenninetydotnet
-cp -r starter-kit/.cline ~/project/workspace/.cline
+cp -r starter-kit/.agent ~/project/workspace/.agent
 ```
 
 Now open each file and paste in the corresponding frontier-authored block, following the placeholder comments inside each template:
 
 ```bash
 cd ~/project/workspace
-nano .cline/rules/architecture.md
-nano .cline/skills/coder.md
-nano .cline/skills/reviewer.md
-nano .cline/skills/tester.md
+nano .agent/rules/architecture.md
+nano .agent/skills/coder.md
+nano .agent/skills/reviewer.md
+nano .agent/skills/tester.md
 nano tests/fixtures/critical_logic_golden.json
 ```
 
-Paste the architecture text directly into `.cline/rules/architecture.md`. It is the only architectural source of truth, so there is no duplicate copy and no synchronisation step.
+Paste the architecture text directly into `.agent/rules/architecture.md`. It is the only architectural source of truth, so there is no duplicate copy and no synchronisation step.
 
 ### 10.2 – Freeze the fixture and the audit-trail copies
 
@@ -271,8 +271,8 @@ Lock your golden fixture and create frozen audit-trail copies of your specificat
 
 ```bash
 chmod 444 ~/project/workspace/tests/fixtures/critical_logic_golden.json
-cp ~/project/workspace/.cline/rules/architecture.md ~/project/workspace/.cline/rules/architecture.original.md
-chmod 444 ~/project/workspace/.cline/rules/architecture.original.md
+cp ~/project/workspace/.agent/rules/architecture.md ~/project/workspace/.agent/rules/architecture.original.md
+chmod 444 ~/project/workspace/.agent/rules/architecture.original.md
 ```
 
 ### 10.3 – Finalise packages and regenerate lockfiles
@@ -334,9 +334,9 @@ The final command should produce no output.
 
 ## Phase 11 – Kick off the local loop using the orchestrator
 
-Make sure `llama-swap` is active (`curl -s http://localhost:8090/v1/models`), Docker is up (`docker ps`), and the workspace has a clean tree on top of the Phase 10.4 initial commit (`git status --short` prints nothing).
+Make sure `llama-swap` is active (`curl -s http://172.17.0.1:8090/v1/models`), Docker is up (`docker ps`), and the workspace has a clean tree on top of the Phase 10.4 initial commit (`git status --short` prints nothing).
 
-Each module moves through an automated development loop managed by `dev.sh`. Every step uses the module's **Module ID** from `.cline/rules/architecture.md`. Copy that ID exactly; do not invent a new ID and do not substitute a source filename. Module IDs are lowercase kebab-case identifiers such as `invoice-calculator` or `user-auth`, and one ID may cover several related source files.
+Each module moves through an automated development loop managed by `dev.sh`. Every step uses the module's **Module ID** from `.agent/rules/architecture.md`. Copy that ID exactly; do not invent a new ID and do not substitute a source filename. Module IDs are lowercase kebab-case identifiers such as `invoice-calculator` or `user-auth`, and one ID may cover several related source files.
 
 ### 11.1 – Start a new module
 
@@ -390,7 +390,7 @@ the model has failed to start. This is not an active download.
 Stop the waiting command by pressing `Ctrl+C` once. Then verify the Coder model directly:
 
 ```fish
-curl -sS http://localhost:8090/v1/chat/completions \
+curl -sS http://172.17.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "qwen-coder",
@@ -432,7 +432,7 @@ dev.sh start <module-id>
 
 The module start tag was already created successfully. Running `write-contract` again after an interrupted or failed model request is sufficient.
 
-The workspace and all existing tests are mounted read-only. The Coder writes generated contract tests into isolated temporary staging. Only after the Coder exits successfully does the host validate the generated files, move them into the Contracts project, and make them read-only with `chmod 444`.
+The workspace and all existing tests are mounted read-only. The Coder writes generated contract tests into an isolated temporary staging directory outside the workspace. Only after the Coder exits successfully does the host validate the generated files, move them into the Contracts project, and make them read-only with `chmod 444`.
 
 A failed or interrupted Coder run should not install a partial contract test. Check the Contracts project after an interrupted run:
 
@@ -480,7 +480,7 @@ Confirm that the golden harness:
 Execute the write, review and fast-test cycle (up to three automated attempts):
 
 ```fish
-dev.sh iterate <module-id> "Implement the complete <ModuleName> module (Module ID: <module-id>) exactly as defined in .cline/rules/architecture.md. Create or edit only the files listed in that module manifest."
+dev.sh iterate <module-id> "Implement the complete <ModuleName> module (Module ID: <module-id>) exactly as defined in .agent/rules/architecture.md. Create or edit only the files listed in that module manifest."
 ```
 
 This runs the full Write → Review → Test loop, up to 3 attempts:
@@ -515,9 +515,9 @@ covers tracked, staged and untracked content, so any edit invalidates every gate
 the module had already earned.
 
 **Interface changes are gated on you, not the Coder.** The pre-commit
-signature-drift hook only checks that `.cline/rules/architecture.md` was edited
+signature-drift hook only checks that `.agent/rules/architecture.md` was edited
 in the same diff as a signature change — a condition the Coder can satisfy by
-itself. So if a module's diff touches `.cline/rules/architecture.md`, both
+itself. So if a module's diff touches `.agent/rules/architecture.md`, both
 `finalise` and `commit` refuse and print the change against the frozen
 `architecture.original.md`. Review it, confirm it had the frontier-model review
 the interface change policy requires, then re-run with the explicit flag:
@@ -604,7 +604,7 @@ moved – re-test), `approved` (human approved).
 
 ### 12.2 – Reviewing a queued module
 
-Work through `REVIEW_QUEUE.md` whenever you have time, in the build order from `.cline/rules/architecture.md`.
+Work through `REVIEW_QUEUE.md` whenever you have time, in the build order from `.agent/rules/architecture.md`.
 
 **Satisfied?** Run the approval command:
 
@@ -640,7 +640,7 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 - [ ] the golden harness (in the Golden project) executes every case in `critical_logic_golden.json` and fails on a missing entry point or duplicate case ID
 - [ ] `dev.sh help` lists `finalise`, `write-golden-harness`, and `show-frontier-fix`
 - [ ] `pre-commit` blocks a deliberately-added raw SQL line in a `.cs` file (and ignores `bin/`/`obj/`)
-- [ ] `pre-commit` blocks a signature change in `src/` without `.cline/rules/architecture.md` in the same commit
+- [ ] `pre-commit` blocks a signature change in `src/` without `.agent/rules/architecture.md` in the same commit
 - [ ] `Directory.Packages.props`, Contracts, Golden, fixtures, and the frozen `.original.md` files are all mounted `:ro` to agents; agent-visible `.git` is read-only
 - [ ] `run_tests_with_cascade_check.sh` runs `dotnet build`/`dotnet test` with `--network=none` (a test that attempts an outbound connection fails), while `dotnet restore --locked-mode` runs in a separate networked step
 - [ ] `run_tests_with_cascade_check.sh` runs from the host inside `test-runner`, treats the container exit code as authoritative, and prints deliberate escalation instructions (it does NOT auto-escalate) when handed an artificially large build error log
@@ -652,7 +652,7 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 - [ ] `escalate.py` reads `OPENROUTER_API_KEY` from a mode-600 `.env` (or the environment), warns on loose permissions, and `--dry-run` writes artefacts to a temp dir without touching `.escalations.json`
 - [ ] `dev.sh iterate`/`write`/`review`/`write-contract` fail fast with a clear message (not a silent hang) when llama-swap is unreachable, and `DEV_SKIP_PREFLIGHT=1` bypasses the check
 - [ ] the human-feedback repair (`dev.sh fix`) cannot proceed past a Reviewer `VERDICT: FAIL` (it delegates to `dev.sh iterate`)
-- [ ] `dev.sh` fails an iteration with `OUT-OF-SCOPE FILE(S)` — before invoking the Reviewer — when a module diff touches a path not listed under its manifest's **Implementation files** / **Shared integration files** (and allows `.cline/rules/architecture.md` as the interface-change exception)
+- [ ] `dev.sh` fails an iteration with `OUT-OF-SCOPE FILE(S)` — before invoking the Reviewer — when a module diff touches a path not listed under its manifest's **Implementation files** / **Shared integration files** (and allows `.agent/rules/architecture.md` as the interface-change exception)
 - [ ] `dev.sh write-contract` mounts the workspace read-only, accepts one staged `<Type>Tests.cs` file per documented public entry point, and refuses to overwrite an existing contract test
 - [ ] re-running `dev.sh write-contract <module-id>` after a second entry point is added to the manifest creates only the new file and leaves existing contract tests untouched
 - [ ] a `write-contract` batch containing any already-existing filename is rejected whole, leaving the Contracts project unchanged
@@ -665,18 +665,18 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 - [ ] the FIRST `dev.sh escalate <module-id> <log>` (no `--override`) produces a plan; `--override --write-code` produces fix code saved to `frontier-fix-<module-id>.md`
 - [ ] `queue_for_review.sh` correctly adds a new row to `REVIEW_QUEUE.md`
 - [ ] `dev.sh finalise <module-id>` refuses a module that was never started, and refuses one that has not passed review and the fast tier
-- [ ] `dev.sh finalise`/`commit` refuse a module whose diff edits `.cline/rules/architecture.md`, print the change against `architecture.original.md`, and proceed only with `--allow-spec-change`
+- [ ] `dev.sh finalise`/`commit` refuse a module whose diff edits `.agent/rules/architecture.md`, print the change against `architecture.original.md`, and proceed only with `--allow-spec-change`
 - [ ] `dev.sh commit <module-id>` refuses a module whose code changed after `finalise`, and leaves the working tree clean on success
 - [ ] `dev.sh queue <module-id>` refuses to run until `dev.sh commit <module-id>` has succeeded for the current content
 - [ ] after `queue`, `dev.sh start <next-module-id>` succeeds; the tree is clean and a second module can begin
 - [ ] `dev.sh reject <module-id>` increments the "Times rejected" column, and the third rejection prints the revise-the-spec instruction
 - [ ] `dev.sh fix <module-id>` exits non-zero when the underlying repair fails
 - [ ] `apply_review_feedback.sh` (via `dev.sh fix`) exits 1 when the gate fails all 3 attempts
-- [ ] `dev.sh broadcast "<note>"` adds a note, and `dev.sh write` includes it in the task
+- [ ] `dev.sh broadcast "<note>"` adds a note, and `dev.sh write <module-id> "<task>"` includes it in the task
 - [ ] `dev.sh` refuses a state-changing command (e.g. `start`) run from a directory outside its own workspace, names the workspace it would have acted on, and is bypassable with `DEV_ALLOW_ANY_CWD=1`; read-only commands (`version`, `status`) still run from anywhere
 - [ ] `dev.sh start <module-id>` fails on a dirty tree, on a missing initial commit, and on an already-started module
 - [ ] `dev.sh reset <module-id>` restores tracked files, removes module-created untracked files, and deletes the `module-start-<module-id>` tag so the module can be re-started
-- [ ] `.cline/rules/architecture.original.md` exists and is read-only
+- [ ] `.agent/rules/architecture.original.md` exists and is read-only
 
 ---
 
@@ -693,10 +693,11 @@ You are acting as the sole system architect for a small, well-scoped project. Yo
 **Important context about how your output will be used:**
 
 - The two local models run on local hardware at zero marginal cost. The Coder writes code; the Reviewer checks it against a checklist. A deterministic test suite (`dotnet build -warnaserror` + `dotnet test` with xUnit) is the mechanical gate.
-- Your specification will be **mechanically enforced**, not just requested: a pre-commit hook blocks any commit that changes a function or class signature in `src/` without `.cline/rules/architecture.md` being updated in the same diff. The interface-change policy you write in `.cline/rules/architecture.md` is not advisory; it's enforced by tooling.
+- Agents are invoked by `dev.sh` as single-shot aider calls inside a container. They do not browse the repository: the orchestrator attaches the spec, the relevant skill file and the module's files to each call, and inlines diffs and test logs into the prompt. Write the skill files for that reality – an agent cannot "go and read" anything it is not shown.
+- Your specification will be **mechanically enforced**, not just requested: a pre-commit hook blocks any commit that changes a function or class signature in `src/` without `.agent/rules/architecture.md` being updated in the same diff. The interface-change policy you write in `.agent/rules/architecture.md` is not advisory; it's enforced by tooling.
 - The NuGet package list you write in `coder.md` becomes a `Directory.Packages.props` file, and the test container restores with `dotnet restore --locked-mode`, meaning the Coder is *technically incapable* of pulling in anything not on your list, not merely told not to. Every package and version must be named explicitly.
 - The `tests/` directories for contracts and fixtures are mounted read-only (`:ro`) on every agent invocation; neither the Coder nor the Reviewer can edit, delete, or create files in them. The golden fixture you produce will be `chmod 444` and mounted read-only, so neither local model can quietly rewrite a test to make broken code pass.
-- A frozen audit-trail copy of your output (`.cline/rules/architecture.original.md`) will be kept read-only at project start, so the working specification can always be diffed against your original.
+- A frozen audit-trail copy of your output (`.agent/rules/architecture.original.md`) will be kept read-only at project start, so the working specification can always be diffed against your original.
 - A `dev.sh` orchestrator handles all agent invocations via short subcommands. The skill files you write should reference the actual workflow, not assume the models will figure out how to run things themselves.
 
 **Project:** [Describe your project in 2–4 sentences, including what it does, who uses it, and the core business outcomes it needs to deliver.]
@@ -707,9 +708,9 @@ All projects must target `net10.0`, and the solution must use the `.slnx` format
 
 **Output exactly five things:**
 
-### 1. `.cline/rules/architecture.md` – the single architectural specification
+### 1. `.agent/rules/architecture.md` – the single architectural specification
 
-Produce the complete contents of `.cline/rules/architecture.md`. This file is the single source of truth. Include, at the level of detail that removes ambiguity, not summarises it:
+Produce the complete contents of `.agent/rules/architecture.md`. This file is the single source of truth. Include, at the level of detail that removes ambiguity, not summarises it:
 
 - **Full project structure.** List every `.cs` file path that will exist, every `.csproj`, and the `.slnx` file. Do not say "organise this sensibly"; provide the actual tree.
 - **A module catalogue and a complete manifest for every module.** A module is the unit passed to `dev.sh`; it may contain one file or several related files. Do not define modules merely as informal headings. Give each module a unique, stable **Module ID** that the human will copy verbatim into every command (`dev.sh start`, `write-contract`, `iterate`, `finalise`, and `queue`). The human must never need to invent an ID.
@@ -776,7 +777,7 @@ Produce the complete contents of `.cline/rules/architecture.md`. This file is th
   Rules for manifests:
   - List exact paths; do not use broad globs such as `src/**`.
   - Every production file in the project tree must belong to at least one module manifest.
-  - A changed path is allowed only when it appears under that module's **Implementation files** or **Shared integration files**. The sole global exception is `.cline/rules/architecture.md` during a deliberate interface change governed by the interface change policy below; do not list the architecture file as ordinary module scope.
+  - A changed path is allowed only when it appears under that module's **Implementation files** or **Shared integration files**. The sole global exception is `.agent/rules/architecture.md` during a deliberate interface change governed by the interface change policy below; do not list the architecture file as ordinary module scope.
   - If a shared file may be touched by several modules, state the permitted edit for each module so unrelated sections remain out of scope.
   - Do not tell the Coder to "implement `<Type>.cs`" when the module owns several files. The module manifest, not the task sentence, defines the complete scope.
   - Mark each module's **public entry points** explicitly. These are the types consumers outside the module call directly. `dev.sh write-contract` derives one `<TypeName>Tests.cs` per entry point, so a type that is only reachable through another entry point must not be marked as one.
@@ -798,37 +799,45 @@ Produce the complete contents of `.cline/rules/architecture.md`. This file is th
      module it's in or that module's normal risk tier.
   ```
 
-### 2. `.cline/skills/coder.md`
+### 2. `.agent/skills/coder.md`
 
-Coding conventions and constraints: naming conventions (PascalCase for public, camelCase for private), where new code must go relative to the layout in `.cline/rules/architecture.md`, **the approved NuGet package list, with every package and version named explicitly** (this becomes `Directory.Packages.props`), and an explicit instruction to implement against the signatures in `.cline/rules/architecture.md` exactly rather than redesigning them.
+Coding conventions and constraints: naming conventions (PascalCase for public, camelCase for private), where new code must go relative to the layout in `.agent/rules/architecture.md`, **the approved NuGet package list, with every package and version named explicitly** (this becomes `Directory.Packages.props`), and an explicit instruction to implement against the signatures in `.agent/rules/architecture.md` exactly rather than redesigning them.
 
 Also require the Coder to treat the task's Module ID as authoritative: locate that manifest, implement the **complete module**, create or edit only paths listed under its **Implementation files** or **Shared integration files**, and make only the specifically permitted change inside a shared file. It must not infer scope from a filename in the task, create convenience files outside the manifest, or edit another module to make the current one easier. If the task, manifest and existing repository disagree, it must stop and ask a specific clarifying question.
 
-**Must also include these two sections:**
+**Must also include these three sections:**
 
 ```markdown
+## Attached files
+The orchestrator attaches the files you may edit to this chat: the
+architecture spec and every file listed under the target module's
+manifest that already exists. Manifest files that do not exist yet are
+yours to create – create them with exactly the paths the manifest
+lists, and no others. You cannot see repository files outside the
+attached set; if you need one, stop and ask for it.
+
 ## Testing policy
-The testing policy is in `.cline/skills/tester.md`. Read and follow it. In
+The testing policy is in `.agent/skills/tester.md`. Read and follow it. In
 particular: you cannot run tests, `dotnet build`, `dotnet test`, or any
 package manager; none of them exist in your sandbox. Do not try. When a
 task hands you a test failure log, treat it as ground truth and fix the
 code it describes.
 
 ## Clarifying questions
-If you encounter genuine ambiguity in `.cline/rules/architecture.md`, where the spec doesn't say what to do for a case you actually need to
+If you encounter genuine ambiguity in `.agent/rules/architecture.md`, where the spec doesn't say what to do for a case you actually need to
 handle, halt and ask the user a specific clarifying question. Do not
 guess. A question costs one turn; a wrong guess costs at least three.
 ```
 
-### 3. `.cline/skills/reviewer.md`
+### 3. `.agent/skills/reviewer.md`
 
-A checklist a *different* model than the one that wrote the code will use to review it. Write concrete, checkable items such as "does every public method signature match `.cline/rules/architecture.md` exactly," "does any file contain raw SQL," "does the [critical logic] match the worked examples in `.cline/rules/architecture.md`", not general instructions like "check for bugs."
+A checklist a *different* model than the one that wrote the code will use to review it. Write concrete, checkable items such as "does every public method signature match `.agent/rules/architecture.md` exactly," "does any file contain raw SQL," "does the [critical logic] match the worked examples in `.agent/rules/architecture.md`", not general instructions like "check for bugs."
 
 The checklist must make the module manifest operational. Require the Reviewer to:
 
-1. Extract the Module ID from the `module-start-<module-id>` tag named in its task and locate the matching manifest in `.cline/rules/architecture.md`.
-2. Run `git diff --name-status module-start-<module-id>` and review **every** added, modified, renamed or deleted file in that diff; it must not review only the file whose name resembles the module.
-3. Fail with `OUT-OF-SCOPE FILE: <path>` for any changed path not listed under that manifest's **Implementation files** or **Shared integration files**, except `.cline/rules/architecture.md` during a deliberate interface change. If that exception appears, flag `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. (Note: `dev.sh` already enforces this scope rule mechanically before the Reviewer runs, so an out-of-scope diff never reaches you; keep this check as a backstop for anything the path-level gate cannot see, such as a permitted shared file edited beyond its allowed change.)
+1. Extract the Module ID from the `module-start-<module-id>` tag named in its task and locate the matching manifest in `.agent/rules/architecture.md`.
+2. Review **every** added, modified, renamed or deleted file in the diff included in its prompt; it must not review only the file whose name resembles the module.
+3. Fail with `OUT-OF-SCOPE FILE: <path>` for any changed path not listed under that manifest's **Implementation files** or **Shared integration files**, except `.agent/rules/architecture.md` during a deliberate interface change. If that exception appears, flag `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. (Note: `dev.sh` already enforces this scope rule mechanically before the Reviewer runs, so an out-of-scope diff never reaches you; keep this check as a backstop for anything the path-level gate cannot see, such as a permitted shared file edited beyond its allowed change.)
 4. For a shared integration file, verify that only the permitted change described by the manifest was made.
 5. Verify that every required implementation file, public contract, behaviour, acceptance example and completion criterion in the manifest is satisfied.
 6. Treat tests as checks of module behaviour and public contracts, not checks of individual production files.
@@ -837,19 +846,21 @@ The checklist must make the module manifest operational. Require the Reviewer to
 
 ```markdown
 ## Before you review anything
-Run `git diff module-start-<module-id>` in the terminal to see the
-actual changes for this module (substitute the real Module ID; fall
-back to plain `git diff` if no tag exists). Never assume a file
-describing the diff exists; there isn't one. The diff is git output, not
-a document.
+The complete diff for this module is included in your prompt between the
+`----- BEGIN MODULE DIFF -----` and `----- END MODULE DIFF -----` markers.
+It was generated on the host with `git diff module-start-<module-id>`;
+brand-new files appear in it in full. You cannot run commands and you
+cannot see any file beyond what is attached to this chat: the diff, the
+attached `.agent/rules/architecture.md` and this checklist are your
+complete evidence. The diff is git output, not a document.
 
 On the **first iteration** of a new module (when no contract test exists
-yet), review the **full module file(s)**, not just the diff. On
-subsequent iterations, review the diff plus any code you flagged earlier
-that the Coder didn't address.
+yet), the diff contains the full module file(s) as additions – review
+them in full. On subsequent iterations, review the diff plus any code you
+flagged earlier that the Coder did not address.
 ```
 
-**Must also include these four sections:**
+**Must also include these five sections:**
 
 ```markdown
 ## Outside-checklist rule
@@ -871,11 +882,11 @@ If the fix makes the test pass without addressing the bug, FAIL the review
 with "TEST-PASS-BY-COINCIDENCE: <explanation>."
 
 ## Manifest scope
-The module manifest in `.cline/rules/architecture.md`, located by the task's
+The module manifest in `.agent/rules/architecture.md`, located by the task's
 Module ID, is the authoritative scope. Every path in the diff must appear
 under that module's **Implementation files** or **Shared integration files**,
 and an edit inside a shared file must be the specific change the manifest
-permits. The only global exception is `.cline/rules/architecture.md` itself
+permits. The only global exception is `.agent/rules/architecture.md` itself
 during a deliberate interface change.
 
 If the diff touches a path the manifest does not list for this module, FAIL
@@ -903,16 +914,14 @@ End every review with a single final line that is exactly one of:
 
 Put all issues and the "OUTSIDE CHECKLIST", "TEST-PASS-BY-COINCIDENCE",
 "OUT OF SCOPE", "INCOMPLETE MODULE" and "CONTRACT TEST MISSING" notes on
-lines above the verdict. The orchestrator reads only the LAST line that begins
-with `VERDICT:` and requires it to be exactly `VERDICT: PASS` (nothing else on
-that line) to pass; anything else — a trailing `VERDICT: FAIL`, extra text on
-the verdict line, or no verdict at all — is treated as a failure. So put the
-verdict on its own final line with nothing after it, and do not write `VERDICT:
-PASS`/`VERDICT: FAIL` anywhere else in your review. If anything failed, the
-verdict is FAIL.
+lines above the verdict. The orchestrator requires EXACTLY ONE line in
+your whole reply that begins with `VERDICT:`, and it must be exactly
+`VERDICT: PASS` to pass; anything else – a `VERDICT: FAIL`, extra text on
+the verdict line, more than one verdict line, or no verdict at all – is
+treated as a failure. If anything failed, the verdict is FAIL.
 ```
 
-### 4. `.cline/skills/tester.md`
+### 4. `.agent/skills/tester.md`
 
 ```markdown
 ## Test routine
@@ -935,7 +944,7 @@ Your responsibilities are exactly two:
 
 ### 5. A golden fixture
 
-A fixed set of input/expected-output cases for the same correctness-critical logic called out in `.cline/rules/architecture.md`; this becomes `tests/fixtures/critical_logic_golden.json`, frozen and read-only (both `chmod 444` and mounted `:ro`).
+A fixed set of input/expected-output cases for the same correctness-critical logic called out in `.agent/rules/architecture.md`; this becomes `tests/fixtures/critical_logic_golden.json`, frozen and read-only (both `chmod 444` and mounted `:ro`).
 
 It is consumed by a deterministic xUnit harness (no LLM at run time). The
 harness accepts two shapes; prefer **(A)** whenever the module's
@@ -970,7 +979,7 @@ correctness-critical logic has more than one entry point.
 ```
 
 - `entryPoint` is a fully-qualified `Namespace.Type.Method` that exists in the
-  public API you specify in `.cline/rules/architecture.md`. It must be a single,
+  public API you specify in `.agent/rules/architecture.md`. It must be a single,
   unambiguous public method (static, or instance on a type with a public
   parameterless constructor). The canonical harness resolves it reflectively; an
   overloaded name fails loudly, so give each golden entry point one unambiguous
@@ -993,7 +1002,7 @@ The harness itself is shipped and pre-tested by the framework (installed via
 `dev.sh write-golden-harness`), so you only author the fixture, not the code
 that runs it.
 
-The fixture must be **consistent with the worked examples in `.cline/rules/architecture.md`**. Since you are writing both artefacts, keep them aligned.
+The fixture must be **consistent with the worked examples in `.agent/rules/architecture.md`**. Since you are writing both artefacts, keep them aligned.
 
 ---
 
@@ -1058,18 +1067,21 @@ For GPU, model-serving, firewall, and container-image symptoms, see the machine-
 | `fish: Unknown command: dev.sh`                                                   | run `fish_add_path ~/project/workspace/scripts` once (permanent)                                                                       |
 | `cp: cannot stat 'starter-kit/...'`                                               | you're not inside your clone of this repo – `cd ~/tenninetydotnet` first (see *Path conventions*)                                      |
 | `dev.sh start` refuses to run                                                     | dirty tree or no initial commit – complete Phase 10.4 (`git add -A && git commit`), confirm `git status --short` prints nothing        |
-| Cline hangs with no output                                                        | use `-i` not `-it` for captured mode; `-t` forces pseudo-TTY which breaks capture                                                      |
-| Wrong model responds                                                              | check which `~/.cline-*` directory got mounted (or use `dev.sh write` / `dev.sh review`)                                               |
+| aider hangs with no output                                                        | the preflight check should catch an unreachable llama-swap; otherwise watch `curl -Ns http://172.17.0.1:8090/logs/stream/qwen-coder` – a first model load can be silent for minutes |
+| Wrong model responds                                                              | check which `~/.aider-*` profile got mounted (`grep '^model:' ~/.aider-*/aider.conf.yml`)                                              |
+| aider edits repeatedly "fail to apply"                                            | switch `edit_format` to `udiff` (or `whole`) in both `~/.aider-*/aider.conf.yml` and `~/.aider-*/model-settings.yml`                   |
 | `dev.sh iterate` exits silently after `==> Pass N: WRITE`                         | `set -euo pipefail` killed script on non-zero exit; v3 uses `\|\| true` after capture                                                  |
 | A commit is unexpectedly rejected                                                 | check `.pre-commit-config.yaml` – should have `no-raw-sql`, `signature-drift`, `dotnet-format`                            |
 | `signature-drift` fails with "package ... was not found in the global NuGet cache(s)" | the `dotnet-script` Roslyn cache was never warmed; run the Phase 8.4 warm step from `SETUP_GUIDE.md` (or `dotnet script --no-cache scripts/check_signatures.csx -- --staged` once, with network access) |
 | `dotnet build` fails with " NU1004: The version of package is not defined"        | `Directory.Packages.props` is missing a package version; add it                                                                        |
 | `dotnet restore --locked-mode` fails                                              | run `dotnet restore` first to (re)generate `packages.lock.json`, then commit it – required after any `Directory.Packages.props` change |
 | A test project reports "EMPTY TEST GATE"                                          | the project built but discovered no tests; check it has a `[Fact]`/`[Theory]` and references the project under test                    |
-| `dev.sh write-contract` writes to wrong path or wrong number of files             | the agent derives filenames from the module manifest's public entry points – check the Module ID exists in `.cline/rules/architecture.md` and its entry points are documented |
+| `dev.sh write-contract` writes to wrong path or wrong number of files             | the agent derives filenames from the module manifest's public entry points – check the Module ID exists in `.agent/rules/architecture.md` and its entry points are documented |
 | Fast test tier is slow every single run                                           | NuGet cache volume may have been removed; first run after `Directory.Packages.props` change is slow (cold cache)                       |
 | `escalate.py` produces an empty diff                                              | `module-start-<module-id>` tag was never created – run `dev.sh start <module-id>` first                                                          |
-| A module keeps bouncing between `needs-fixes` and `ready-for-review`              | check "Times rejected" – if at 3, revise `.cline/rules/architecture.md` instead                                                                           |
+| A module keeps bouncing between `needs-fixes` and `ready-for-review`              | check "Times rejected" – if at 3, revise `.agent/rules/architecture.md` instead                                                                           |
 | Downstream modules break after an interface change                                | `check_interface_drift.sh` should have marked them as `interface-changed`                                                              |
 | The repo is in a broken state after a crash                                       | `dev.sh reset <module-id>`                                                                                                                  |
 | `BROADCAST.md` notes aren't being seen by the Coder                               | use `dev.sh write` / `dev.sh iterate`, which inject them automatically                                                                 |
+
+---

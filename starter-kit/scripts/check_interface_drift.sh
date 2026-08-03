@@ -36,14 +36,14 @@ echo "Public-API changes detected in module $MODULE:"
 printf '  %s\n' "${CHANGED_SYMBOLS[@]}"
 echo ""
 
-# Was .cline/rules/architecture.md also updated in the same module diff? Use grep -q in an
+# Was .agent/rules/architecture.md also updated in the same module diff? Use grep -q in an
 # if-statement – never `grep -c ... || echo 0`, which prints two lines (grep's
 # "0" plus the echo) and then breaks the numeric test.
 if git -C "$WORKSPACE" diff --name-only "$BASE_TAG" 2>/dev/null \
      | grep -qE '(^|/)architecture\.md$'; then
   : # spec updated alongside the code – good
 else
-  echo "WARNING: public API changed but .cline/rules/architecture.md was not updated."
+  echo "WARNING: public API changed but .agent/rules/architecture.md was not updated."
   echo "This may be an interface-change policy violation."
   echo ""
 fi

@@ -15,7 +15,7 @@ The four-layer architecture, the container boundaries, and the deterministic gat
 
 ### The problem
 
-Today the entire specification lives in `.cline/rules/architecture.md`, and every Coder invocation carries the whole file in context alongside the skill files, the task, and injected failure logs. A fully-determined spec for 30 modules can run 5,000–15,000 lines. Past a point it does not fit in 65,536 tokens; well before that point it dilutes the model's attention with 29 modules' worth of detail irrelevant to the one being implemented.
+Today the entire specification lives in `.agent/rules/architecture.md`, and every Coder invocation carries the whole file in context alongside the skill files, the task, and injected failure logs. A fully-determined spec for 30 modules can run 5,000–15,000 lines. Past a point it does not fit in 65,536 tokens; well before that point it dilutes the model's attention with 29 modules' worth of detail irrelevant to the one being implemented.
 
 ### The design
 
@@ -23,7 +23,7 @@ Split the specification along the seams it already has, namely the modules:
 
 ```
 ~/project/workspace/
-└── .cline/rules/
+└── .agent/rules/
     ├── architecture.md            # SHRINKS: global index only (see below)
     └── specs/
         ├── ticket-assignment.md   # one canonical shard per module
@@ -31,7 +31,7 @@ Split the specification along the seams it already has, namely the modules:
         └── ...
 ```
 
-`.cline/rules/architecture.md` retains only what every module genuinely needs: project-wide invariants and conventions, the full data model, the dependency-ordered build sequence, the interface change policy (verbatim, unchanged), and a **module manifest**, which is a table mapping each module to its shard file, its source paths, and its direct dependencies:
+`.agent/rules/architecture.md` retains only what every module genuinely needs: project-wide invariants and conventions, the full data model, the dependency-ordered build sequence, the interface change policy (verbatim, unchanged), and a **module manifest**, which is a table mapping each module to its shard file, its source paths, and its direct dependencies:
 
 ```markdown
 ## Module manifest
@@ -44,17 +44,17 @@ Each shard carries the per-module detail the working guide's Appendix A currentl
 
 ### Mechanical enforcement – what must change, file by file
 
-**`check_signatures.csx` pre-commit invocation.** Today a signature change anywhere in `src/` requires `.cline/rules/architecture.md` in the same commit. With sharding, resolve the changed file's path through the module manifest and require **the matching canonical shard** in the same commit instead. This is strictly sharper enforcement: a change to `Assignment/` now points at exactly one file that must move with it.
+**`check_signatures.csx` pre-commit invocation.** Today a signature change anywhere in `src/` requires `.agent/rules/architecture.md` in the same commit. With sharding, resolve the changed file's path through the module manifest and require **the matching canonical shard** in the same commit instead. This is strictly sharper enforcement: a change to `Assignment/` now points at exactly one file that must move with it.
 
-**`dev.sh` (`cmd_write`, `cmd_review`, `cmd_iterate`)**, instead of mounting the whole workspace's spec context implicitly, construct each agent invocation's visible spec set as: `.cline/rules/architecture.md` + the target module's shard + the shards named in its `Depends:` header (one level deep, transitive closure defeats the purpose). Everything else under `.cline/rules/specs/` is simply not mounted. The agent sees everything relevant and nothing else.
+**`dev.sh` (`cmd_write`, `cmd_review`, `cmd_iterate`)**, instead of attaching the whole spec to every call, construct each agent invocation's visible spec set as: `.agent/rules/architecture.md` + the target module's shard + the shards named in its `Depends:` header (one level deep, transitive closure defeats the purpose). Everything else under `.agent/rules/specs/` is simply not attached. The agent sees everything relevant and nothing else. Because agent context is already assembled explicitly per call (files are attached by `dev.sh`; nothing is auto-loaded), sharding is a `dev.sh`-local change.
 
-**Freeze policy.** Extend Phase 10.2's audit-trail rule per shard: at each module's first `finalise`, snapshot `.cline/rules/specs/<m>.original.md`, `chmod 444`. The global `.cline/rules/architecture.original.md` rule is unchanged.
+**Freeze policy.** Extend Phase 10.2's audit-trail rule per shard: at each module's first `finalise`, snapshot `.agent/rules/specs/<m>.original.md`, `chmod 444`. The global `.agent/rules/architecture.original.md` rule is unchanged.
 
 **Frontier authoring (Appendix A delta).** The blueprint prompt's output contract changes from "one architecture body" to "one global index conforming to the manifest schema above, plus one shard per module with a `Depends:` header." The frontier model still writes the whole specification once; it delivers it pre-sliced.
 
 ### Verification (once implemented)
 
-- [ ] a signature change in a module's source path is blocked unless that module's canonical shard is staged; staging only `.cline/rules/architecture.md` is no longer sufficient
+- [ ] a signature change in a module's source path is blocked unless that module's canonical shard is staged; staging only `.agent/rules/architecture.md` is no longer sufficient
 - [ ] a Coder invocation for module A cannot read module B's shard unless B appears in A's `Depends:` header (verify with a deliberate cross-reference in a test prompt)
 - [ ] token count of a worst-case invocation (global + largest shard + its dependencies + skills + a long failure log) stays under ~50k, leaving headroom in the 65,536 window
 

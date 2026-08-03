@@ -1,25 +1,27 @@
 # Reviewer checklist
 
 ## Before you review anything
-Run `git diff module-start-<module-id>` in the terminal to see the
-actual changes for this module (substitute the real Module ID; fall
-back to plain `git diff` if no tag exists). Never assume a file
-describing the diff exists; there isn't one. The diff is git output, not
-a document.
+The complete diff for this module is included in your prompt between the
+`----- BEGIN MODULE DIFF -----` and `----- END MODULE DIFF -----` markers.
+It was generated on the host with `git diff module-start-<module-id>`;
+brand-new files appear in it in full. You cannot run commands and you
+cannot see any file beyond what is attached to this chat: the diff, the
+attached `.agent/rules/architecture.md` and this checklist are your
+complete evidence. The diff is git output, not a document.
 
 On the **first iteration** of a new module (when no contract test exists
-yet), review the **full module file(s)**, not just the diff. On
-subsequent iterations, review the diff plus any code you flagged earlier
-that the Coder did not address.
+yet), the diff contains the full module file(s) as additions – review
+them in full. On subsequent iterations, review the diff plus any code you
+flagged earlier that the Coder did not address.
 
-Use the Module ID from `module-start-<module-id>` as the Module ID and locate its manifest in `.cline/rules/architecture.md`. Run `git diff --name-status module-start-<module-id>` and review every added, modified, renamed or deleted path. If a changed path is not listed under that manifest's **Implementation files** or **Shared integration files**, report `OUT-OF-SCOPE FILE: <path>` and fail, except for `.cline/rules/architecture.md` during a deliberate interface change. If that exception appears, report `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. For a shared integration file, verify that the diff contains only the change permitted by the manifest. Review the whole module and its observable behaviour; do not limit review to a source file whose name resembles the module ID.
+Use the Module ID from `module-start-<module-id>` as the Module ID and locate its manifest in `.agent/rules/architecture.md`. Review every added, modified, renamed or deleted path in the diff. If a changed path is not listed under that manifest's **Implementation files** or **Shared integration files**, report `OUT-OF-SCOPE FILE: <path>` and fail, except for `.agent/rules/architecture.md` during a deliberate interface change. If that exception appears, report `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. For a shared integration file, verify that the diff contains only the change permitted by the manifest. Review the whole module and its observable behaviour; do not limit review to a source file whose name resembles the module ID.
 
 <!--
 PASTE YOUR PROJECT-SPECIFIC REVIEW CHECKLIST BELOW THIS LINE.
 Include concrete, checkable items such as:
-- Does every public method signature match `.cline/rules/architecture.md` exactly?
+- Does every public method signature match `.agent/rules/architecture.md` exactly?
 - Does any file contain raw SQL?
-- Does the correctness-critical logic match the worked examples in `.cline/rules/architecture.md`?
+- Does the correctness-critical logic match the worked examples in `.agent/rules/architecture.md`?
 -->
 
 ## Outside-checklist rule
@@ -41,11 +43,11 @@ If the fix makes the test pass without addressing the bug, FAIL the review
 with "TEST-PASS-BY-COINCIDENCE: <explanation>."
 
 ## Manifest scope
-The module manifest in `.cline/rules/architecture.md`, located by the task's
+The module manifest in `.agent/rules/architecture.md`, located by the task's
 Module ID, is the authoritative scope. Every path in the diff must appear
 under that module's **Implementation files** or **Shared integration files**,
 and an edit inside a shared file must be the specific change the manifest
-permits. The only global exception is `.cline/rules/architecture.md` itself
+permits. The only global exception is `.agent/rules/architecture.md` itself
 during a deliberate interface change.
 
 If the diff touches a path the manifest does not list for this module, FAIL
@@ -73,7 +75,8 @@ End every review with a single final line that is exactly one of:
 
 Put all issues and the "OUTSIDE CHECKLIST", "TEST-PASS-BY-COINCIDENCE",
 "OUT OF SCOPE", "INCOMPLETE MODULE" and "CONTRACT TEST MISSING" notes on
-lines above the verdict. The orchestrator
-matches this exact line to decide whether to loop, so do not write PASS or
-FAIL as a standalone final line for any other reason. If anything failed,
-the verdict is FAIL.
+lines above the verdict. The orchestrator requires EXACTLY ONE line in
+your whole reply that begins with `VERDICT:`, and it must be exactly
+`VERDICT: PASS` to pass; anything else – a `VERDICT: FAIL`, extra text on
+the verdict line, more than one verdict line, or no verdict at all – is
+treated as a failure. If anything failed, the verdict is FAIL.

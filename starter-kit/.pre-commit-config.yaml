@@ -12,7 +12,7 @@ repos:
         language: system
         pass_filenames: false
       - id: signature-drift
-        name: block signature changes without .cline/rules/architecture.md update
+        name: block signature changes without .agent/rules/architecture.md update
         entry: dotnet script scripts/check_signatures.csx -- --staged
         language: system
         pass_filenames: false

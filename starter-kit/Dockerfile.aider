@@ -1,0 +1,42 @@
+# Pin a specific patch tag for reproducibility. For full reproducibility replace
+# with a digest: FROM python@sha256:<digest> (resolve with `docker buildx imagetools inspect python:3.12.11-slim`).
+# aider-chat requires Python >=3.10,<3.13 – hence the 3.12 series.
+FROM python:3.12.11-slim
+
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin the aider version for reproducibility (check https://pypi.org/project/aider-chat/
+# before bumping). aider is a Python CLI; no Node.js is needed any more.
+RUN pip install --no-cache-dir aider-chat==0.86.2
+
+# Provide a non-root user at the host UID/GID so bind-mounted files keep normal
+# host ownership (same pattern as Dockerfile.test: the base image may already
+# have a user at UID 1000, so handle both cases and normalize to "aider").
+RUN set -eux; \
+    existing_group="$(getent group "${HOST_GID}" | cut -d: -f1 || true)"; \
+    if [ -z "$existing_group" ]; then \
+        groupadd -g "${HOST_GID}" aider; \
+        existing_group=aider; \
+    fi; \
+    existing_user="$(getent passwd "${HOST_UID}" | cut -d: -f1 || true)"; \
+    if [ -z "$existing_user" ]; then \
+        useradd -m -u "${HOST_UID}" -g "$existing_group" -s /bin/bash aider; \
+    elif [ "$existing_user" != "aider" ]; then \
+        usermod -l aider -d /home/aider -m -s /bin/bash "$existing_user"; \
+        usermod -g "$existing_group" aider; \
+    else \
+        usermod -g "$existing_group" aider; \
+    fi
+
+RUN git config --system --add safe.directory /workspace
+
+USER aider
+ENV HOME=/home/aider
+WORKDIR /workspace
+ENTRYPOINT ["aider"]
