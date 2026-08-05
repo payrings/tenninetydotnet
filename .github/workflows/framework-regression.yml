@@ -1,0 +1,38 @@
+name: framework-regression
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-state:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Shell syntax
+        run: |
+          find starter-kit/scripts tests/framework -type f -name '*.sh' -print0 \
+            | xargs -0 -n1 bash -n
+      - name: Python checks
+        run: |
+          python3 -m py_compile starter-kit/scripts/escalate.py
+          python3 -m unittest discover -s tests/framework -p 'test_*.py' -v
+      - name: Snapshot isolation
+        run: bash tests/framework/test_snapshot_isolation.sh
+      - name: Staged and rename-aware Git gates
+        run: bash tests/framework/test_git_gates.sh
+      - name: JSON syntax
+        run: find starter-kit -type f -name '*.json' -print0 | xargs -0 -n1 jq empty
+
+  semantic-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Semantic API regression
+        run: bash tests/framework/test_semantic_signatures.sh

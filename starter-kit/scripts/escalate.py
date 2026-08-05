@@ -18,14 +18,46 @@ pass via OpenRouter – with a hard one-shot escalation policy.
 Routed through OpenRouter so FRONTIER_MODEL env var picks the actual model.
 """
 import json
+import hashlib
+import fcntl
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-ESCALATION_LOG = Path(".escalations.json")
 FRONTIER_MODEL = os.environ.get("FRONTIER_MODEL", "z-ai/glm-5.2:floor")
+
+
+def runtime_dir():
+    """Return the same external, per-workspace state directory as dev.sh."""
+    workspace = Path.cwd().resolve()
+    configured = os.environ.get("TENNINETY_RUNTIME_DIR")
+    if configured:
+        directory = Path(configured).expanduser().resolve()
+    else:
+        state_home = os.environ.get("TENNINETY_STATE_HOME")
+        if state_home:
+            base = Path(state_home).expanduser()
+        else:
+            xdg_state = os.environ.get("XDG_STATE_HOME")
+            base = Path(xdg_state).expanduser() if xdg_state else Path.home() / ".local" / "state"
+            base /= "tenninetydotnet"
+        workspace_id = hashlib.sha256(str(workspace).encode()).hexdigest()[:24]
+        directory = (base / workspace_id).resolve()
+    if directory == workspace or workspace in directory.parents:
+        raise RuntimeError("TENNINETY_RUNTIME_DIR must be outside the workspace")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.chmod(0o700)
+    directory = directory.resolve()
+    if directory == workspace or workspace in directory.parents:
+        raise RuntimeError("resolved TENNINETY_RUNTIME_DIR must be outside the workspace")
+    os.environ["TENNINETY_RUNTIME_DIR"] = str(directory)
+    return directory
+
+
+ESCALATION_LOG = runtime_dir() / "escalations.json"
+ESCALATION_LOCK = runtime_dir() / "escalations.lock"
 
 
 def load_env_file(path=None):
@@ -35,14 +67,15 @@ def load_env_file(path=None):
     Storing the OpenRouter key in a fish universal variable writes it in
     plaintext to ~/.config/fish and exports it to every process the shell
     spawns. A mode-600 .env read only by this tool is a tighter blast radius.
-    Search order: $TENNINETY_ENV, ./.env, ~/.config/tenninety/.env.
+    Search order: an explicit path, $TENNINETY_ENV, then
+    ~/.config/tenninety/.env. A project-local .env is deliberately never read:
+    workspace content must not be able to select or shadow cloud credentials.
     """
     candidates = []
     if path:
         candidates.append(Path(path))
     if os.environ.get("TENNINETY_ENV"):
         candidates.append(Path(os.environ["TENNINETY_ENV"]))
-    candidates.append(Path(".env"))
     candidates.append(Path.home() / ".config" / "tenninety" / ".env")
 
     for env_path in candidates:
@@ -103,6 +136,7 @@ def load_counts():
 def save_counts(counts):
     temporary = ESCALATION_LOG.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(counts, indent=2) + "\n")
+    temporary.chmod(0o600)
     temporary.replace(ESCALATION_LOG)
 
 
@@ -116,7 +150,7 @@ def git_text(args, *, accepted=(0,)):
 
 def get_diff(feature, *, allow_head=False):
     """Diff since the active implementation/repair baseline."""
-    baseline_file = Path(".dev-runtime") / feature / "active-baseline"
+    baseline_file = runtime_dir() / feature / "active-baseline"
     active_baseline = None
     try:
         if baseline_file.is_file():
@@ -127,9 +161,14 @@ def get_diff(feature, *, allow_head=False):
     repair_tags = git_text([
         "tag", "--list", f"module-repair-{feature}-*", "--sort=-version:refname"
     ]).splitlines()
+    rejection_commits = git_text([
+        "log", "-n", "1", "--format=%H",
+        f"--grep=^review({feature}): reject attempt [0-9][0-9]*$", "HEAD",
+    ]).splitlines()
     refs = [ref for ref in (
         active_baseline,
         repair_tags[0] if repair_tags else None,
+        rejection_commits[0] if rejection_commits else None,
         f"module-start-{feature}",
         "HEAD" if allow_head else None,
     ) if ref]
@@ -140,17 +179,33 @@ def get_diff(feature, *, allow_head=False):
                 "diff", "--no-color", ref, "--", ".",
                 ":(exclude)REVIEW_QUEUE.md",
                 ":(exclude)review-feedback/**",
-                ":(exclude).dev-runtime/**",
             ])
             untracked = git_text(["ls-files", "--others", "--exclude-standard"]).splitlines()
             for path in untracked:
-                if path.startswith((".dev-runtime/", "review-feedback/")):
+                if path.startswith("review-feedback/"):
                     continue
                 diff += git_text(["diff", "--no-index", "--no-color", "--", "/dev/null", path],
                                  accepted=(0, 1))
             return diff
     raise RuntimeError(
         f"no active baseline exists for '{feature}'; run dev.sh start first"
+    )
+
+
+def bounded_context(text, limit, label):
+    """Bound external prompt payloads while retaining both diagnosis context
+    and the latest failure output. The marker makes truncation explicit to the
+    frontier model and to the human reviewing its response.
+    """
+    if len(text) <= limit:
+        return text
+    head = (limit * 2) // 3
+    tail = limit - head
+    omitted = len(text) - limit
+    return (
+        text[:head]
+        + f"\n\n--- {label} TRUNCATED: {omitted} characters omitted ---\n\n"
+        + text[-tail:]
     )
 
 
@@ -174,7 +229,7 @@ def main():
     override = "--override" in sys.argv
     write_code = "--write-code" in sys.argv
     # --dry-run writes artefacts to a temp dir instead of the workspace and does
-    # not touch .escalations.json, so you can exercise the tool without leaving
+    # does not touch the external escalation counter, so you can exercise the tool without leaving
     # escalation-notes.md / frontier-fix-*.md behind for you to clean up.
     dry_run = "--dry-run" in sys.argv
 
@@ -182,6 +237,11 @@ def main():
     load_env_file()
     frontier_model = os.environ.get("FRONTIER_MODEL", FRONTIER_MODEL)
 
+    # Serialize the read/check/call/write sequence. Atomic JSON replacement
+    # alone does not stop two concurrent processes from consuming the same
+    # escalation tier.
+    lock_handle = ESCALATION_LOCK.open("a+")
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
     try:
         counts = load_counts()
     except RuntimeError as exc:
@@ -229,6 +289,9 @@ def main():
         except OSError as e:
             print(f"ERROR: could not read test log '{test_log_path}': {e}", file=sys.stderr)
             sys.exit(1)
+
+    diff = bounded_context(diff, 120_000, "DIFF")
+    test_log = bounded_context(test_log, 40_000, "TEST LOG")
 
     second_attempt_note = ""
     if prior >= 1:
@@ -281,7 +344,9 @@ will implement it.{second_attempt_note}
         out_dir = Path(tempfile.mkdtemp(prefix="tenninety-escalate-"))
         output_file = out_dir / output_name
     else:
-        output_file = Path(output_name)
+        out_dir = runtime_dir() / feature
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_file = out_dir / output_name
 
     resp = client.chat.completions.create(
         model=frontier_model,
@@ -289,12 +354,25 @@ will implement it.{second_attempt_note}
         messages=[{"role": "user", "content": prompt}],
     )
 
-    content = resp.choices[0].message.content
+    if not resp.choices:
+        print("ERROR: frontier model returned no choices; escalation counter was not changed.",
+              file=sys.stderr)
+        sys.exit(1)
+    choice = resp.choices[0]
+    if choice.finish_reason != "stop":
+        print(f"ERROR: frontier response ended with finish_reason={choice.finish_reason!r}; "
+              "incomplete output was not saved and the escalation counter was not changed.",
+              file=sys.stderr)
+        sys.exit(1)
+    content = choice.message.content
     if not isinstance(content, str) or not content.strip():
         print("ERROR: frontier model returned no text; escalation counter was not changed.",
               file=sys.stderr)
         sys.exit(1)
-    output_file.write_text(content)
+    output_temporary = output_file.with_name(output_file.name + ".tmp")
+    output_temporary.write_text(content)
+    output_temporary.chmod(0o600)
+    output_temporary.replace(output_file)
 
     # Increment the one-shot counter only after the artefact is safely written,
     # so a crash mid-write doesn't consume the escalation with nothing to show.
@@ -305,7 +383,7 @@ will implement it.{second_attempt_note}
     print(content)
     print(f"\n--- Saved to {output_file} ---")
     if dry_run:
-        print("(dry run: wrote to a temp dir and did not update .escalations.json)")
+        print("(dry run: wrote to a temp dir and did not update the escalation counter)")
 
 
 if __name__ == "__main__":

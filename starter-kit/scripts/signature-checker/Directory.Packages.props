@@ -1,0 +1,9 @@
+<Project>
+  <!-- Stop discovery of the application's central package file. The checker
+       pins and audits its own host-only dependencies in its project file. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditLevel>moderate</NuGetAuditLevel>
+  </PropertyGroup>
+</Project>

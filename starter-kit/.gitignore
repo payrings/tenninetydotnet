@@ -1,13 +1,12 @@
 bin/
 obj/
-*.user
 .vs/
 *.suo
 __pycache__/
 *.pyc
 .DS_Store
 
-# Orchestrator runtime artefacts (host-side, not project code)
+# Legacy pre-0.2.2 escalation artefacts and runtime paths
 .escalations.json
 escalation-notes.md
 frontier-fix-*.md
@@ -15,3 +14,4 @@ frontier-fix-*.md
 
 # Secrets — never commit the API key
 .env
+.env.*

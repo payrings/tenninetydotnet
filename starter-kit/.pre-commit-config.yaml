@@ -2,18 +2,13 @@ repos:
   - repo: local
     hooks:
       - id: no-raw-sql
-        name: block raw SQL strings in C#
-        entry: >
-          bash -c '! grep -rnE
-          "new SqlConnection\(|new SqlCommand\(|\.CommandText\s*="
-          src/ --include="*.cs"
-          --exclude-dir=bin --exclude-dir=obj
-          | grep -v "// allow-raw-sql"'
+        name: block staged raw SQL strings in C#
+        entry: scripts/check_no_raw_sql.sh
         language: system
         pass_filenames: false
       - id: signature-drift
         name: block signature changes without .agent/rules/architecture.md update
-        entry: dotnet script scripts/check_signatures.csx -- --staged
+        entry: scripts/check_signatures.sh --staged
         language: system
         pass_filenames: false
       - id: dotnet-format

@@ -1,0 +1,4 @@
+<Project>
+  <!-- Stop automatic discovery of application-level Directory.Build.targets.
+       The checker host must remain independent from the code it inspects. -->
+</Project>

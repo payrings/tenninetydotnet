@@ -11,10 +11,12 @@ attached current module files, any human rejection feedback,
 `.agent/rules/architecture.md`, and this checklist are your complete evidence.
 The diff is git output, not a document.
 
-On the **first iteration** of a new module, the diff contains the full module
-and exact host-staged contract-test additions – review them in full. A repair
-diff contains only changes since the human rejection baseline, so assess those
-changes against the rejection context and the complete manifest.
+On the **first iteration** of a new module, the diff contains every change made
+since the module-start baseline and exact host-staged contract-test additions –
+review them in full. A repair diff intentionally contains only changes since
+the human rejection baseline. In both cases, assess completion using the
+attached current module files as well as the diff; an unchanged manifest path
+is not automatically missing from the completed module.
 
 Use the Module ID from the baseline named in the task and locate its manifest in `.agent/rules/architecture.md`. Review every added, modified, renamed or deleted path in the diff. A changed path is valid when it is listed under that manifest's **Implementation files**, **Shared integration files**, or **Protected/generated test artefact**. Protected/generated test artefacts are created by the host staging workflow and mounted read-only to implementation agents; review their contract coverage, but do not report them as out of scope. The other exception is `.agent/rules/architecture.md` during a deliberate interface change. If that exception appears, report `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. For a shared integration file, verify that the diff contains only the change permitted by the manifest. Review the whole module and its observable behaviour; do not limit review to a source file whose name resembles the module ID.
 
@@ -56,11 +58,12 @@ exception is `.agent/rules/architecture.md` itself during a deliberate
 interface change.
 
 If the diff touches a path the manifest does not list for this module, FAIL
-the review with "OUT OF SCOPE: <path>." If a path the manifest lists is
-missing from the diff, say so as "INCOMPLETE MODULE: <path>"; the module is
-not done until its manifest is satisfied and its completion criteria are met.
-A module may legitimately span several files; do not treat a multi-file diff
-as suspect in itself.
+the review with "OUT OF SCOPE: <path>." Do not require every manifest path to
+appear in a repair diff: unchanged paths are represented by the attached full
+files. Report "INCOMPLETE MODULE: <path>" only when that path is absent from
+both the diff and the attached current files, or when its attached content does
+not satisfy the manifest. A module may legitimately span several files; do not
+treat a multi-file diff as suspect in itself.
 
 ## Contract tests
 Verify that every exact path listed under **Protected/generated test artefact**

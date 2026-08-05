@@ -1,0 +1,11 @@
+<Project>
+  <!-- Keep this host tool independent from the application workspace's build
+       policy and analyzer PackageReferences. Its only job is to load projects
+       after MSBuildLocator selects the installed SDK. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

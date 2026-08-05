@@ -10,6 +10,12 @@ MODULE="${1:?Usage: apply_review_feedback.sh <module-id>}"
 [[ "$MODULE" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] || {
   echo "ERROR: invalid Module ID '$MODULE'." >&2; exit 1; }
 FEEDBACK_FILE="review-feedback/$MODULE.md"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=runtime.sh
+source "$SCRIPT_DIR/runtime.sh"
+tenninety_init_runtime "$WORKSPACE" || exit 1
+cd "$WORKSPACE" || exit 1
 
 [ -f "$FEEDBACK_FILE" ] || { echo "Feedback file not found: $FEEDBACK_FILE"; exit 1; }
 STATUS=$(awk -F'|' -v m=" $MODULE " '$2==m {gsub(/^ +| +$/, "", $3); print $3; exit}' REVIEW_QUEUE.md)
@@ -28,7 +34,7 @@ if ./scripts/dev.sh iterate "$MODULE" \
   echo "$MODULE passed all gates and was committed; returned to review queue."
 else
   echo "Three bounded fix attempts failed for $MODULE."
-  echo "Inspect .dev-runtime/$MODULE/latest-test.log, then revise the spec,"
+  echo "Inspect $TENNINETY_RUNTIME_DIR/$MODULE/latest-test.log, then revise the spec,"
   echo "escalate deliberately (first call: no --override), or reset."
   exit 1
 fi

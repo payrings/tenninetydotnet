@@ -6,6 +6,59 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Framework regression CI now exercises host runtime isolation, queue state
+  transitions, disposable snapshot behavior, staged raw-SQL inspection,
+  rename-aware scope, ignored build controls, the SDK pin, and semantic alias
+  drift; third-party actions are pinned to immutable commit IDs.
+- `dev.sh runtime-path` reports the external per-workspace state location.
+- A dedicated staged-content raw-SQL checker replaces the working-tree grep.
+
+### Changed
+- Gate markers, locks, test logs, reset backups, repair baselines, escalation
+  counters, and frontier output now live outside the agent-visible workspace.
+- Restore runs from a Git-derived disposable seed; every test project builds and
+  executes in its own clone with no network and the NuGet cache read-only.
+- Public API drift now compares complete resolved Roslyn/MSBuild compilations
+  for every source target framework instead of syntax from changed files only,
+  including explicit type accessibility, modifiers, and enum underlyings. It
+  runs in a dedicated compiled host so SDK registration precedes MSBuild loads.
+- Escalation payloads are bounded, calls are serialized, project-local `.env`
+  files are ignored, and incomplete provider responses do not consume a tier.
+
+### Fixed
+- Ignored and implicit MSBuild controls (`*.user`, `*.rsp`, `.editorconfig`, and
+  case-insensitive NuGet configuration) can no longer bypass scope or test gates.
+- Approved or already queued modules cannot be reopened through `queue`.
+- Scope/reset inspect both sides of renames and copies, and scope rejects empty
+  or metadata/protected-test-only module implementations.
+- Queue, approval, rejection, interface propagation, and reset backup paths now
+  fail closed and restore or preserve their prior state on partial failure.
+- Content fingerprints, architecture-change detection, Git status checks, and
+  mutation locking now fail closed on plumbing/tool errors; gate writes are
+  atomic.
+- Module identifiers are validated before any path construction; agent context,
+  build-control mount discovery, queue counters, prompt staging, and manifest
+  coverage also fail closed instead of accepting incomplete enumeration.
+- Build-control mounts are deduplicated, rejection rollback restores both queue
+  and feedback state, and corrupt external baseline markers fall back to
+  durable Git tags or review commits.
+- The semantic signature checker no longer runs under a script host that
+  preloads `Microsoft.Build.Framework`; its compiled host excludes NuGet
+  MSBuild runtime assets, verifies a clean output, registers the selected SDK
+  first, uses Roslyn's current workspace-failure API, and preserves nullable
+  flow analysis for fatal exits.
+- Dependency propagation rejects duplicate and unknown Module IDs before making
+  one atomic review-queue update.
+- Contract-test batches and the canonical golden harness roll back or remain
+  absent on installation failure; per-project sandboxes use collision-free
+  destinations.
+- Repair review instructions now distinguish a baseline diff from the attached
+  complete module, avoiding false "incomplete" findings for unchanged files.
+- `global.json` now pins the complete `10.0.100` SDK version used by the test
+  image.
+- `show-frontier-fix` now prints the generated fix content.
+
 ## [0.2.1] - 2026-08-05
 
 Hardening release for module baselines, protected artefacts, test isolation,

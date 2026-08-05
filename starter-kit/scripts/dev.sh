@@ -25,6 +25,15 @@ set -uo pipefail
 # in the environment still overrides.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE="${WORKSPACE:-$(dirname "$SCRIPT_DIR")}"
+WORKSPACE="$(cd "$WORKSPACE" 2>/dev/null && pwd -P)" || {
+  echo "ERROR: cannot resolve workspace '$WORKSPACE'." >&2
+  exit 1
+}
+# Runtime markers, logs, locks and backups are host-owned control state. Keep
+# them outside the workspace mounted into agent and test containers.
+# shellcheck source=runtime.sh
+source "$SCRIPT_DIR/runtime.sh"
+tenninety_init_runtime "$WORKSPACE" || exit 1
 
 # Guard against the multi-project PATH footgun. dev.sh always operates on the
 # workspace it lives in (WORKSPACE above). If you keep several projects on this
@@ -39,8 +48,14 @@ WORKSPACE="${WORKSPACE:-$(dirname "$SCRIPT_DIR")}"
 require_cwd_in_workspace() {
   [ "${DEV_ALLOW_ANY_CWD:-0}" = "1" ] && return 0
   local pwd_real ws_real
-  pwd_real="$(cd "$PWD" 2>/dev/null && pwd -P)" || return 0
-  ws_real="$(cd "$WORKSPACE" 2>/dev/null && pwd -P)" || return 0
+  pwd_real="$(cd "$PWD" 2>/dev/null && pwd -P)" || {
+    echo "ERROR: cannot resolve the current directory; refusing a workspace operation." >&2
+    return 1
+  }
+  ws_real="$(cd "$WORKSPACE" 2>/dev/null && pwd -P)" || {
+    echo "ERROR: cannot resolve the configured workspace." >&2
+    return 1
+  }
   # Allow if PWD is the workspace or any subdirectory of it.
   case "$pwd_real/" in
     "$ws_real"/*) return 0 ;;
@@ -184,8 +199,26 @@ preflight_llama_swap() {
 # them so adding a second project never silently weakens the sandbox.
 CONTRACTS_DIRS=()
 GOLDEN_DIRS=()
-mapfile -t CONTRACTS_DIRS < <(find "$WORKSPACE/tests" -maxdepth 1 -type d -name '*.Contracts' -printf '%f\n' 2>/dev/null | sort)
-mapfile -t GOLDEN_DIRS < <(find "$WORKSPACE/tests" -maxdepth 1 -type d -name '*.Golden' -printf '%f\n' 2>/dev/null | sort)
+enumerate_test_dirs() {
+  local pattern="$1" output_name="$2" listing
+  local -n output="$output_name"
+  output=()
+  [ -d "$WORKSPACE/tests" ] || return 0
+  listing="$(mktemp "$TENNINETY_RUNTIME_DIR/test-directories.XXXXXX")" || return 1
+  if ! find "$WORKSPACE/tests" -maxdepth 1 -type d -name "$pattern" -printf '%f\0' \
+      | sort -z > "$listing"; then
+    rm -f -- "$listing"
+    return 1
+  fi
+  mapfile -d '' -t output < "$listing"
+  local rc=$?
+  rm -f -- "$listing"
+  return "$rc"
+}
+enumerate_test_dirs '*.Contracts' CONTRACTS_DIRS || {
+  echo "ERROR: could not enumerate Contracts test directories." >&2; exit 1; }
+enumerate_test_dirs '*.Golden' GOLDEN_DIRS || {
+  echo "ERROR: could not enumerate Golden test directories." >&2; exit 1; }
 CONTRACTS_DIR="${CONTRACTS_DIRS[0]:-}"
 GOLDEN_DIR="${GOLDEN_DIRS[0]:-}"
 
@@ -197,9 +230,6 @@ for test_dir in "${CONTRACTS_DIRS[@]}" "${GOLDEN_DIRS[@]}"; do
   [ -n "$test_dir" ] && RO_MOUNTS+=(-v "$WORKSPACE/tests/$test_dir:/workspace/tests/$test_dir:ro")
 done
 [ -d "$WORKSPACE/tests/fixtures" ] && RO_MOUNTS+=(-v "$WORKSPACE/tests/fixtures:/workspace/tests/fixtures:ro")
-[ -f "$WORKSPACE/Directory.Packages.props" ] && RO_MOUNTS+=(-v "$WORKSPACE/Directory.Packages.props:/workspace/Directory.Packages.props:ro")
-[ -f "$WORKSPACE/Directory.Build.props" ] && RO_MOUNTS+=(-v "$WORKSPACE/Directory.Build.props:/workspace/Directory.Build.props:ro")
-[ -f "$WORKSPACE/Directory.Build.targets" ] && RO_MOUNTS+=(-v "$WORKSPACE/Directory.Build.targets:/workspace/Directory.Build.targets:ro")
 [ -f "$WORKSPACE/global.json" ] && RO_MOUNTS+=(-v "$WORKSPACE/global.json:/workspace/global.json:ro")
 [ -f "$WORKSPACE/REVIEW_QUEUE.md" ] && RO_MOUNTS+=(-v "$WORKSPACE/REVIEW_QUEUE.md:/workspace/REVIEW_QUEUE.md:ro")
 [ -d "$WORKSPACE/review-feedback" ] && RO_MOUNTS+=(-v "$WORKSPACE/review-feedback:/workspace/review-feedback:ro")
@@ -209,15 +239,24 @@ done
 # MSBuild project and solution files are trusted scaffold/build-control inputs.
 # A networked restore evaluates them, so implementation agents must never be
 # able to change an existing one or create a replacement that reaches a gate.
+build_control_listing="$(mktemp "$TENNINETY_RUNTIME_DIR/build-controls.XXXXXX")" || exit 1
+if ! find "$WORKSPACE" \
+    -path "$WORKSPACE/.git" -prune -o \
+    -path '*/bin' -prune -o -path '*/obj' -prune -o \
+    -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' -o \
+                 -name '*.sln' -o -name '*.slnx' -o -name '*.props' -o \
+                 -name '*.targets' -o -name '*.rsp' -o -name '*.user' -o \
+                 -name '.editorconfig' -o -iname 'NuGet.Config' \) \
+    -print0 | sort -z > "$build_control_listing"; then
+  rm -f -- "$build_control_listing"
+  echo "ERROR: could not enumerate trusted build-control files." >&2
+  exit 1
+fi
 while IFS= read -r -d '' build_file; do
   rel="${build_file#"$WORKSPACE/"}"
   RO_MOUNTS+=(-v "$build_file:/workspace/$rel:ro")
-done < <(find "$WORKSPACE" \
-  -path "$WORKSPACE/.git" -prune -o \
-  -path '*/bin' -prune -o -path '*/obj' -prune -o \
-  -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' -o \
-               -name '*.sln' -o -name '*.slnx' -o -name 'NuGet.Config' \) \
-  -print0 2>/dev/null)
+done < "$build_control_listing"
+rm -f -- "$build_control_listing"
 
 # --- aider invocation ----------------------------------------------------
 # run_agent <profile> <mode: code|ask> <writable: rw|ro> <prompt> [file-specs...]
@@ -236,6 +275,7 @@ run_agent() {
     echo "ERROR: aider profile not found at $profile – see SETUP_GUIDE.md Phase 7." >&2
     return 1
   }
+  reject_ignored_build_controls || return 1
 
   local mount_args=()
   if [ "$writable" = "ro" ]; then
@@ -272,8 +312,11 @@ run_agent() {
 
   # The prompt travels as a mounted file: no quoting limits, no stdin.
   local prompt_file
-  prompt_file="$(mktemp "${TMPDIR:-/tmp}/tenninety-prompt.XXXXXX")"
-  printf '%s\n' "$prompt" > "$prompt_file"
+  prompt_file="$(mktemp "${TMPDIR:-/tmp}/tenninety-prompt.XXXXXX")" || return 1
+  if ! printf '%s\n' "$prompt" > "$prompt_file"; then
+    rm -f -- "$prompt_file"
+    return 1
+  fi
 
   # GIT_OPTIONAL_LOCKS=0 stops even incidental .git writes (e.g. index refresh)
   # from a read-only .git mount. --no-git keeps aider itself away from Git.
@@ -322,7 +365,10 @@ EOF
 # owner) records intent-to-add for any new file so it shows up in the diff,
 # WITHOUT committing. Runs on the host; agents have .git read-only.
 stage_untracked() {
-  git -C "$WORKSPACE" add -N -- . 2>/dev/null || true
+  if ! git -C "$WORKSPACE" add -N -- .; then
+    echo "ERROR: could not make untracked files visible to the Git gates." >&2
+    return 1
+  fi
 }
 
 # --- Deterministic scope gate -------------------------------------------
@@ -415,40 +461,104 @@ module_baseline_ref() {
   # Repairs run against a fresh baseline at the rejection commit. Initial
   # implementation falls back to the permanent module-start tag.
   local module_id="$1"
-  local marker="$WORKSPACE/.dev-runtime/$module_id/active-baseline"
+  local marker="$TENNINETY_RUNTIME_DIR/$module_id/active-baseline" marker_ref
   if [ -s "$marker" ]; then
-    head -n 1 "$marker"
-  else
-    # .dev-runtime is intentionally disposable. Recover a repair baseline from
-    # durable Git tags if the runtime marker was cleaned or moved machines.
-    local repair
-    repair="$(git -C "$WORKSPACE" tag --list "module-repair-$module_id-*" \
-      --sort=-version:refname | head -n 1)"
-    if [ -n "$repair" ]; then echo "$repair"; else echo "module-start-$module_id"; fi
+    marker_ref="$(head -n 1 "$marker")" || marker_ref=""
+    if [ -n "$marker_ref" ] \
+        && git -C "$WORKSPACE" rev-parse -q --verify "$marker_ref^{commit}" >/dev/null; then
+      echo "$marker_ref"
+      return 0
+    fi
   fi
+  # Runtime state is intentionally disposable. Recover a repair baseline from
+  # durable Git tags if the runtime marker was cleaned, corrupt, or moved.
+  local repair
+  repair="$(git -C "$WORKSPACE" tag --list "module-repair-$module_id-*" \
+    --sort=-version:refname | head -n 1)" || return 1
+  if [ -z "$repair" ]; then
+    # If tag creation failed after a committed rejection, recover the durable
+    # baseline from the orchestrator's exact commit subject.
+    repair="$(git -C "$WORKSPACE" log -n 1 --format=%H \
+      --grep="^review($module_id): reject attempt [0-9][0-9]*$" HEAD 2>/dev/null)" || return 1
+  fi
+  if [ -n "$repair" ]; then echo "$repair"; else echo "module-start-$module_id"; fi
+}
+
+diff_paths_from_ref() {
+  # Print both the source and destination of renames/copies. `git diff
+  # --name-only` prints only the destination, which can hide an out-of-scope
+  # source path from scope and reset checks.
+  local reference="${1:?reference required}"
+  shift
+  local listing status first second rc=0
+  listing="$(mktemp "$TENNINETY_RUNTIME_DIR/diff-paths.XXXXXX")" || return 1
+  if ! git -C "$WORKSPACE" diff --find-renames --find-copies --name-status -z \
+      "$reference" -- "$@" > "$listing"; then
+    rm -f -- "$listing"
+    return 1
+  fi
+  while IFS= read -r -d '' status; do
+    if ! IFS= read -r -d '' first; then rc=1; break; fi
+    case "$status" in
+      R*|C*)
+        if ! IFS= read -r -d '' second; then rc=1; break; fi
+        printf '%s\n%s\n' "$first" "$second"
+        ;;
+      *) printf '%s\n' "$first" ;;
+    esac
+  done < "$listing"
+  rm -f -- "$listing"
+  return "$rc"
 }
 
 module_diff_names() {
   local module_id="$1" baseline
-  baseline="$(module_baseline_ref "$module_id")"
-  git -C "$WORKSPACE" diff --name-only "$baseline" -- . \
+  baseline="$(module_baseline_ref "$module_id")" || return 1
+  diff_paths_from_ref "$baseline" . \
     ':(exclude)REVIEW_QUEUE.md' \
-    ':(exclude)review-feedback/**'
+    ':(exclude)review-feedback/**' | sort -u
 }
 
 module_diff_text() {
   local module_id="$1" baseline
-  baseline="$(module_baseline_ref "$module_id")"
+  baseline="$(module_baseline_ref "$module_id")" || return 1
   git -C "$WORKSPACE" diff --no-color "$baseline" -- . \
     ':(exclude)REVIEW_QUEUE.md' \
     ':(exclude)review-feedback/**'
 }
 
 is_build_control_path() {
-  case "$1" in
-    *.csproj|*.fsproj|*.vbproj|*.sln|*.slnx|*.props|*.targets|NuGet.Config|*/NuGet.Config|global.json)
+  local path="${1,,}"
+  case "$path" in
+    *.csproj|*.fsproj|*.vbproj|*.sln|*.slnx|*.props|*.targets|*.rsp|*.user|nuget.config|*/nuget.config|global.json|.editorconfig|*/.editorconfig)
       return 0 ;;
   esac
+  return 1
+}
+
+ignored_build_control_paths() {
+  local path listing
+  listing="$(mktemp "$TENNINETY_RUNTIME_DIR/ignored-controls.XXXXXX")" || return 1
+  if ! git -C "$WORKSPACE" ls-files --others --ignored --exclude-standard -z > "$listing"; then
+    rm -f -- "$listing"
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    is_build_control_path "$path" && printf '%s\n' "$path"
+  done < "$listing"
+  local rc=$?
+  rm -f -- "$listing"
+  return "$rc"
+}
+
+reject_ignored_build_controls() {
+  local ignored
+  ignored="$(ignored_build_control_paths)" || return 1
+  [ -z "$ignored" ] && return 0
+  echo "IGNORED BUILD-CONTROL FILE(S) detected:" >&2
+  printf '%s\n' "$ignored" | sed 's/^/  - /' >&2
+  echo "Remove them or commit them in a separate reviewed scaffold change." >&2
+  echo "Ignored build inputs cannot participate in a verified gate." >&2
   return 1
 }
 
@@ -457,7 +567,12 @@ is_build_control_path() {
 scope_check() {
   local module_id="$1"
   local baseline
-  baseline="$(module_baseline_ref "$module_id")"
+  baseline="$(module_baseline_ref "$module_id")" || {
+    echo "SCOPE ERROR: could not resolve the active baseline." >&2
+    return 1
+  }
+
+  reject_ignored_build_controls || return 1
 
   if ! git -C "$WORKSPACE" rev-parse -q --verify "$baseline^{commit}" >/dev/null; then
     echo "SCOPE ERROR: baseline '$baseline' for module '$module_id' does not exist." >&2
@@ -465,9 +580,9 @@ scope_check() {
   fi
 
   # Include untracked new files in the comparison (agents don't commit).
-  stage_untracked
+  stage_untracked || return 1
 
-  local allowed protected
+  local allowed implementation_allowed protected
   allowed="$(manifest_allowed_paths "$module_id" "$baseline")" || {
     echo "SCOPE ERROR: could not read the baseline manifest from '$baseline'." >&2
     return 1
@@ -477,6 +592,7 @@ scope_check() {
     echo "  Check the ID exists and its manifest lists paths under those headings." >&2
     return 1
   fi
+  implementation_allowed="$allowed"
   protected="$(manifest_protected_paths "$module_id" "$baseline")" || {
     echo "SCOPE ERROR: could not read protected paths from '$baseline'." >&2
     return 1
@@ -513,9 +629,12 @@ tests/$GOLDEN_DIR/CriticalLogicGoldenTests.cs"
     echo "$changed" >&2
     return 1
   fi
-  [ -n "$changed" ] || return 0
+  if [ -z "$changed" ]; then
+    echo "SCOPE ERROR: module '$module_id' has no implementation changes." >&2
+    return 1
+  fi
 
-  local offenders="" build_control=""
+  local offenders="" build_control="" implementation_changed=0
   local path
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -523,6 +642,8 @@ tests/$GOLDEN_DIR/CriticalLogicGoldenTests.cs"
       build_control="$build_control$path"$'\n'
     elif ! printf '%s\n' "$allowed" | grep -qxF "$path"; then
       offenders="$offenders$path"$'\n'
+    elif printf '%s\n' "$implementation_allowed" | grep -qxF "$path"; then
+      implementation_changed=1
     fi
   done <<EOF
 $changed
@@ -544,6 +665,11 @@ EOF
     echo "  For a deliberate new path, have a human commit the reviewed spec change before starting a new baseline." >&2
     return 1
   fi
+  if [ "$implementation_changed" -ne 1 ]; then
+    echo "SCOPE ERROR: '$module_id' changes only metadata or protected tests;" >&2
+    echo "at least one manifest Implementation/Shared path must change." >&2
+    return 1
+  fi
   return 0
 }
 
@@ -558,17 +684,27 @@ EOF
 spec_changed_in_module() {
   # spec_changed_in_module <module-id> -> 0 if architecture.md is in the diff.
   local module_id="$1" baseline
-  baseline="$(module_baseline_ref "$module_id")"
-  git -C "$WORKSPACE" rev-parse -q --verify "$baseline^{commit}" >/dev/null || return 1
-  stage_untracked
-  module_diff_names "$module_id" 2>/dev/null | grep -qx '.agent/rules/architecture.md'
+  baseline="$(module_baseline_ref "$module_id")" || return 2
+  git -C "$WORKSPACE" rev-parse -q --verify "$baseline^{commit}" >/dev/null || return 2
+  stage_untracked || return 2
+  local changed
+  changed="$(module_diff_names "$module_id")" || return 2
+  printf '%s\n' "$changed" | grep -qx '.agent/rules/architecture.md'
 }
 
 # Enforce the human gate. Returns 0 to proceed, 1 to refuse.
 require_spec_change_ack() {
   # require_spec_change_ack <module-id> <allow-flag: 0|1> <command-name>
   local module_id="$1" allow="$2" cmd="$3"
-  spec_changed_in_module "$module_id" || return 0   # no spec change: nothing to gate
+  spec_changed_in_module "$module_id"
+  local spec_status=$?
+  case "$spec_status" in
+    0) : ;;
+    1) return 0 ;;
+    *)
+      echo "ERROR: could not determine whether the architecture spec changed." >&2
+      return 1 ;;
+  esac
 
   if [ "$allow" = "1" ]; then
     echo "==> Interface change acknowledged (--allow-spec-change)."
@@ -598,7 +734,7 @@ require_spec_change_ack() {
 }
 
 # --- Module state gates -------------------------------------------------
-# Gate markers live in .dev-runtime/<module-id>/ and record a CONTENT
+# Gate markers live outside the workspace and record a CONTENT
 # fingerprint, not a commit hash. Agents never commit, so HEAD does not move
 # while a module is being built: a HEAD-based marker would compare equal to
 # itself forever and could never detect that code changed after a gate passed.
@@ -607,46 +743,81 @@ require_spec_change_ack() {
 
 module_fingerprint() {
   # SHA-256 over the full working state relative to the module baseline.
-  # .dev-runtime/ is excluded: it holds the markers themselves.
-  {
-    git -C "$WORKSPACE" diff --binary HEAD -- . \
+  local state paths path digest
+  state="$(mktemp "$TENNINETY_RUNTIME_DIR/fingerprint-state.XXXXXX")" || return 1
+  paths="$(mktemp "$TENNINETY_RUNTIME_DIR/fingerprint-paths.XXXXXX")" || {
+    rm -f -- "$state"; return 1;
+  }
+  if ! git -C "$WORKSPACE" diff --binary HEAD -- . \
       ':(exclude)REVIEW_QUEUE.md' \
-      ':(exclude)review-feedback/**' 2>/dev/null
-    git -C "$WORKSPACE" ls-files --others --exclude-standard 2>/dev/null \
-      | grep -v '^\.dev-runtime/' \
-      | grep -v '^review-feedback/' \
-      | while IFS= read -r f; do
-          printf '%s\n' "$f"
-          cat "$WORKSPACE/$f" 2>/dev/null
-        done
-  } | sha256sum | cut -d' ' -f1
+      ':(exclude)review-feedback/**' > "$state"; then
+    rm -f -- "$state" "$paths"
+    return 1
+  fi
+  if ! git -C "$WORKSPACE" ls-files --others --exclude-standard -z > "$paths"; then
+    rm -f -- "$state" "$paths"
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    case "$path" in review-feedback/*) continue ;; esac
+    printf '%s\0' "$path" >> "$state" || {
+      rm -f -- "$state" "$paths"; return 1;
+    }
+    if [ -L "$WORKSPACE/$path" ]; then
+      readlink -- "$WORKSPACE/$path" >> "$state" || {
+        rm -f -- "$state" "$paths"; return 1;
+      }
+    elif ! cat -- "$WORKSPACE/$path" >> "$state"; then
+      rm -f -- "$state" "$paths"
+      return 1
+    fi
+  done < "$paths"
+  digest="$(sha256sum -- "$state")" || {
+    rm -f -- "$state" "$paths"; return 1;
+  }
+  rm -f -- "$state" "$paths"
+  printf '%s\n' "${digest%% *}"
 }
 
 gate_dir() {
   local module_id="$1"
-  mkdir -p "$WORKSPACE/.dev-runtime/$module_id/gates"
-  echo "$WORKSPACE/.dev-runtime/$module_id/gates"
+  mkdir -p "$TENNINETY_RUNTIME_DIR/$module_id/gates" || return 1
+  printf '%s\n' "$TENNINETY_RUNTIME_DIR/$module_id/gates"
 }
 
 gate_pass() {
   # gate_pass <module-id> <gate-name> – record that this gate passed for the
   # current content fingerprint.
-  local module_id="$1" gate="$2"
-  module_fingerprint > "$(gate_dir "$module_id")/$gate"
+  local module_id="$1" gate="$2" directory marker temporary fingerprint
+  reject_ignored_build_controls || return 1
+  directory="$(gate_dir "$module_id")" || return 1
+  marker="$directory/$gate"
+  temporary="$(mktemp "$directory/.${gate}.XXXXXX")" || return 1
+  fingerprint="$(module_fingerprint)" || {
+    rm -f -- "$temporary"; return 1;
+  }
+  printf '%s\n' "$fingerprint" > "$temporary" || {
+    rm -f -- "$temporary"; return 1;
+  }
+  mv -- "$temporary" "$marker"
 }
 
 gate_check() {
   # gate_check <module-id> <gate-name> – succeed only if the gate passed for
   # the CURRENT content. Any edit since then invalidates it.
   local module_id="$1" gate="$2"
-  local marker; marker="$(gate_dir "$module_id")/$gate"
+  reject_ignored_build_controls >/dev/null || return 3
+  local directory marker current
+  directory="$(gate_dir "$module_id")" || return 4
+  marker="$directory/$gate"
   [ -f "$marker" ] || return 1
-  [ "$(cat "$marker")" = "$(module_fingerprint)" ] || return 2
+  current="$(module_fingerprint)" || return 4
+  [ "$(cat "$marker")" = "$current" ] || return 2
 }
 
 require_started() {
   local module_id="$1"
-  if ! git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/module-start-$module_id" >/dev/null; then
+  if ! git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/module-start-$module_id^{commit}" >/dev/null; then
     echo "ERROR: module '$module_id' was never started (no tag module-start-$module_id)."
     echo "Run 'dev.sh start $module_id' first, using a Module ID from architecture.md."
     return 1
@@ -662,6 +833,8 @@ require_gate() {
     1) echo "ERROR: $module_id has not passed $what."; echo "Run: $remedy"; return 1 ;;
     2) echo "ERROR: $module_id passed $what, but the code has changed since."
        echo "Re-run: $remedy"; return 1 ;;
+    3) reject_ignored_build_controls; return 1 ;;
+    *) echo "ERROR: could not verify the $what gate for $module_id."; return 1 ;;
   esac
 }
 
@@ -672,6 +845,7 @@ cmd_start() {
     echo "ERROR: invalid Module ID '$module_id' (expected lowercase kebab-case)."; return 1; }
   [ -n "$(manifest_allowed_paths "$module_id")" ] || {
     echo "ERROR: Module ID '$module_id' has no manifest implementation/shared paths."; return 1; }
+  reject_ignored_build_controls || return 1
 
   # Require an initial commit – the whole review architecture diffs against a
   # committed baseline.
@@ -682,10 +856,14 @@ cmd_start() {
 
   # Require a clean tree so the module diff contains only this module's work
   # (this also catches leftover untracked files from a prior aborted run).
-  # Ignore the orchestrator's own .dev-runtime/ scratch dir.
-  if [ -n "$(git -C "$WORKSPACE" status --porcelain | grep -v '\.dev-runtime/')" ]; then
+  local start_status
+  if ! start_status="$(git -C "$WORKSPACE" status --porcelain)"; then
+    echo "ERROR: could not inspect the working tree." >&2
+    return 1
+  fi
+  if [ -n "$start_status" ]; then
     echo "ERROR: working tree is not clean. Commit, stash, or reset first:"
-    git -C "$WORKSPACE" status --short | grep -v '\.dev-runtime/'
+    git -C "$WORKSPACE" status --short
     return 1
   fi
 
@@ -696,14 +874,19 @@ cmd_start() {
     return 1
   fi
 
-  # Record the exact base commit both as a tag and as a plain-text baseline
-  # under .dev-runtime, so later steps can diff against an unambiguous ref.
+  # Record the exact base commit both as a tag and as a host-only baseline, so
+  # later steps can diff against an unambiguous ref.
   local base
-  base=$(git -C "$WORKSPACE" rev-parse HEAD)
+  base="$(git -C "$WORKSPACE" rev-parse HEAD)" || return 1
   git -C "$WORKSPACE" tag "module-start-$module_id" "$base" || return 1
-  mkdir -p "$WORKSPACE/.dev-runtime/$module_id"
-  echo "$base" > "$WORKSPACE/.dev-runtime/$module_id/base-commit"
-  echo "module-start-$module_id" > "$WORKSPACE/.dev-runtime/$module_id/active-baseline"
+  if ! mkdir -p "$TENNINETY_RUNTIME_DIR/$module_id" \
+      || ! printf '%s\n' "$base" > "$TENNINETY_RUNTIME_DIR/$module_id/base-commit" \
+      || ! printf '%s\n' "module-start-$module_id" > "$TENNINETY_RUNTIME_DIR/$module_id/active-baseline"; then
+    # The tag is the durable source of truth; remove any partial marker so
+    # module_baseline_ref falls back to it instead of trusting stale state.
+    rm -f -- "$TENNINETY_RUNTIME_DIR/$module_id/active-baseline" 2>/dev/null || true
+    echo "WARNING: external baseline markers could not be written; the durable start tag will be used." >&2
+  fi
   echo "Started module '$module_id' at base commit ${base:0:12} (tag module-start-$module_id)."
 }
 
@@ -712,30 +895,39 @@ cmd_start() {
 # file in the module's manifest (editable). Manifest files that don't exist
 # yet are skipped here and named in the task for the Coder to create.
 coder_file_specs() {
-  local module_id="$1"
+  local module_id="$1" baseline paths
   printf '%s\n' \
     "--read:.agent/rules/architecture.md" \
     "--read:.agent/skills/coder.md" \
     "--read:.agent/skills/tester.md"
+  baseline="$(module_baseline_ref "$module_id")" || return 1
+  paths="$(manifest_allowed_paths "$module_id" "$baseline")" || return 1
   local p
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     case "$p" in .agent/rules/architecture.md) continue ;; esac
     [ -f "$WORKSPACE/$p" ] && printf '%s\n' "--edit:$p"
-  done < <(manifest_allowed_paths "$module_id" "$(module_baseline_ref "$module_id")")
+  done <<EOF
+$paths
+EOF
 }
 
 reviewer_file_specs() {
-  local module_id="$1" baseline
-  baseline="$(module_baseline_ref "$module_id")"
+  local module_id="$1" baseline allowed protected paths
+  baseline="$(module_baseline_ref "$module_id")" || return 1
   printf '%s\n' \
     "--read:.agent/rules/architecture.md" \
     "--read:.agent/skills/reviewer.md" \
     "--read:review-feedback/$module_id.md"
+  allowed="$(manifest_allowed_paths "$module_id" "$baseline")" || return 1
+  protected="$(manifest_protected_paths "$module_id" "$baseline")" || return 1
+  paths="$(printf '%s\n%s\n' "$allowed" "$protected" | sort -u)" || return 1
   local p
   while IFS= read -r p; do
     [ -n "$p" ] && [ -f "$WORKSPACE/$p" ] && printf '%s\n' "--read:$p"
-  done < <({ manifest_allowed_paths "$module_id" "$baseline"; manifest_protected_paths "$module_id" "$baseline"; } | sort -u)
+  done <<EOF
+$paths
+EOF
 }
 
 # Run the Reviewer with the module diff inlined. aider runs single-shot and
@@ -746,13 +938,13 @@ run_review() {
   # run_review <module-id>
   local module_id="$1"
   local baseline
-  baseline="$(module_baseline_ref "$module_id")"
+  baseline="$(module_baseline_ref "$module_id")" || return 1
   local diff_text
-  if git -C "$WORKSPACE" rev-parse -q --verify "$baseline^{commit}" >/dev/null; then
-    diff_text="$(module_diff_text "$module_id")" || return 1
-  else
-    diff_text="$(git -C "$WORKSPACE" diff --no-color)"
+  if ! git -C "$WORKSPACE" rev-parse -q --verify "$baseline^{commit}" >/dev/null; then
+    echo "ERROR: reviewer baseline '$baseline' does not resolve to a commit." >&2
+    return 1
   fi
+  diff_text="$(module_diff_text "$module_id")" || return 1
   local prompt
   prompt="$(cat <<EOF
 Read the attached .agent/skills/reviewer.md and review the module diff below against its checklist and the attached .agent/rules/architecture.md. The current full module files are also attached read-only. For a repair, the human rejection feedback is attached and the diff starts at that rejection baseline.
@@ -764,8 +956,9 @@ $diff_text
 ----- END MODULE DIFF -----
 EOF
 )"
-  local specs=()
-  mapfile -t specs < <(reviewer_file_specs "$module_id")
+  local specs=() spec_text
+  spec_text="$(reviewer_file_specs "$module_id")" || return 1
+  mapfile -t specs <<< "$spec_text"
   run_agent "$REVIEWER_PROFILE" ask ro "$prompt" "${specs[@]}"
 }
 
@@ -777,8 +970,9 @@ cmd_write() {
   [ -n "$task" ] || { echo 'usage: dev.sh write <module-id> "<task>"'; return 1; }
   require_started "$module_id" || return 1
   preflight_llama_swap || return 1
-  local specs=()
-  mapfile -t specs < <(coder_file_specs "$module_id")
+  local specs=() spec_text
+  spec_text="$(coder_file_specs "$module_id")" || return 1
+  mapfile -t specs <<< "$spec_text"
   run_agent "$CODER_PROFILE" code rw "$(broadcast_prefix)$task" "${specs[@]}"
 }
 
@@ -852,8 +1046,8 @@ cmd_iterate() {
   # Coder call with a silent terminal.
   preflight_llama_swap || return 1
 
-  mkdir -p "$WORKSPACE/.dev-runtime/$module_id"
-  local test_log="$WORKSPACE/.dev-runtime/$module_id/latest-test.log"
+  mkdir -p "$TENNINETY_RUNTIME_DIR/$module_id"
+  local test_log="$TENNINETY_RUNTIME_DIR/$module_id/latest-test.log"
 
   while [ "$attempt" -lt "$max_attempts" ]; do
     attempt=$((attempt + 1))
@@ -875,8 +1069,9 @@ $feedback"
     echo "==> Pass $attempt: WRITE"
     # Recompute the attachment set every attempt: files the Coder created in a
     # previous attempt now exist and must be attached editable to be edited.
-    local specs=()
-    mapfile -t specs < <(coder_file_specs "$module_id")
+    local specs=() spec_text
+    spec_text="$(coder_file_specs "$module_id")" || return 1
+    mapfile -t specs <<< "$spec_text"
     local write_out
     write_out=$(run_agent "$CODER_PROFILE" code rw "$(broadcast_prefix)$task" "${specs[@]}" 2>&1) || true
     echo "$write_out"
@@ -898,7 +1093,7 @@ $feedback"
       echo ""
       echo "==> Scope FAILED – back to Write (Reviewer and Test skipped this iteration)."
       local baseline
-      baseline="$(module_baseline_ref "$module_id")"
+      baseline="$(module_baseline_ref "$module_id")" || return 1
       feedback="SCOPE FAILED. You changed files outside this module's manifest. Delete any newly-created out-of-scope files, and for a modified tracked file restore it with 'git show $baseline:<path> > <path>' (your .git is read-only, so 'git checkout' will fail). Only touch the paths listed under this module's Implementation files / Shared integration files:
 $(echo "$scope_out" | tail -n "$FEEDBACK_MAX_LINES")"
       continue
@@ -947,8 +1142,8 @@ $(echo "$review_out" | tail -n "$FEEDBACK_MAX_LINES")"
 $(echo "$post_scope" | tail -n "$FEEDBACK_MAX_LINES")"
         continue
       fi
-      gate_pass "$module_id" reviewed
-      gate_pass "$module_id" fast-tests
+      gate_pass "$module_id" reviewed || return 1
+      gate_pass "$module_id" fast-tests || return 1
       echo ""
       echo "==> PASS – module $module_id cleared review and the fast tier."
       echo "    Run 'dev.sh finalise $module_id' to run integration tests."
@@ -1026,7 +1221,7 @@ cmd_finalise() {
   echo "==> Downstream interface-drift check"
   # A crash in the drift tool must not be read as "no interface changed".
   local baseline
-  baseline="$(module_baseline_ref "$module_id")"
+  baseline="$(module_baseline_ref "$module_id")" || return 1
   if ! (cd "$WORKSPACE" && ./scripts/check_interface_drift.sh "$module_id" "$baseline"); then
     echo "ERROR: the interface-drift check failed to run."
     echo "Fix the drift tooling before finalising – a broken checker cannot be"
@@ -1034,14 +1229,28 @@ cmd_finalise() {
     return 1
   fi
 
-  gate_pass "$module_id" integration
+  gate_pass "$module_id" integration || return 1
   echo "Finalised $module_id. Now run 'dev.sh commit $module_id'."
 }
 
 cmd_queue() {
-  local module_id="${1:-}"
+  local module_id="${1:-}" status
   [ -n "$module_id" ] || { echo "usage: dev.sh queue <module-id>"; return 1; }
   require_started "$module_id" || return 1
+
+  status="$(queue_status_for "$module_id")"
+  case "$status" in
+    ""|needs-fixes|interface-changed) : ;;
+    ready-for-review)
+      echo "ERROR: module '$module_id' is already ready for review." >&2
+      return 1 ;;
+    approved)
+      echo "ERROR: module '$module_id' is approved and cannot be reopened by queue." >&2
+      return 1 ;;
+    *)
+      echo "ERROR: module '$module_id' has unknown queue status '$status'." >&2
+      return 1 ;;
+  esac
 
   # Require a successful finalise for the CURRENT content – not merely for the
   # current commit. Agents never commit, so a HEAD comparison could never
@@ -1060,7 +1269,11 @@ cmd_queue() {
   (cd "$WORKSPACE" && ./scripts/queue_for_review.sh "$module_id") || return 1
   # Fold the queue row into the module's commit so the tree stays clean and the
   # next 'dev.sh start' can run.
-  git -C "$WORKSPACE" add REVIEW_QUEUE.md >/dev/null 2>&1 || true
+  if ! git -C "$WORKSPACE" add REVIEW_QUEUE.md; then
+    git -C "$WORKSPACE" restore --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
+    echo "ERROR: could not stage the queue update; REVIEW_QUEUE.md was restored." >&2
+    return 1
+  fi
   if ! git -C "$WORKSPACE" diff --cached --quiet 2>/dev/null; then
     if ! git -C "$WORKSPACE" commit -q -m "queue($module_id): ready for review"; then
       git -C "$WORKSPACE" restore --staged --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
@@ -1092,8 +1305,9 @@ cmd_commit() {
     "dev.sh finalise $module_id" || return 1
   scope_check "$module_id" || return 1
 
-  # Stage everything except the orchestrator's own scratch directory.
-  (cd "$WORKSPACE" && git add -A -- . ':!.dev-runtime' >/dev/null 2>&1) || {
+  # Runtime state is outside the workspace, so every workspace change is part
+  # of the candidate commit.
+  (cd "$WORKSPACE" && git add -A -- . >/dev/null 2>&1) || {
     echo "ERROR: could not stage module changes."; return 1; }
 
   if git -C "$WORKSPACE" diff --cached --quiet 2>/dev/null; then
@@ -1111,10 +1325,10 @@ cmd_commit() {
   # HEAD becomes empty), which would invalidate the gates this module just
   # earned. Re-stamp them at the new fingerprint: the CONTENT is identical –
   # only its Git location moved – so the gates remain truthful.
-  gate_pass "$module_id" reviewed
-  gate_pass "$module_id" fast-tests
-  gate_pass "$module_id" integration
-  gate_pass "$module_id" committed
+  gate_pass "$module_id" reviewed || return 1
+  gate_pass "$module_id" fast-tests || return 1
+  gate_pass "$module_id" integration || return 1
+  gate_pass "$module_id" committed || return 1
   echo "Now run 'dev.sh queue $module_id'."
 }
 
@@ -1150,14 +1364,30 @@ queue_status_for() {
 }
 
 require_review_decision_ready() {
-  local module_id="$1" status
+  local module_id="$1" status row_count
+  [ -f "$WORKSPACE/REVIEW_QUEUE.md" ] || {
+    echo "ERROR: REVIEW_QUEUE.md is missing." >&2
+    return 1
+  }
+  row_count="$(awk -F'|' -v m=" $module_id " '$2==m {count++} END {print count+0}' \
+    "$WORKSPACE/REVIEW_QUEUE.md")" || {
+      echo "ERROR: could not read REVIEW_QUEUE.md." >&2
+      return 1
+    }
+  [ "$row_count" -eq 1 ] || {
+    echo "ERROR: expected exactly one review row for '$module_id'; found $row_count." >&2
+    return 1
+  }
   status="$(queue_status_for "$module_id")"
   [ "$status" = "ready-for-review" ] || {
     echo "ERROR: module '$module_id' is not ready for review (status: ${status:-missing})." >&2
     return 1
   }
   local dirty
-  dirty="$(git -C "$WORKSPACE" status --porcelain | grep -vE '^[ MARC?]{2} \.dev-runtime/' || true)"
+  if ! dirty="$(git -C "$WORKSPACE" status --porcelain)"; then
+    echo "ERROR: could not inspect the working tree before review decision." >&2
+    return 1
+  fi
   [ -z "$dirty" ] || {
     echo "ERROR: the working tree must be clean before recording a review decision:" >&2
     printf '%s\n' "$dirty" >&2
@@ -1172,16 +1402,18 @@ cmd_reject() {
   local feedback="$*"
   [ -n "$feedback" ] || { echo "usage: dev.sh reject <module-id> \"<feedback>\""; return 1; }
   require_review_decision_ready "$module_id" || return 1
-  local feedback_was_tracked=0
-  git -C "$WORKSPACE" ls-files --error-unmatch "review-feedback/$module_id.md" >/dev/null 2>&1 \
-    && feedback_was_tracked=1
-  mkdir -p "$WORKSPACE/review-feedback"
-  printf '%s\n' "$feedback" > "$WORKSPACE/review-feedback/$module_id.md"
   # Increment the rejection count in the same edit that sets the status, so the
   # documented three-strikes rule can actually fire.
   local count
-  count=$(awk -F'|' -v m=" $module_id " '$2==m {gsub(/ /,"",$4); print $4}' "$WORKSPACE/REVIEW_QUEUE.md" | head -1)
-  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  count="$(awk -F'|' -v m=" $module_id " '$2==m {gsub(/ /,"",$4); print $4}' \
+    "$WORKSPACE/REVIEW_QUEUE.md")" || {
+      echo "ERROR: could not read the rejection counter." >&2
+      return 1
+    }
+  [[ "$count" =~ ^[0-9]+$ ]] || {
+    echo "ERROR: invalid rejection counter '$count' for '$module_id'." >&2
+    return 1
+  }
   if [ "$count" -ge 3 ]; then
     echo "ERROR: '$module_id' has already been rejected three times." >&2
     echo "Revise its specification before another implementation attempt." >&2
@@ -1193,12 +1425,46 @@ cmd_reject() {
     echo "ERROR: repair baseline tag '$repair_tag' already exists." >&2
     return 1
   fi
-  sed -i "s/| $module_id | [^|]* | [^|]* |/| $module_id | needs-fixes | $count |/" "$WORKSPACE/REVIEW_QUEUE.md"
+
+  # Validate every refusal condition before writing either metadata file.
+  local feedback_was_tracked=0
+  git -C "$WORKSPACE" ls-files --error-unmatch "review-feedback/$module_id.md" >/dev/null 2>&1 \
+    && feedback_was_tracked=1
+  mkdir -p "$WORKSPACE/review-feedback" || return 1
+  if ! printf '%s\n' "$feedback" > "$WORKSPACE/review-feedback/$module_id.md"; then
+    if [ "$feedback_was_tracked" = "1" ]; then
+      git -C "$WORKSPACE" restore --worktree -- "review-feedback/$module_id.md" 2>/dev/null || true
+    else
+      rm -f -- "$WORKSPACE/review-feedback/$module_id.md"
+    fi
+    echo "ERROR: could not write rejection feedback." >&2
+    return 1
+  fi
+  if ! sed -i "s/| $module_id | [^|]* | [^|]* |/| $module_id | needs-fixes | $count |/" \
+      "$WORKSPACE/REVIEW_QUEUE.md" \
+      || ! grep -q "^| $module_id | needs-fixes | $count |" "$WORKSPACE/REVIEW_QUEUE.md"; then
+    git -C "$WORKSPACE" restore --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
+    [ "$feedback_was_tracked" = "1" ] \
+      && git -C "$WORKSPACE" restore --worktree -- "review-feedback/$module_id.md" 2>/dev/null \
+      || rm -f -- "$WORKSPACE/review-feedback/$module_id.md"
+    echo "ERROR: could not update rejection metadata." >&2
+    return 1
+  fi
 
   # Commit review metadata immediately so the tree stays usable. A fresh repair
   # baseline at this commit isolates the fix from both the original module
   # implementation and every module committed since it was first queued.
-  git -C "$WORKSPACE" add REVIEW_QUEUE.md "review-feedback/$module_id.md" || return 1
+  if ! git -C "$WORKSPACE" add REVIEW_QUEUE.md "review-feedback/$module_id.md"; then
+    git -C "$WORKSPACE" restore --staged --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
+    if [ "$feedback_was_tracked" = "1" ]; then
+      git -C "$WORKSPACE" restore --staged --worktree -- "review-feedback/$module_id.md" 2>/dev/null || true
+    else
+      git -C "$WORKSPACE" restore --staged -- "review-feedback/$module_id.md" 2>/dev/null || true
+      rm -f -- "$WORKSPACE/review-feedback/$module_id.md"
+    fi
+    echo "ERROR: could not stage rejection metadata; review files were restored." >&2
+    return 1
+  fi
   if ! git -C "$WORKSPACE" commit -q -m "review($module_id): reject attempt $count"; then
     git -C "$WORKSPACE" restore --staged --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
     if [ "$feedback_was_tracked" = "1" ]; then
@@ -1211,16 +1477,19 @@ cmd_reject() {
     return 1
   fi
   # A successfully rejected module must re-earn every gate.
-  rm -f "$WORKSPACE/.dev-runtime/$module_id/gates/"* 2>/dev/null || true
+  rm -f "$TENNINETY_RUNTIME_DIR/$module_id/gates/"* 2>/dev/null || true
   local repair_commit
   repair_commit="$(git -C "$WORKSPACE" rev-parse HEAD)" || return 1
   if ! git -C "$WORKSPACE" tag "$repair_tag" "$repair_commit"; then
     echo "WARNING: could not create '$repair_tag'; using commit $repair_commit as the repair baseline." >&2
     repair_tag="$repair_commit"
   fi
-  mkdir -p "$WORKSPACE/.dev-runtime/$module_id"
-  printf '%s\n' "$repair_tag" > "$WORKSPACE/.dev-runtime/$module_id/active-baseline"
-  git -C "$WORKSPACE" rev-parse HEAD > "$WORKSPACE/.dev-runtime/$module_id/base-commit"
+  if ! mkdir -p "$TENNINETY_RUNTIME_DIR/$module_id" \
+      || ! printf '%s\n' "$repair_tag" > "$TENNINETY_RUNTIME_DIR/$module_id/active-baseline" \
+      || ! printf '%s\n' "$repair_commit" > "$TENNINETY_RUNTIME_DIR/$module_id/base-commit"; then
+    rm -f -- "$TENNINETY_RUNTIME_DIR/$module_id/active-baseline" 2>/dev/null || true
+    echo "WARNING: external baseline markers could not be updated; the durable repair tag/commit will be used." >&2
+  fi
   echo "Rejected $module_id (rejections: $count) – feedback in review-feedback/$module_id.md"
   if [ "$count" -ge 3 ]; then
     echo ""
@@ -1234,8 +1503,17 @@ cmd_approve() {
   local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh approve <module-id>"; return 1; }
   require_review_decision_ready "$module_id" || return 1
-  sed -i "s/| $1 | [^|]* |/| $1 | approved |/" "$WORKSPACE/REVIEW_QUEUE.md"
-  git -C "$WORKSPACE" add REVIEW_QUEUE.md || return 1
+  if ! sed -i "s/| $1 | [^|]* |/| $1 | approved |/" "$WORKSPACE/REVIEW_QUEUE.md" \
+      || ! grep -q "^| $module_id | approved |" "$WORKSPACE/REVIEW_QUEUE.md"; then
+    git -C "$WORKSPACE" restore --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
+    echo "ERROR: could not update approval metadata." >&2
+    return 1
+  fi
+  if ! git -C "$WORKSPACE" add REVIEW_QUEUE.md; then
+    git -C "$WORKSPACE" restore --staged --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
+    echo "ERROR: could not stage approval metadata; REVIEW_QUEUE.md was restored." >&2
+    return 1
+  fi
   if ! git -C "$WORKSPACE" diff --cached --quiet; then
     if ! git -C "$WORKSPACE" commit -q -m "review($module_id): approve"; then
       git -C "$WORKSPACE" restore --staged --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
@@ -1247,17 +1525,31 @@ cmd_approve() {
 }
 
 cmd_status() {
+  echo "=== HOST RUNTIME ==="
+  echo "$TENNINETY_RUNTIME_DIR"
+  echo ""
   echo "=== REVIEW QUEUE ==="
   cat "$WORKSPACE/REVIEW_QUEUE.md" 2>/dev/null || echo "(empty)"
   echo ""
   echo "=== ESCALATIONS ==="
-  cat "$WORKSPACE/.escalations.json" 2>/dev/null || echo "(none)"
+  cat "$TENNINETY_RUNTIME_DIR/escalations.json" 2>/dev/null || echo "(none)"
   echo ""
   echo "=== RECENT COMMITS ==="
   git -C "$WORKSPACE" log --oneline -5 2>/dev/null || echo "(no commits)"
   echo ""
   echo "=== BROADCAST ==="
   cat "$WORKSPACE/BROADCAST.md" 2>/dev/null || echo "(none)"
+}
+
+cmd_runtime_path() {
+  local module_id="${1:-}"
+  if [ -z "$module_id" ]; then
+    echo "$TENNINETY_RUNTIME_DIR"
+    return 0
+  fi
+  [[ "$module_id" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] || {
+    echo "ERROR: invalid Module ID '$module_id'." >&2; return 1; }
+  echo "$TENNINETY_RUNTIME_DIR/$module_id"
 }
 
 # --- Manifest coverage check --------------------------------------------
@@ -1284,21 +1576,32 @@ cmd_check_coverage() {
   local src="$WORKSPACE/src"
   [ -d "$src" ] || { echo "No src/ directory to check."; return 0; }
 
-  local allowed; allowed="$(all_manifest_paths)"
+  local allowed
+  allowed="$(all_manifest_paths)" || {
+    echo "ERROR: could not read the architecture manifest." >&2
+    return 1
+  }
   if [ -z "$allowed" ]; then
     echo "WARNING: no manifest paths found in .agent/rules/architecture.md; cannot check coverage." >&2
     return 0
   fi
 
   # Every tracked C# source file under src/ (exclude generated/obj/bin).
-  local orphans=""
-  while IFS= read -r f; do
+  local orphans="" listing
+  listing="$(mktemp "$TENNINETY_RUNTIME_DIR/coverage-paths.XXXXXX")" || return 1
+  if ! git -C "$WORKSPACE" ls-files -z -- 'src/**/*.cs' > "$listing"; then
+    rm -f -- "$listing"
+    echo "ERROR: could not enumerate tracked C# source files." >&2
+    return 1
+  fi
+  while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
     case "$f" in */obj/*|*/bin/*) continue ;; esac
     if ! printf '%s\n' "$allowed" | grep -qxF "$f"; then
       orphans="$orphans$f"$'\n'
     fi
-  done < <(cd "$WORKSPACE" && git ls-files 'src/**/*.cs' 2>/dev/null)
+  done < "$listing"
+  rm -f -- "$listing"
 
   if [ -n "$orphans" ]; then
     echo "MANIFEST COVERAGE: these src/ files are not listed in any module manifest:" >&2
@@ -1324,8 +1627,8 @@ $protected
     allowed="$allowed
 tests/$GOLDEN_DIR/CriticalLogicGoldenTests.cs"
   fi
-  stage_untracked
-  changed="$(git -C "$WORKSPACE" diff --name-only HEAD -- . ':(exclude).dev-runtime/**')" || return 1
+  stage_untracked || return 1
+  changed="$(diff_paths_from_ref HEAD . | sort -u)" || return 1
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if ! printf '%s\n' "$allowed" | grep -qxF "$path"; then
@@ -1347,7 +1650,7 @@ cmd_reset() {
   [ -n "$module_id" ] || { echo "usage: dev.sh reset <module-id>"; return 1; }
   require_started "$module_id" || return 1
   local baseline
-  baseline="$(module_baseline_ref "$module_id")"
+  baseline="$(module_baseline_ref "$module_id")" || return 1
 
   # A queued/committed module is not an uncommitted workspace operation. Using
   # reset --hard against its historical tag would roll back unrelated later
@@ -1368,33 +1671,43 @@ cmd_reset() {
   reset_scope_check "$module_id" "$baseline" || return 1
 
   # Save a recoverable snapshot of current HEAD plus all uncommitted work.
-  local backup_dir="$WORKSPACE/.dev-runtime/reset-backups"
-  mkdir -p "$backup_dir"
+  local backup_dir="$TENNINETY_RUNTIME_DIR/reset-backups"
+  mkdir -p "$backup_dir" || return 1
   local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
   local bundle="$backup_dir/${module_id}-${stamp}.bundle"
   local patch="$backup_dir/${module_id}-${stamp}.uncommitted.patch"
   # The patch is against current HEAD, not the historical module-start tag, so
   # it contains only work that this reset will actually discard.
-  git -C "$WORKSPACE" bundle create "$bundle" HEAD >/dev/null 2>&1 || true
-  git -C "$WORKSPACE" diff --binary HEAD > "$patch" 2>/dev/null || true
+  if ! git -C "$WORKSPACE" bundle create "$bundle" HEAD >/dev/null 2>&1; then
+    echo "ERROR: could not create the reset Git bundle; nothing was discarded." >&2
+    return 1
+  fi
+  if ! git -C "$WORKSPACE" diff --binary HEAD > "$patch"; then
+    echo "ERROR: could not create the reset patch; nothing was discarded." >&2
+    return 1
+  fi
   # Also snapshot untracked files as a tar so nothing is silently lost.
-  ( cd "$WORKSPACE" && git ls-files --others --exclude-standard -z \
-      | grep -zv '^\.dev-runtime/' \
-      | tar --null -T - -czf "$backup_dir/${module_id}-${stamp}.untracked.tar.gz" 2>/dev/null ) || true
-  echo "Safety backup saved under .dev-runtime/reset-backups/${module_id}-${stamp}.* (recover with 'git apply' / 'git bundle')."
+  if ! ( set -o pipefail; cd "$WORKSPACE" && git ls-files --others --exclude-standard -z \
+      | tar --null --verbatim-files-from -T - \
+          -czf "$backup_dir/${module_id}-${stamp}.untracked.tar.gz" ); then
+    echo "ERROR: could not archive untracked files; nothing was discarded." >&2
+    return 1
+  fi
+  echo "Safety backup saved under $backup_dir/${module_id}-${stamp}.* (recover with 'git apply' / 'git bundle')."
 
   # Restore the current committed branch state. This never moves HEAD, so later
   # module and review commits are preserved. Then remove module-created
-  # untracked files while retaining ignored build output and reset backups.
+  # untracked files while retaining ignored build output. Reset backups are
+  # host state outside this tree.
   git -C "$WORKSPACE" reset --hard HEAD || return 1
-  git -C "$WORKSPACE" clean -fd -e '.dev-runtime/' || return 1
+  git -C "$WORKSPACE" clean -fd || return 1
 
   if [[ "$baseline" == module-start-* ]]; then
     git -C "$WORKSPACE" tag -d "module-start-$module_id" >/dev/null 2>&1 || true
-    rm -rf "$WORKSPACE/.dev-runtime/$module_id"
+    rm -rf "$TENNINETY_RUNTIME_DIR/$module_id"
     echo "Reset uncommitted module '$module_id' to current HEAD and removed its start tag."
   else
-    rm -f "$WORKSPACE/.dev-runtime/$module_id/gates/"* 2>/dev/null || true
+    rm -f "$TENNINETY_RUNTIME_DIR/$module_id/gates/"* 2>/dev/null || true
     echo "Reset repair work for '$module_id' to current HEAD; the rejection and repair baseline remain active."
   fi
 }
@@ -1440,12 +1753,23 @@ stage_llm_test_files() {
     echo "ERROR: aider profile not found at $CODER_PROFILE – see SETUP_GUIDE.md Phase 7." >&2
     return 1
   }
+  [ -d "$destination_dir" ] || {
+    echo "ERROR: staged-test destination does not exist: $destination_dir" >&2
+    return 1
+  }
   local staging
-  staging=$(mktemp -d)
+  staging="$(mktemp -d "$TENNINETY_RUNTIME_DIR/test-staging.XXXXXX")" || return 1
 
   local prompt_file
-  prompt_file="$(mktemp "${TMPDIR:-/tmp}/tenninety-prompt.XXXXXX")"
-  printf '%s\n' "$task" > "$prompt_file"
+  prompt_file="$(mktemp "${TMPDIR:-/tmp}/tenninety-prompt.XXXXXX")" || {
+    rm -rf -- "$staging"
+    return 1
+  }
+  if ! printf '%s\n' "$task" > "$prompt_file"; then
+    rm -f -- "$prompt_file"
+    rm -rf -- "$staging"
+    return 1
+  fi
 
   local net_args
   if ! agent_net_args net_args; then
@@ -1479,12 +1803,25 @@ stage_llm_test_files() {
   rm -f "$prompt_file"
   if [ "$rc" -ne 0 ]; then rm -rf "$staging"; return "$rc"; fi
 
-  local generated=()
-  while IFS= read -r f; do generated+=("$f"); done < <(find "$staging" -type f -name '*.cs' | sort)
+  local generated=() generated_listing
+  generated_listing="$(mktemp "$TENNINETY_RUNTIME_DIR/generated-tests.XXXXXX")" || {
+    rm -rf -- "$staging"
+    return 1
+  }
+  if ! find "$staging" -type f -name '*.cs' -print0 | sort -z > "$generated_listing"; then
+    rm -f -- "$generated_listing"
+    rm -rf -- "$staging"
+    return 1
+  fi
+  while IFS= read -r -d '' f; do generated+=("$f"); done < "$generated_listing"
+  rm -f -- "$generated_listing"
 
   local unexpected
   unexpected="$(find "$staging" -mindepth 1 \
-    \( ! -type f -o ! -name '*.cs' \) -printf '%P\n' | sort)"
+    \( ! -type f -o ! -name '*.cs' \) -printf '%P\n' | sort)" || {
+      rm -rf -- "$staging"
+      return 1
+    }
   if [ -n "$unexpected" ]; then
     echo "ERROR: the agent staged directories, links, or non-C# files:" >&2
     printf '%s\n' "$unexpected" | sed 's/^/  - /' >&2
@@ -1547,10 +1884,19 @@ stage_llm_test_files() {
     fi
   done
 
+  local installed=()
   for f in "${generated[@]}"; do
     base=$(basename "$f")
-    mv "$f" "$destination_dir/$base"
-    chmod 444 "$destination_dir/$base"
+    if ! mv "$f" "$destination_dir/$base" \
+        || ! chmod 444 "$destination_dir/$base"; then
+      rm -f -- "$destination_dir/$base"
+      local installed_path
+      for installed_path in "${installed[@]}"; do rm -f -- "$installed_path"; done
+      rm -rf "$staging"
+      echo "ERROR: contract-test installation failed; the batch was rolled back." >&2
+      return 1
+    fi
+    installed+=("$destination_dir/$base")
     echo "Created $destination_dir/$base and set it read-only."
   done
   rm -rf "$staging"
@@ -1566,7 +1912,9 @@ cmd_write_contract() {
   local destination="$WORKSPACE/tests/$CONTRACTS_DIR"
 
   local protected_paths expected_names="" path base
-  protected_paths="$(manifest_protected_paths "$module_id" "$(module_baseline_ref "$module_id")")" || {
+  local baseline
+  baseline="$(module_baseline_ref "$module_id")" || return 1
+  protected_paths="$(manifest_protected_paths "$module_id" "$baseline")" || {
     echo "ERROR: could not read protected contract paths from the active baseline." >&2
     return 1
   }
@@ -1578,6 +1926,12 @@ cmd_write_contract() {
       "tests/$CONTRACTS_DIR/"*Tests.cs) ;;
       *)
         echo "ERROR: protected artefact must be a direct *Tests.cs file in tests/$CONTRACTS_DIR: $path" >&2
+        return 1 ;;
+    esac
+    local relative_protected="${path#"tests/$CONTRACTS_DIR/"}"
+    case "$relative_protected" in
+      */*)
+        echo "ERROR: protected artefact must be directly inside tests/$CONTRACTS_DIR: $path" >&2
         return 1 ;;
     esac
     base="${path##*/}"
@@ -1649,11 +2003,16 @@ cmd_write_golden_harness() {
 
   # Substitute the single token and write the harness, then freeze it.
   # Escape sed-special characters in the project name for safe substitution.
-  local escaped_name
+  local escaped_name temporary_harness
   escaped_name=$(printf '%s' "$project_name" | sed 's/[&/\]/\\&/g')
-  sed "s/__PROJECT__/${escaped_name}/g" "$template" > "$destination/$filename" || {
-    echo "ERROR: failed to write $destination/$filename"; return 1; }
-  chmod 444 "$destination/$filename"
+  temporary_harness="$(mktemp "$destination/.golden-harness.XXXXXX")" || return 1
+  if ! sed "s/__PROJECT__/${escaped_name}/g" "$template" > "$temporary_harness" \
+      || ! chmod 444 "$temporary_harness" \
+      || ! mv -- "$temporary_harness" "$destination/$filename"; then
+    rm -f -- "$temporary_harness"
+    echo "ERROR: failed to install $destination/$filename" >&2
+    return 1
+  fi
   echo "Wrote canonical golden harness: $destination/$filename (frozen read-only)."
   echo "It runs tests/fixtures/critical_logic_golden.json against production entry points."
   echo "The harness is not agent-authored; do not let a Coder edit it."
@@ -1665,13 +2024,16 @@ cmd_show_frontier_fix() {
   # frontier-authored code).
   local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh show-frontier-fix <module-id>"; return 1; }
-  local fix_file="$WORKSPACE/frontier-fix-${module_id}.md"
+  local fix_file="$TENNINETY_RUNTIME_DIR/$module_id/frontier-fix-${module_id}.md"
   if [ ! -f "$fix_file" ]; then
     echo "No frontier fix file found at $fix_file"
     echo "Run 'dev.sh escalate $module_id <log> --override --write-code' first."
     return 1
   fi
   echo "Frontier fix file: $fix_file"
+  echo ""
+  cat -- "$fix_file"
+  echo ""
   echo "Review it manually, then apply the code blocks to the relevant files."
   echo "After applying, run: dev.sh test $module_id"
 }
@@ -1699,6 +2061,7 @@ Subcommands:
   reject <module-id> "<feedback>"            Reject a module with feedback
   approve <module-id>                        Approve a module
   status                                Show queue, escalations, recent commits
+  runtime-path [module-id]              Print the external host-state directory
   check-coverage                        Verify every tracked src/*.cs file is in a module manifest
   reset <module-id>                          Back up and discard this module's uncommitted work
   broadcast "<note>"                    Add a note all Coders will see
@@ -1726,10 +2089,23 @@ EOF
 
 cmd="${1:-help}"
 
+# Every module-taking command shares one strict identifier grammar. Validate at
+# dispatch as well as inside individual helpers so read-only path construction
+# (for example show-frontier-fix) cannot be used with traversal-like input.
+case "$cmd" in
+  start|write|review|test|iterate|finalise|commit|queue|fix|escalate|reject|approve|runtime-path|reset|write-contract|show-frontier-fix)
+    module_arg="${2:-}"
+    if [ -n "$module_arg" ] && [[ ! "$module_arg" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]]; then
+      echo "ERROR: invalid Module ID '$module_arg' (expected lowercase kebab-case)." >&2
+      exit 1
+    fi
+    ;;
+esac
+
 # Apply the CWD guard only to commands that act on the workspace (mutate state
 # or invoke agents). Read-only/help commands run from anywhere.
 case "$cmd" in
-  help|--help|-h|version|--version|-v|status|notes|show-frontier-fix)
+  help|--help|-h|version|--version|-v|status|runtime-path|notes|show-frontier-fix)
     : ;;  # exempt from CWD guard
   *)
     require_cwd_in_workspace "$@" || exit 1 ;;
@@ -1739,18 +2115,26 @@ esac
 # two terminals running 'iterate' on the same project) could otherwise race the
 # content-fingerprint gates and the git working tree. flock gives a single
 # writer per workspace; read-only commands are exempt so 'status' never blocks.
-# If flock isn't installed we proceed without it (best effort) rather than fail.
+# Mutating without a lock would make content gates and Git metadata racy, so a
+# missing/broken flock is a hard refusal.
 case "$cmd" in
-  help|--help|-h|version|--version|-v|status|notes|show-frontier-fix|check-coverage)
+  help|--help|-h|version|--version|-v|status|runtime-path|notes|show-frontier-fix|check-coverage)
     : ;;  # no lock needed (read-only)
   *)
-    if [ -z "${DEV_LOCK_HELD:-}" ] && command -v flock >/dev/null 2>&1; then
-      mkdir -p "$WORKSPACE/.dev-runtime" 2>/dev/null || true
-      lockfile="$WORKSPACE/.dev-runtime/dev.lock"
+    if [ -z "${DEV_LOCK_HELD:-}" ]; then
+      command -v flock >/dev/null 2>&1 || {
+        echo "ERROR: flock is required for mutating dev.sh commands (install util-linux)." >&2
+        exit 1
+      }
+      mkdir -p "$TENNINETY_RUNTIME_DIR" || exit 1
+      lockfile="$TENNINETY_RUNTIME_DIR/dev.lock"
       # Open the lock on fd 9 and try a non-blocking exclusive grab. If another
       # invocation holds it, fail fast with a clear message instead of queuing.
-      exec 9>"$lockfile" || true
-      if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+      if ! { exec 9>"$lockfile"; }; then
+        echo "ERROR: could not open the dev.sh lock file: $lockfile" >&2
+        exit 1
+      fi
+      if ! flock -n 9; then
         echo "ERROR: another dev.sh command is already running in this workspace." >&2
         echo "       Wait for it to finish, or work in a separate workspace." >&2
         exit 1
@@ -1775,6 +2159,7 @@ case "$cmd" in
   reject)             shift; cmd_reject "$@" ;;
   approve)            shift; cmd_approve "$@" ;;
   status)             cmd_status ;;
+  runtime-path)       shift; cmd_runtime_path "$@" ;;
   check-coverage)     cmd_check_coverage ;;
   reset)              shift; cmd_reset "$@" ;;
   broadcast)          shift; cmd_broadcast "$@" ;;

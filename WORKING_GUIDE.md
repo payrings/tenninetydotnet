@@ -62,14 +62,22 @@ Replace `[ProjectName]` throughout the documentation and starter-kit manifests w
 ├── scripts/
 │   ├── dev.sh                         # The orchestrator (owns all Git state)
 │   ├── escalate.py                    # Frontier escalation (host-side Python)
-│   ├── check_signatures.csx           # Public-API signature-drift detection (C# script)
+│   ├── check_signatures.sh            # Signature-checker launcher
+│   ├── signature-checker/             # Compiled Roslyn/MSBuild API checker
+│   │   ├── Directory.Build.props       # Isolates checker build policy
+│   │   ├── Directory.Build.targets     # Blocks parent build targets
+│   │   ├── Directory.Packages.props    # Isolates checker package policy
+│   │   ├── Program.cs
+│   │   └── Tenninety.SignatureChecker.csproj
+│   ├── check_no_raw_sql.sh             # Staged raw-SQL gate
 │   ├── check_interface_drift.sh       # Downstream drift propagation
 │   ├── find_consumers.sh
+│   ├── runtime.sh                      # External host-state location
+│   ├── test_sandbox.sh                 # Disposable test-snapshot helpers
 │   ├── run_tests_with_cascade_check.sh
 │   ├── run_integration_tests.sh
 │   ├── queue_for_review.sh
 │   └── apply_review_feedback.sh
-├── .dev-runtime/                      # Per-module runtime artefacts (git-ignored)
 ├── .pre-commit-config.yaml
 └── .gitignore
 ```
@@ -188,8 +196,8 @@ Copy the full suite of host-side automation scripts, governance rules, and works
 ```bash
 cd ~/tenninetydotnet
 mkdir -p ~/project/workspace/scripts
-cp starter-kit/scripts/* ~/project/workspace/scripts/
-chmod +x ~/project/workspace/scripts/*
+cp -a starter-kit/scripts/. ~/project/workspace/scripts/
+chmod +x ~/project/workspace/scripts/*.sh ~/project/workspace/scripts/*.py
 # The canonical golden harness is shipped, pre-tested, in the starter kit and
 # instantiated by `dev.sh write-golden-harness`; it is NOT agent-authored.
 mkdir -p ~/project/workspace/scripts/golden-harness
@@ -203,11 +211,12 @@ mkdir -p ~/project/workspace/review-feedback
 
 **`REVIEW_QUEUE.md` must exist with its table header before the first `dev.sh queue` in Phase 11**. `queue_for_review.sh` appends rows to the file and would otherwise create a headerless one. Copying it here, rather than in Phase 12, guarantees the tracking table is well-formed from the first queued module.
 
-The host tooling these hooks depend on (`dotnet-script`, `pre-commit`) was installed once at machine level in Phase 8.4 of the setup guide. What remains per project is putting this project's scripts on your path and wiring the hooks into this repository:
+The host tooling these hooks depend on (`pre-commit` and the .NET SDK) was installed once at machine level. Restore the copied semantic-checker project, then wire the hooks into this repository:
 
 ```fish
-fish_add_path ~/project/workspace/scripts
-cd ~/project/workspace && pre-commit install
+cd ~/project/workspace
+dotnet restore scripts/signature-checker/Tenninety.SignatureChecker.csproj -noAutoResponse
+pre-commit install
 ```
 
 **Recommended invocation: `scripts/dev.sh` from the workspace root.** Rather than
@@ -511,11 +520,12 @@ drift to downstream modules. `commit` is the orchestrator's own Git step; agents
 returning the tree to a clean state so the **next** module can start. `queue`
 then records the module for human review in a small, separate metadata commit.
 
-Every restore/build/test container invocation hashes project content before and
-after it runs. Test definitions, fixtures, Git state and build-control files are
-also over-mounted read-only, and the offline build/test phase receives the NuGet
-cache read-only. A container that changes project content fails the gate even
-when the changed path would normally belong to the module.
+The real workspace is never mounted into `test-runner`. The host copies only
+Git-visible, non-secret files into a disposable seed, restores that seed with
+locked packages, then gives every test project a separate clone. Build and test
+run with no network and a read-only NuGet cache; all container mutations are
+discarded with that clone. The real workspace is hashed before and after the
+run as an additional integrity check.
 
 Each step is gated on a **content fingerprint**, not a commit hash: `finalise`
 refuses a module that has not passed review and the fast tier, `commit` and
@@ -549,17 +559,18 @@ Escalation is tiered and deliberate: the **first** call per module always produc
 
 ```fish
 # Tier 1 – frontier writes a PLAN (no code, no --override):
-dev.sh escalate <module-id> .dev-runtime/<module-id>/latest-test.log
+set module_runtime (dev.sh runtime-path <module-id>)
+dev.sh escalate <module-id> "$module_runtime/latest-test.log"
 ```
 
 If, after applying that plan, the module still fails, escalate deliberately:
 
 ```fish
 # Tier 2 – a second plan after your review:
-dev.sh escalate <module-id> .dev-runtime/<module-id>/latest-test.log --override
+dev.sh escalate <module-id> "$module_runtime/latest-test.log" --override
 
 # Tier 3 – frontier writes the actual fix code:
-dev.sh escalate <module-id> .dev-runtime/<module-id>/latest-test.log --override --write-code
+dev.sh escalate <module-id> "$module_runtime/latest-test.log" --override --write-code
 ```
 
 To display a frontier fix without applying it automatically:
@@ -660,22 +671,23 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 - [ ] Contracts, Golden, and Unit projects are all present; each tier runs explicitly, and any tier with `*Tests.cs` source discovers at least one test
 - [ ] the golden harness (in the Golden project) executes every case in `critical_logic_golden.json` and fails on a missing entry point or duplicate case ID
 - [ ] `dev.sh help` lists `finalise`, `write-golden-harness`, and `show-frontier-fix`
-- [ ] `pre-commit` blocks a deliberately-added raw SQL line in a `.cs` file (and ignores `bin/`/`obj/`)
+- [ ] `pre-commit` blocks raw SQL in the staged `.cs` content even when the working-tree copy is clean (and ignores `bin/`/`obj/`)
 - [ ] `pre-commit` blocks a signature change in `src/` without `.agent/rules/architecture.md` in the same commit
 - [ ] the working/frozen architecture files, `Directory.Packages.props`, Contracts, Golden, and fixtures are all mounted `:ro` to agents; agent-visible `.git` is read-only
 - [ ] `run_tests_with_cascade_check.sh` runs `dotnet build`/`dotnet test` with `--network=none` (a test that attempts an outbound connection fails), while `dotnet restore --locked-mode` runs in a separate networked step
-- [ ] networked restore can evaluate only the read-only scaffold/MSBuild inputs; implementation agents cannot edit `*.csproj`, `*.sln[x]`, `*.props`, `*.targets`, `global.json`, or `NuGet.Config`
-- [ ] restore/build/test fail with `WORKSPACE INTEGRITY FAILURE` if any project file outside `bin/`, `obj/`, or `.dev-runtime/` changes; the offline phase mounts the NuGet cache read-only
+- [ ] networked restore can evaluate only trusted snapshot inputs; implementation agents cannot edit or introduce `*.csproj`, `*.sln[x]`, `*.props`, `*.targets`, `*.rsp`, `*.user`, `.editorconfig`, `global.json`, or case-insensitive `NuGet.Config`
+- [ ] restore/build/test use disposable per-project clones and never mount the real workspace; the offline phase mounts the NuGet cache read-only
 - [ ] `run_tests_with_cascade_check.sh` runs from the host inside `test-runner`, treats the container exit code as authoritative, and prints deliberate escalation instructions (it does NOT auto-escalate) when handed an artificially large build error log
 - [ ] `run_tests_with_cascade_check.sh` respects `DOTNET_ERROR_THRESHOLD`
 - [ ] `cmd_iterate` injects the captured test/review output into the next Coder attempt (verify the failing log text appears in the next prompt)
 - [ ] `dev.sh check-coverage` flags any tracked `src/*.cs` file not listed in a module manifest (and passes when every file is covered)
 - [ ] two concurrent mutating `dev.sh` commands in one workspace are serialised: the second fails fast with an "already running" message, while read-only commands (`status`, `check-coverage`) still run
-- [ ] `dev.sh reset` writes a recoverable backup under `.dev-runtime/reset-backups/` before discarding module work
-- [ ] `escalate.py` reads `OPENROUTER_API_KEY` from a mode-600 `.env` (or the environment), warns on loose permissions, and `--dry-run` writes artefacts to a temp dir without touching `.escalations.json`
+- [ ] `dev.sh runtime-path` is outside the workspace, and gate markers, logs, escalation output/counters, locks, and reset backups are stored there
+- [ ] `dev.sh reset` refuses to discard anything if any bundle, patch, or untracked-file backup step fails
+- [ ] `escalate.py` reads `OPENROUTER_API_KEY` only from the environment, `$TENNINETY_ENV`, or `~/.config/tenninety/.env`; a workspace `.env` cannot shadow credentials, and `--dry-run` does not update the external counter
 - [ ] `dev.sh iterate`/`write`/`review`/`write-contract` fail fast with a clear message (not a silent hang) when llama-swap is unreachable, and `DEV_SKIP_PREFLIGHT=1` bypasses the check
 - [ ] the human-feedback repair (`dev.sh fix`) cannot proceed past a Reviewer `VERDICT: FAIL` (it delegates to `dev.sh iterate`)
-- [ ] `dev.sh` fails an iteration with `OUT-OF-SCOPE FILE(S)` before invoking the Reviewer when a module diff touches a path not listed in the active baseline manifest; editing the working manifest cannot widen scope, while host-generated protected paths and deliberate human specification edits remain visible
+- [ ] `dev.sh` fails an iteration with `OUT-OF-SCOPE FILE(S)` before invoking the Reviewer when either side of a rename/copy touches a path not listed in the active baseline manifest; empty or metadata/test-only implementations also fail
 - [ ] `dev.sh` rejects every implementation-agent change to MSBuild/project/solution build-control files even if a malformed manifest lists one
 - [ ] `dev.sh write-contract` mounts the workspace read-only, accepts exactly the missing filenames declared under **Protected/generated test artefact**, and refuses to overwrite an existing contract test
 - [ ] re-running `dev.sh write-contract <module-id>` after a second entry point is added to the manifest creates only the new file and leaves existing contract tests untouched
@@ -683,8 +695,8 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 - [ ] `dev.sh write-golden-harness` installs the canonical framework harness (not a model-authored file), substitutes the project name, and makes it read-only
 - [ ] contract tests use exact overload-aware reflection checks (not a bare `GetMethod(name)`)
 - [ ] `find_consumers.sh` correctly lists a known call site for a real symbol in the codebase
-- [ ] `check_signatures.csx -- --since <active-baseline>` reports added/removed/overloaded methods, return-type-only and base-list changes, constants, operators, conversions, enum members, and class/struct primary constructors
-- [ ] a signature-checker or Git failure makes `check_interface_drift.sh` exit non-zero; changed APIs mark queued transitive dependents from the manifest's Module-ID graph as `interface-changed`
+- [ ] `scripts/check_signatures.sh --since <active-baseline>` loads every source project/target framework and reports semantic API drift, including aliases/generated members plus added/removed/overloaded methods, return/base changes, constants, operators, conversions, enum members, and primary constructors
+- [ ] a signature-checker, Git, duplicate/unknown Module ID, or queue-update failure makes `check_interface_drift.sh` exit non-zero; dependent queue updates are atomic
 - [ ] `OPENROUTER_API_KEY` and `FRONTIER_MODEL` are both set, and `scripts/escalate.py` returns a real response on a dummy diff
 - [ ] escalation order is enforced: tier 1 is plan-only without flags, tier 2 is plan-only with `--override`, tier 3 requires `--override --write-code`, and a fourth call is refused
 - [ ] `queue_for_review.sh` correctly adds a new row to `REVIEW_QUEUE.md`
@@ -692,6 +704,7 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 - [ ] `dev.sh finalise`/`commit` refuse a module whose diff edits `.agent/rules/architecture.md`, print the change against `architecture.original.md`, and proceed only with `--allow-spec-change`
 - [ ] `dev.sh commit <module-id>` refuses a module whose code changed after `finalise`, and leaves the working tree clean on success
 - [ ] `dev.sh queue <module-id>` refuses to run until `dev.sh commit <module-id>` has succeeded for the current content
+- [ ] `dev.sh queue` cannot reopen `ready-for-review` or `approved`, and a failed metadata stage/commit restores the prior queue
 - [ ] after `queue`, `dev.sh start <next-module-id>` succeeds; the tree is clean and a second module can begin
 - [ ] `dev.sh reject <module-id>` increments the "Times rejected" column, and the third rejection prints the revise-the-spec instruction
 - [ ] `approve`/`reject` commit review metadata immediately; `reject` records a fresh repair baseline and `dev.sh fix` returns the repaired module to a clean review queue
@@ -803,7 +816,7 @@ Produce the complete contents of `.agent/rules/architecture.md`. This file is th
   - List exact paths; do not use broad globs such as `src/**`.
   - Every production file in the project tree must belong to at least one module manifest.
   - A changed path is allowed only when it appears under that module's **Implementation files**, **Shared integration files**, or **Protected/generated test artefact**. Protected/generated paths are admitted only because the host creates them through read-only staging; implementation agents cannot edit them. The other exception is `.agent/rules/architecture.md` during a deliberate interface change governed by the interface change policy below; do not list the architecture file as ordinary module scope.
-  - Never list `*.csproj`, `*.sln`, `*.slnx`, `*.props`, `*.targets`, `global.json`, or `NuGet.Config` as implementation/shared scope. They are trusted restore inputs changed only by a human in a separate reviewed commit.
+  - Never list `*.csproj`, `*.sln`, `*.slnx`, `*.props`, `*.targets`, `*.rsp`, `*.user`, `.editorconfig`, `global.json`, or `NuGet.Config` as implementation/shared scope. They are trusted restore inputs changed only by a human in a separate reviewed commit.
   - If a shared file may be touched by several modules, state the permitted edit for each module so unrelated sections remain out of scope.
   - Do not tell the Coder to "implement `<Type>.cs`" when the module owns several files. The module manifest, not the task sentence, defines the complete scope.
   - Mark each module's **public entry points** explicitly. These are the types consumers outside the module call directly. For every protected contract-test file, list the exact repository-relative path under **Protected/generated test artefact**; `dev.sh write-contract` stages exactly those basenames and no others.
@@ -1102,7 +1115,7 @@ For GPU, model-serving, firewall, and container-image symptoms, see the machine-
 | aider edits repeatedly "fail to apply"                                            | switch `edit_format` to `udiff` (or `whole`) in both `~/.aider-*/aider.conf.yml` and `~/.aider-*/model-settings.yml`                   |
 | `dev.sh iterate` exits silently after `==> Pass N: WRITE`                         | `set -euo pipefail` killed script on non-zero exit; v3 uses `\|\| true` after capture                                                  |
 | A commit is unexpectedly rejected                                                 | check `.pre-commit-config.yaml` – should have `no-raw-sql`, `signature-drift`, `dotnet-format`                            |
-| `signature-drift` fails with "package ... was not found in the global NuGet cache(s)" | the `dotnet-script` Roslyn cache was never warmed; run the Phase 8.4 warm step from `SETUP_GUIDE.md` (or `dotnet script --no-cache scripts/check_signatures.csx -- --staged` once, with network access) |
+| `signature-drift` fails because `project.assets.json` is missing or stale | restore the dedicated host with `dotnet restore scripts/signature-checker/Tenninety.SignatureChecker.csproj -noAutoResponse`, then retry the hook |
 | `dotnet build` fails with " NU1004: The version of package is not defined"        | `Directory.Packages.props` is missing a package version; add it                                                                        |
 | `dotnet restore --locked-mode` fails                                              | run `dotnet restore` first to (re)generate `packages.lock.json`, then commit it – required after any `Directory.Packages.props` change |
 | A test project reports "EMPTY TEST GATE"                                          | the project built but discovered no tests; check it has a `[Fact]`/`[Theory]` and references the project under test                    |

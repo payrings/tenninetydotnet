@@ -22,7 +22,7 @@ scaling-to-medium-projects design note). See the README for the full table.
 ## How to use this guide
 
 This guide covers the entire deployment lifecycle in numbered phases. Depending on how you prefer to set up your environment, you can follow the implementation steps in one of two ways:
-1. **Using the starter kit (recommended):** Whenever the guide references creating an operational file, such as the bash orchestrator (`dev.sh`), the Roslyn signature checker (`check_signatures.csx`), the Docker container definitions, or the Git pre-commit hooks, do not write them by hand. Copy the corresponding pre-tested file directly from the `starter-kit/` directory of this repository into your working directory and apply the executable permissions shown.
+1. **Using the starter kit (recommended):** Whenever the guide references creating an operational file, such as the bash orchestrator (`dev.sh`), the compiled Roslyn signature checker (`scripts/signature-checker/` plus `check_signatures.sh`), the Docker container definitions, or the Git pre-commit hooks, do not write them by hand. Copy the corresponding pre-tested file directly from the `starter-kit/` directory of this repository into your working directory and apply the executable permissions shown.
 2. **Manual creation:** If you are adapting the scripts to a different language or custom infrastructure, every phase explains the exact mechanics of the underlying code so you can modify the implementation deliberately. Every time the text instructs you to open a terminal, that command blocks the foreground process unless explicitly stated otherwise; open a new terminal tab or window when instructed to proceed to the next phase.
 
 ### Path conventions used throughout
@@ -65,7 +65,7 @@ To run both the local Coder and Reviewer models on-premises without cloud API co
 ### What works regardless (platform and hardware agnostic)
 
 Even if your setup differs from the target hardware above, such as developing on a laptop without a discrete GPU, using a different operating system, or targeting a different programming language, the core *architecture* remains fully functional — though on a non-Arch platform you will have to translate the concrete install commands in this guide (see the OS note above). What is portable is the design:
-- **The mechanical governance and hooks:** The pre-commit verification scripts and AST signature-drift rules execute entirely on the host CPU and work across all OS environments.
+- **The mechanical governance and hooks:** The pre-commit verification scripts and semantic Roslyn/MSBuild signature-drift rules execute entirely on the host CPU and work across all OS environments.
 - **Container sandboxing:** The zero-trust container boundaries (`aider-sandboxed` and `test-runner`), read-only bind mounts (`:ro`), and locked dependency manifests will enforce supply-chain security on any machine running Docker.
 - **Deterministic test gates:** The rule of _"Zero AI at test runtime"_ holds universally. The host-driven test orchestration, contract testing, and golden-fixture harnesses rely purely on standard compiler SDKs.
 - **Flexible compute routing:** If your local machine lacks 24 GB of VRAM, you can easily shift the 10/90 compute ratio. The orchestration scripts can be pointed to smaller local models (e.g., 8B parameter models), CPU/Vulkan fallbacks, or even external cloud API endpoints for the coding and review passes without altering the repository's rules or workflow.
@@ -531,7 +531,7 @@ At minimum, keep the model endpoint bound to the bridge gateway (Phase 4), not
 The framework uses two isolated Docker containers:
 
 - **`aider-sandboxed`** – executes the AI coding agent. Needs Python (for the aider CLI) and git (so the agent can run `git diff` read-only if a prompt ever tells it to, but it does **not** commit; the orchestrator owns all Git state). It does **not** get the .NET SDK, test tools, Docker access, or any API keys.
-- **`test-runner`** – executes deterministic builds and tests. Contains the .NET 10 SDK and mounts the workspace read-write, but has no LLM tooling. Test execution is split in two: `dotnet restore --locked-mode` runs with network access to populate the NuGet cache, then `dotnet build` and `dotnet test` run with `--network=none` and the cache read-only. Restore can evaluate MSBuild files, so project, solution, props, targets, `global.json`, and `NuGet.Config` are trusted scaffold inputs: agents cannot edit them and the scope gate rejects them. Test sources, fixtures, architecture files, review metadata, and those build-control inputs are mounted read-only during test execution; `.env` is masked; and the runner hashes the source workspace before and after each container invocation. A mutation fails the gate even if the process otherwise exits successfully.
+- **`test-runner`** – executes deterministic builds and tests. Contains the pinned .NET 10 SDK but no LLM tooling. The host creates a Git-derived disposable seed that excludes secrets and ignored output; locked restore runs there with network access. Every test project then receives its own clone, where build and test run with `--network=none` and the NuGet cache read-only. The real workspace is never mounted. Restore can evaluate implicit MSBuild inputs, so project/solution files, props, targets, response/user files, editor configuration, `global.json`, and case-insensitive NuGet configuration are trusted scaffold inputs: agents cannot edit them, and ignored versions are rejected. The host also hashes the real workspace around the complete run.
 
 Both images run as a **non-root user whose UID/GID match your host user**, baked in at build time. This keeps agent-created files (and `bin/`, `obj/`, test output) owned by you on the host, keeps file permissions meaningful, and, since the container user isn't root, a bind mount marked `:ro` can't be written through with root's mode-bit override. The real immutability boundary remains the Docker `:ro` mount; non-root is what stops the guarantees from being quietly defeated. Because the user has a real home directory in the image, the aider profile mounts cleanly at `/conf` with nothing else to work around.
 
@@ -653,10 +653,10 @@ chmod 600 ~/.config/tenninety/.env   # belt and braces
 ```
 
 `escalate.py` looks for the key in this order: an exported `OPENROUTER_API_KEY`
-in the environment, then `$TENNINETY_ENV`, then `./.env`, then
-`~/.config/tenninety/.env`. It never overrides a value you exported explicitly,
-and it warns if the `.env` is group/world readable. Keep any project-local
-`.env` out of Git (add it to `.gitignore`).
+in the environment, then `$TENNINETY_ENV`, then
+`~/.config/tenninety/.env`. It never reads a project-local `.env`, so workspace
+content cannot shadow cloud credentials. It never overrides a value you
+exported explicitly and warns if the selected file is group/world readable.
 
 **To switch models later:** edit `FRONTIER_MODEL` in that `.env` (or export it
 for one session):
@@ -679,7 +679,7 @@ pip install openai --break-system-packages
 
 ### 8.3 – Smoke test the escalation path
 
-Verify the cloud frontier model is responding before you ever rely on it during live development. The escalation script expects to run inside a Git repository. Your clone of this repository already is one, so no project workspace is required. Run it in `--dry-run` mode: it exercises the full path (loads your key, builds the prompt from the current diff, calls the frontier model, writes the result) but saves the artefact to a temp directory and does **not** touch `.escalations.json`, so there is nothing to clean up afterwards:
+Verify the cloud frontier model is responding before you ever rely on it during live development. The escalation script expects to run inside a Git repository. Your clone of this repository already is one, so no project workspace is required. Run it in `--dry-run` mode: it exercises the full path (loads your key, builds the prompt from the current diff, calls the frontier model, writes the result) but saves the artefact to a temp directory and does **not** touch the external escalation counter, so there is nothing to clean up afterwards:
 
 ```bash
 cd ~/tenninetydotnet
@@ -690,25 +690,23 @@ Here `smoke-test` is just the module-id argument; with no test-log file the scri
 
 ### 8.4 – Install host orchestration tooling
 
-These three tools are used by every project's pre-commit hooks and signature checks, so install them once at machine level rather than per project:
+Install the pre-commit hook runner once at machine level:
 
 ```fish
-dotnet tool install -g dotnet-script
-fish_add_path ~/.dotnet/tools
 pip install pre-commit --break-system-packages
 ```
 
-`dotnet-script` gives the signature-drift hook its Roslyn AST parser; `pre-commit` is the hook runner each project wires up in Phase 9.3 of the working guide. Both `fish_add_path` calls in this guide (this one and Phase 1's `~/.local/bin`) are permanent universal changes; they never need repeating.
+`pre-commit` is the hook runner each project wires up in Phase 9.3 of the working guide. Phase 1's `fish_add_path ~/.local/bin` is a permanent universal change and does not need repeating.
 
-**Warm the `dotnet-script` NuGet cache now.** The signature-drift script pulls its Roslyn packages (`Microsoft.CodeAnalysis.CSharp` and its dependency `Microsoft.CodeAnalysis.Common`) at first run via a `#r "nuget:"` directive. That fetch populates a `dotnet-script`-specific cache that a normal project `dotnet restore` does **not** fill, so without this step your first `pre-commit run` fails with *"package ... was not found in the global NuGet cache(s)"*. The version warmed here **must exactly match** the `#r "nuget: Microsoft.CodeAnalysis.CSharp, <version>"` line at the top of `scripts/check_signatures.csx` (currently `5.0.0`, the Roslyn release that parses C# 14 / .NET 10); if you bump one, bump the other, or the offline cache will miss and the hook will fail on first use. Trigger the download once, at machine level, while you have network access:
+**Verify the compiled semantic checker now.** It runs in its own .NET process so `MSBuildLocator` can register the SDK before Roslyn loads any MSBuild assemblies. Restore and build the checked-in checker project:
 
 ```fish
-printf '#r "nuget: Microsoft.CodeAnalysis.CSharp, 5.0.0"\nSystem.Console.WriteLine("roslyn cache warmed");\n' > /tmp/warm-roslyn.csx
-dotnet script /tmp/warm-roslyn.csx
-rm /tmp/warm-roslyn.csx
+cd ~/tenninetydotnet/starter-kit
+dotnet restore scripts/signature-checker/Tenninety.SignatureChecker.csproj -noAutoResponse
+dotnet build scripts/signature-checker/Tenninety.SignatureChecker.csproj --no-restore -noAutoResponse
 ```
 
-It should print `roslyn cache warmed`. If it instead reports the package was not found in cache, re-run the middle line with `--no-cache` (`dotnet script --no-cache /tmp/warm-roslyn.csx`), which forces the fetch. Once cached, every project's signature-drift hook resolves offline.
+The build must succeed without placing any `Microsoft.Build.*.dll` beside the checker other than `Microsoft.Build.Locator.dll`; the project enforces that condition itself. Phase 9.3 restores the same checker after it is copied into each project.
 
 ---
 
@@ -726,9 +724,9 @@ Run this once at the end of machine setup. Every item must pass before starting 
 - [ ] on `tenninety-agent`, the model endpoint is reachable while a public HTTPS request fails; the `DOCKER-USER` egress rule survives a reboot
 - [ ] the `~/.aider-reviewer` profile resolves to `devstral-reviewer`, not `qwen-coder` (check its `aider.conf.yml`, or run the Phase 7 smoke test with it mounted)
 - [ ] the agent container sees only its mounted directories (not your host home, no Docker socket, no API keys)
-- [ ] `OPENROUTER_API_KEY` is available to `escalate.py` (via a mode-600 `.env` or an exported var) and `FRONTIER_MODEL` is set, and the Phase 8.3 `--dry-run` smoke test returned a real triage response without leaving artefacts in the clone
-- [ ] `dotnet script --version` and `pre-commit --version` both print versions in a fresh terminal
-- [ ] the `dotnet-script` Roslyn cache is warmed (the Phase 8.4 warm step printed `roslyn cache warmed`), so the signature-drift hook resolves without network on first project use
+- [ ] `OPENROUTER_API_KEY` is available to `escalate.py` (via the mode-600 global config, `$TENNINETY_ENV`, or an exported var) and `FRONTIER_MODEL` is set; the Phase 8.3 `--dry-run` returned a complete response without leaving artefacts in the clone
+- [ ] `pre-commit --version` prints a version in a fresh terminal
+- [ ] the Phase 8.4 semantic-checker restore and build both succeed
 
 **Machine setup is complete.** For each project you build on this machine, follow `WORKING_GUIDE.md` from Phase 9.
 

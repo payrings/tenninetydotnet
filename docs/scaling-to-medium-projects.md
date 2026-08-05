@@ -44,7 +44,7 @@ Each shard carries the per-module detail the working guide's Appendix A currentl
 
 ### Mechanical enforcement – what must change, file by file
 
-**`check_signatures.csx` pre-commit invocation.** Today a signature change anywhere in `src/` requires `.agent/rules/architecture.md` in the same commit. With sharding, resolve the changed file's path through the module manifest and require **the matching canonical shard** in the same commit instead. This is strictly sharper enforcement: a change to `Assignment/` now points at exactly one file that must move with it.
+**`check_signatures.sh` pre-commit invocation.** Today a signature change anywhere in `src/` requires `.agent/rules/architecture.md` in the same commit. With sharding, resolve the changed file's path through the module manifest and require **the matching canonical shard** in the same commit instead. This is strictly sharper enforcement: a change to `Assignment/` now points at exactly one file that must move with it.
 
 **`dev.sh` (`cmd_write`, `cmd_review`, `cmd_iterate`)**, instead of attaching the whole spec to every call, construct each agent invocation's visible spec set as: `.agent/rules/architecture.md` + the target module's shard + the shards named in its `Depends:` header (one level deep, transitive closure defeats the purpose). Everything else under `.agent/rules/specs/` is simply not attached. The agent sees everything relevant and nothing else. Because agent context is already assembled explicitly per call (files are attached by `dev.sh`; nothing is auto-loaded), sharding is a `dev.sh`-local change.
 
@@ -92,7 +92,7 @@ public void CloseTicket_RequiresAgentRole()
 
 These live in the Contracts project and inherit its full protection: write-once staging, `chmod 444`, mounted `:ro` on every agent invocation. The spec gains an **authorisation matrix** section (role × endpoint) that these tests transcribe. An agent cannot quietly drop an `[Authorize]` attribute any more than it can change a return type.
 
-**Migrations are host-generated, never agent-generated.** EF Core migrations are machine-generated code that would flood the signature-drift hook with noise and are a classic place for a model to "fix" a failing test by rewriting history. Add a `dev.sh migrate <name>` subcommand that runs `dotnet ef migrations add` inside `test-runner` (the only image with the SDK), driven by the human; mount `src/**/Migrations/` `:ro` to agent containers; exclude that path in `check_signatures.csx`. The rule "agents write model classes, the host derives migrations from them" keeps the schema's provenance auditable.
+**Migrations are host-generated, never agent-generated.** EF Core migrations are machine-generated code that would flood the signature-drift hook with noise and are a classic place for a model to "fix" a failing test by rewriting history. Add a `dev.sh migrate <name>` subcommand that runs `dotnet ef migrations add` inside `test-runner` (the only image with the SDK), driven by the human; mount `src/**/Migrations/` `:ro` to agent containers; exclude that path in the compiled signature checker. The rule "agents write model classes, the host derives migrations from them" keeps the schema's provenance auditable.
 
 ### Verification (once implemented)
 
@@ -112,7 +112,7 @@ The entire gate rests on deterministic, machine-checkable surfaces, and UI corre
 
 ### Layer one – containment: the API contract is the hard boundary
 
-Architect the UI as a deliberately thin layer (server-rendered Blazor or equivalent) over a fully-gated API, so all correctness-critical logic stays behind the existing gate and the UI carries only presentational risk. Make the boundary itself enforceable: extend `finalise` to export `openapi.json` from the built API and diff it against a frozen copy. This creates an API-shape drift check in the same spirit as `check_signatures.csx`, catching contract changes that reflection over C# alone can miss (routes, status codes, wire-level schemas).
+Architect the UI as a deliberately thin layer (server-rendered Blazor or equivalent) over a fully-gated API, so all correctness-critical logic stays behind the existing gate and the UI carries only presentational risk. Make the boundary itself enforceable: extend `finalise` to export `openapi.json` from the built API and diff it against a frozen copy. This creates an API-shape drift check in the same spirit as the compiled signature checker, catching contract changes that reflection over C# alone can miss (routes, status codes, wire-level schemas).
 
 ### Layer two – Phase 10b: a frontier-authored design system
 
@@ -139,7 +139,7 @@ A vision-capable model can be added as an *advisory* reviewer commenting on rend
 
 Plan for the arithmetic rather than discovering it. On one 24 GB GPU running quantised 24–27B models serially through llama-swap, a full Write → Review → Test attempt plausibly costs 10–30 minutes; a 30-module project at 1–3 attempts per module is **days to a couple of weeks of mostly unattended wall-clock**, and the human, reviewing the queue, revising shards, is the real bottleneck. Three practices keep it smooth: batch overnight (queue several `iterate` runs against the dependency order and review each morning); use `dev.sh broadcast` aggressively the first time a cross-cutting pattern is corrected, so the fix propagates to every subsequent Coder run instead of being re-litigated per module; and treat a module's third rejection as a spec defect, not a model defect; this is the working guide's Phase 12.3 rule, which matters far more at 30 modules than at 5.
 
-Expect the effective compute split to drift towards **20/80 rather than 10/90**: sharded spec authoring, the Phase 10b design pass, and mid-project shard revisions all draw frontier tokens. That is not a failure of the model. The framework's own escalation philosophy says frontier spend should track genuine ambiguity, and a real company system simply contains more of it than a single-purpose tool. Budget accordingly and measure: `.escalations.json` already gives you the per-module escalation count; a module needing frequent frontier attention is a shard that was under-specified.
+Expect the effective compute split to drift towards **20/80 rather than 10/90**: sharded spec authoring, the Phase 10b design pass, and mid-project shard revisions all draw frontier tokens. That is not a failure of the model. The framework's own escalation philosophy says frontier spend should track genuine ambiguity, and a real company system simply contains more of it than a single-purpose tool. Budget accordingly and measure: `dev.sh status` reads the external per-workspace escalation counter; a module needing frequent frontier attention is a shard that was under-specified.
 
 ---
 

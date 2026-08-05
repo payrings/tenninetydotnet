@@ -17,13 +17,22 @@ if ! git -C "$WORKSPACE" rev-parse -q --verify "$BASE_REF^{commit}" >/dev/null; 
   exit 1
 fi
 [ -f "$SPEC" ] || { echo "ERROR: architecture spec not found: $SPEC" >&2; exit 1; }
+[ -f "$WORKSPACE/REVIEW_QUEUE.md" ] || {
+  echo "ERROR: review queue not found: $WORKSPACE/REVIEW_QUEUE.md" >&2
+  exit 1
+}
 
 # Capture the checker status explicitly. The exit code of a process substitution
 # is not propagated by mapfile, so using `mapfile < <(checker)` would fail open.
-checker_output="$(mktemp "${TMPDIR:-/tmp}/tenninety-signatures.XXXXXX")"
-checker_errors="$(mktemp "${TMPDIR:-/tmp}/tenninety-signature-errors.XXXXXX")"
-trap 'rm -f "$checker_output" "$checker_errors"' EXIT
-if ! (cd "$WORKSPACE" && dotnet script scripts/check_signatures.csx -- \
+checker_output="$(mktemp "${TMPDIR:-/tmp}/tenninety-signatures.XXXXXX")" || exit 1
+checker_errors="$(mktemp "${TMPDIR:-/tmp}/tenninety-signature-errors.XXXXXX")" || {
+  rm -f -- "$checker_output"
+  exit 1
+}
+queue_temp=""
+cleanup() { rm -f -- "$checker_output" "$checker_errors" ${queue_temp:+"$queue_temp"}; }
+trap cleanup EXIT
+if ! (cd "$WORKSPACE" && scripts/check_signatures.sh \
        --since "$BASE_REF" --names-only >"$checker_output" 2>"$checker_errors"); then
   echo "ERROR: signature checker failed:" >&2
   sed 's/^/  /' "$checker_errors" >&2
@@ -97,6 +106,61 @@ manifest_direct_dependents() {
   ' "$SPEC" | sort -u
 }
 
+manifest_module_ids() {
+  awk '
+    /\*\*Module ID:\*\*[[:space:]]*`/ {
+      line=$0
+      sub(/^.*\*\*Module ID:\*\*[[:space:]]*`/, "", line)
+      sub(/`.*$/, "", line)
+      print line
+    }
+  ' "$SPEC"
+}
+
+manifest_dependency_edges() {
+  awk '
+    /\*\*Module ID:\*\*[[:space:]]*`/ {
+      line=$0
+      sub(/^.*\*\*Module ID:\*\*[[:space:]]*`/, "", line)
+      sub(/`.*$/, "", line)
+      current=line
+      next
+    }
+    current != "" && /\*\*Depends on:\*\*/ {
+      rest=$0
+      while (match(rest, /`[^`]+`/)) {
+        dep=substr(rest, RSTART + 1, RLENGTH - 2)
+        if (tolower(dep) != "none") print current "\t" dep
+        rest=substr(rest, RSTART + RLENGTH)
+      }
+    }
+  ' "$SPEC"
+}
+
+module_text="$(manifest_module_ids)" || {
+  echo "ERROR: could not parse Module IDs from architecture.md." >&2
+  exit 1
+}
+duplicate_modules="$(printf '%s\n' "$module_text" | sed '/^$/d' | sort | uniq -d)"
+if [ -n "$duplicate_modules" ]; then
+  echo "ERROR: duplicate Module IDs in architecture.md:" >&2
+  printf '%s\n' "$duplicate_modules" | sed 's/^/  - /' >&2
+  exit 1
+fi
+edge_text="$(manifest_dependency_edges)" || {
+  echo "ERROR: could not parse module dependencies from architecture.md." >&2
+  exit 1
+}
+while IFS=$'\t' read -r owner dependency; do
+  [ -n "$owner" ] || continue
+  if ! printf '%s\n' "$module_text" | grep -qxF "$dependency"; then
+    echo "ERROR: module '$owner' depends on unknown Module ID '$dependency'." >&2
+    exit 1
+  fi
+done <<EOF
+$edge_text
+EOF
+
 manifest_has_module "$MODULE" || {
   echo "ERROR: Module ID '$MODULE' is missing from architecture.md." >&2
   exit 1
@@ -113,7 +177,11 @@ while [ "$index" -lt "${#queue[@]}" ]; do
   current="${queue[$index]}"
   index=$((index + 1))
   direct=()
-  mapfile -t direct < <(manifest_direct_dependents "$current")
+  direct_text="$(manifest_direct_dependents "$current")" || {
+    echo "ERROR: could not traverse dependencies for '$current'." >&2
+    exit 1
+  }
+  if [ -n "$direct_text" ]; then mapfile -t direct <<< "$direct_text"; fi
   for dependent in "${direct[@]}"; do
     [ -n "$dependent" ] || continue
     if [ -z "${seen[$dependent]+x}" ]; then
@@ -130,12 +198,36 @@ if [ "${#dependents[@]}" -eq 0 ]; then
 fi
 
 echo "Declared downstream modules:"
+queue_targets=()
 for dependent in "${dependents[@]}"; do
   if grep -q "^| $dependent |" "$WORKSPACE/REVIEW_QUEUE.md" 2>/dev/null; then
-    sed -i "s/| $dependent | [^|]* |/| $dependent | interface-changed |/" \
-      "$WORKSPACE/REVIEW_QUEUE.md"
-    echo "  Marked $dependent as interface-changed"
+    row_count="$(grep -c "^| $dependent |" "$WORKSPACE/REVIEW_QUEUE.md")"
+    if [ "$row_count" -ne 1 ]; then
+      echo "ERROR: REVIEW_QUEUE.md contains $row_count rows for '$dependent'." >&2
+      exit 1
+    fi
+    queue_targets+=("$dependent")
   else
     echo "  $dependent is not queued yet; it will build against the new contract"
   fi
 done
+
+if [ "${#queue_targets[@]}" -gt 0 ]; then
+  queue_temp="$(mktemp "$WORKSPACE/.review-queue.XXXXXX")" || exit 1
+  cp -p -- "$WORKSPACE/REVIEW_QUEUE.md" "$queue_temp" || exit 1
+  for dependent in "${queue_targets[@]}"; do
+    if ! sed -i "s/| $dependent | [^|]* |/| $dependent | interface-changed |/" "$queue_temp" \
+        || ! grep -q "^| $dependent | interface-changed |" "$queue_temp"; then
+      echo "ERROR: could not stage interface propagation for '$dependent'." >&2
+      exit 1
+    fi
+  done
+  mv -- "$queue_temp" "$WORKSPACE/REVIEW_QUEUE.md" || {
+    echo "ERROR: could not atomically update REVIEW_QUEUE.md." >&2
+    exit 1
+  }
+  queue_temp=""
+  for dependent in "${queue_targets[@]}"; do
+    echo "  Marked $dependent as interface-changed"
+  done
+fi
