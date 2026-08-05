@@ -1,139 +1,185 @@
 #!/bin/bash
 # Usage: ./scripts/run_tests_with_cascade_check.sh <module-id>
-# HOST-SIDE ONLY. Runs the fast tier (Contracts + Unit) inside test-runner.
+# HOST-SIDE ONLY. Runs the fast tier (Contracts + Golden + Unit) in test-runner.
 set -uo pipefail
 
 FEATURE="${1:?Usage: run_tests_with_cascade_check.sh <module-id>}"
-
-# Cascade threshold: how many build errors before we stop trusting an
-# incremental fix. Line count is NOT used as a cascade signal – a verbose
-# but ordinary failure isn't a dependency cascade.
+[[ "$FEATURE" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] || {
+  echo "ERROR: invalid Module ID '$FEATURE'." >&2; exit 1; }
 THRESHOLD_ERRORS="${DOTNET_ERROR_THRESHOLD:-10}"
 
 mkdir -p ".dev-runtime/$FEATURE"
 FAIL_LOG=".dev-runtime/$FEATURE/latest-test.log"
 
-# Cache-key the NuGet volume by the hash of ALL lockfiles, so a package change
-# anywhere doesn't silently use a stale cache and miss new dependencies.
-LOCK_HASH=$(find . -name packages.lock.json -type f -print0 \
-  | sort -z | xargs -0 cat 2>/dev/null | sha256sum | cut -d' ' -f1 | head -c 12)
-NUGET_CACHE_VOLUME="nuget-cache-${LOCK_HASH:-no-lockfiles}"
+LOCK_HASH=$(find . \
+  \( -path './.git' -o -path './.dev-runtime' -o -path '*/bin' -o -path '*/obj' \) -prune -o \
+  -name packages.lock.json -type f -print0 \
+  | sort -z | xargs -0 -r cat 2>/dev/null | sha256sum | cut -d' ' -f1 | head -c 12)
+WORKSPACE_ID="$(printf '%s' "$(pwd -P)" | sha256sum | cut -d' ' -f1 | head -c 12)"
+NUGET_CACHE_VOLUME="nuget-cache-${WORKSPACE_ID}-${LOCK_HASH:-no-lockfiles}"
 
-# The test-runner image already runs as the non-root 'agent' user (Phase 6),
-# so no --user flag is needed here.
-#
-# Test execution is split into two container invocations with different network
-# postures. `dotnet restore --locked-mode` legitimately needs the network (to
-# populate the NuGet cache volume), but `dotnet build`/`dotnet test` execute
-# arbitrary Coder-written code and must NOT have network access. Running them
-# with --network=none closes the one arbitrary-code-execution point in the
-# pipeline: a malicious or buggy test can no longer exfiltrate the workspace or
-# phone home. Because restore already populated the cache volume, the isolated
-# build/test step restores offline from that volume with --no-restore.
+# Hash every workspace file except Git metadata, orchestrator runtime state and
+# normal compiler output. A successful restore/build/test must leave this hash
+# unchanged; path-only scope checks are not sufficient because an allowed source
+# file could otherwise be rewritten after its compiled assembly passed.
+workspace_hash() {
+  find . \
+    \( -path './.git' -o -path './.dev-runtime' -o -path '*/bin' -o -path '*/obj' \) -prune -o \
+    \( -type f -o -type l \) -print0 \
+    | sort -z \
+    | while IFS= read -r -d '' path; do
+        printf '%s\0' "$path"
+        stat -c '%a %F' -- "$path" 2>/dev/null || return 1
+        if [ -L "$path" ]; then readlink -- "$path"; else sha256sum -- "$path"; fi
+      done \
+    | sha256sum \
+    | cut -d' ' -f1
+}
+
+# Protect all test definitions, fixtures, Git state, review metadata and MSBuild
+# control inputs inside test containers. Directories remain writable so bin/obj
+# can be produced, while each authoritative file is an immutable mount point.
+PROTECTED_MOUNTS=()
+declare -A PROTECTED_SEEN=()
+add_ro_file() {
+  local path="$1"
+  [ -f "$path" ] || return 0
+  local relative="${path#./}"
+  [ -n "${PROTECTED_SEEN[$relative]+x}" ] && return 0
+  PROTECTED_SEEN["$relative"]=1
+  PROTECTED_MOUNTS+=(-v "$PWD/$relative:/workspace/$relative:ro")
+}
+
+[ -d .git ] && PROTECTED_MOUNTS+=(-v "$PWD/.git:/workspace/.git:ro")
+for path in Directory.Packages.props Directory.Build.props Directory.Build.targets \
+            global.json REVIEW_QUEUE.md BROADCAST.md \
+            .agent/rules/architecture.md .agent/rules/architecture.original.md; do
+  add_ro_file "$path"
+done
+while IFS= read -r -d '' path; do add_ro_file "$path"; done < <(
+  find tests \
+    \( -path '*/bin' -o -path '*/obj' \) -prune -o \
+    -type f -print0 2>/dev/null
+)
+while IFS= read -r -d '' path; do add_ro_file "$path"; done < <(
+  find . \
+    \( -path './.git' -o -path './.dev-runtime' -o -path '*/bin' -o -path '*/obj' \) -prune -o \
+    -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' \
+              -o -name '*.sln' -o -name '*.slnx' -o -name '*.props' \
+              -o -name '*.targets' -o -name 'NuGet.Config' \) -print0
+)
+
+# The framework promises that test containers receive no credentials. Mask a
+# project-local .env if one exists; ignored secrets must not become readable to
+# repository-controlled build logic.
+if [ -f .env ]; then
+  EMPTY_ENV=".dev-runtime/$FEATURE/empty.env"
+  : > "$EMPTY_ENV"
+  chmod 444 "$EMPTY_ENV"
+  PROTECTED_MOUNTS+=(-v "$PWD/$EMPTY_ENV:/workspace/.env:ro")
+fi
+
 run_restore() {
-  # Networked. Only ever runs `dotnet restore` (locked-mode). No test code runs.
-  docker run --rm \
+  # Networked restore evaluates only trusted, read-only scaffold/MSBuild files.
+  # Implementation agents cannot change those files, and the workspace hash
+  # below rejects any mutation left by the restore process.
+  docker run --rm --pull=never \
     -v "$PWD":/workspace \
     -v "$NUGET_CACHE_VOLUME":/home/agent/.nuget/packages \
+    "${PROTECTED_MOUNTS[@]}" \
     --entrypoint bash \
     test-runner -lc "$1"
 }
 
 run_isolated() {
-  # No network. Runs Coder-authored build + test code. The cache volume is
-  # still mounted (read path) so --no-restore resolves everything offline.
-  docker run --rm \
+  # Build/test execute repository code without network. The restored package
+  # cache is read-only, preventing a build task or test from poisoning it for a
+  # later module or project.
+  docker run --rm --pull=never \
     --network=none \
     -v "$PWD":/workspace \
-    -v "$NUGET_CACHE_VOLUME":/home/agent/.nuget/packages \
+    -v "$NUGET_CACHE_VOLUME":/home/agent/.nuget/packages:ro \
+    "${PROTECTED_MOUNTS[@]}" \
     --entrypoint bash \
     test-runner -lc "$1"
 }
 
-# --- Restore (networked, no test code) ---
-restore_output=$(run_restore "dotnet restore --locked-mode 2>&1")
+run_guarded() {
+  # run_guarded <restore|isolated> <command>
+  local mode="$1" command="$2" before after output rc
+  before="$(workspace_hash)" || {
+    echo "WORKSPACE INTEGRITY FAILURE: could not hash the workspace before $mode." >&2
+    return 98
+  }
+  if [ "$mode" = "restore" ]; then
+    output="$(run_restore "$command" 2>&1)"; rc=$?
+  else
+    output="$(run_isolated "$command" 2>&1)"; rc=$?
+  fi
+  after="$(workspace_hash)" || {
+    printf '%s\n' "$output"
+    echo "WORKSPACE INTEGRITY FAILURE: could not hash the workspace after $mode." >&2
+    return 98
+  }
+  printf '%s\n' "$output"
+  if [ "$before" != "$after" ]; then
+    echo "WORKSPACE INTEGRITY FAILURE: $mode phase changed protected/project content." >&2
+    echo "Only bin/, obj/ and .dev-runtime/ may change during a test-container run." >&2
+    git status --short >&2 2>/dev/null || true
+    return 97
+  fi
+  return "$rc"
+}
+
+# Restore with network, then build and execute tests without network.
+restore_output="$(run_guarded restore "dotnet restore --locked-mode 2>&1")"
 restore_rc=$?
 if [ "$restore_rc" -ne 0 ]; then
   printf '%s\n' "$restore_output" > "$FAIL_LOG"
   echo "$restore_output"
   echo ""
   echo "Restore failed (exit $restore_rc). Log saved to $FAIL_LOG."
-  echo "If a package is missing, run 'dotnet restore' to regenerate packages.lock.json, then commit it."
   exit 1
 fi
 
-# --- Build + static analysis (NO network; runs analysers/generators). The
-#     container's EXIT CODE is authoritative; the error-string count is only
-#     used to distinguish a cascade from an ordinary failure, never to decide
-#     pass/fail. A Docker/OOM failure with zero matching strings is still a
-#     failure. ---
-build_output=$(run_isolated "dotnet build --no-restore -warnaserror -clp:NoSummary 2>&1")
+build_output="$(run_guarded isolated "dotnet build --no-restore -warnaserror -clp:NoSummary 2>&1")"
 build_rc=$?
 printf '%s\n' "$build_output" > "$FAIL_LOG"
 build_errors=$(printf '%s\n' "$build_output" | grep -c "error ")
 
 if [ "$build_rc" -ne 0 ]; then
+  echo "$build_output"
+  echo ""
   if [ "$build_errors" -gt "$THRESHOLD_ERRORS" ]; then
-    echo "$build_output"
-    echo ""
     echo "Cascade threshold exceeded ($build_errors errors > $THRESHOLD_ERRORS)."
     echo "Build error log saved to $FAIL_LOG."
-    echo ""
-    echo "This is a cascade – too many errors to trust an incremental fix."
-    echo "Escalate deliberately when you're ready (one-shot per module):"
-    echo "  dev.sh escalate $FEATURE $FAIL_LOG"
-    echo ""
-    echo "(Not auto-escalating: escalate.py enforces a one-shot-per-module"
-    echo " policy and writes escalation-notes.md itself. Auto-running it here"
-    echo " would silently consume that one shot and clobber the file.)"
+    echo "Escalate deliberately when ready: dev.sh escalate $FEATURE $FAIL_LOG"
   else
-    echo "$build_output"
-    echo ""
     echo "Build failed (exit $build_rc). Log saved to $FAIL_LOG."
   fi
   exit 1
 fi
 
-# --- Fast-tier tests. Run each project EXPLICITLY rather than filtering by
-#     [Trait], so an un-categorised test can never silently drop out of the
-#     gate. Each project must also DISCOVER at least one test – an empty gate
-#     that reports green is worse than a red one. ---
 run_project() {
-  local proj="$1" mode="${2:-required}"
-  if [ ! -f "$proj" ]; then
-    if [ "$mode" = "optional" ]; then
-      echo "ABSENT TIER (allowed): $proj"
-      return 0
-    fi
-    echo "MISSING TEST PROJECT: $proj"
-    return 1
-  fi
-  local out
-  out=$(run_isolated "dotnet test '$proj' --no-build --no-restore -v normal 2>&1")
-  local rc=$?
+  local proj="$1" mode="${2:-required}" out rc
+  [ -f "$proj" ] || { echo "MISSING TEST PROJECT: $proj"; return 1; }
+  out="$(run_guarded isolated "dotnet test '$proj' --no-build --no-restore -v normal 2>&1")"
+  rc=$?
   printf '%s\n' "$out"
   printf '%s\n' "$out" >> "$FAIL_LOG"
-  if [ "$rc" -ne 0 ]; then
-    return 1
-  fi
-  # Guard against a project that ran zero tests (misconfiguration). For a
-  # required tier this is fatal; for an optional tier it is reported and
-  # tolerated, so an empty Golden/Unit project cannot deadlock module one.
-  if printf '%s\n' "$out" | grep -qE "No test (is available|matches)"; then
-    if [ "$mode" = "optional" ]; then
-      echo "EMPTY TIER (allowed): $proj contains no tests yet."
+  [ "$rc" -eq 0 ] || return 1
+
+  if printf '%s\n' "$out" | grep -qE "No test (is available|matches)|Total tests:[[:space:]]*0"; then
+    if [ "$mode" = "optional-empty" ]; then
+      echo "EMPTY TIER (allowed until its first *Tests.cs exists): $proj"
       return 0
     fi
-    echo "EMPTY TEST GATE: $proj discovered no tests."
+    echo "EMPTY TEST GATE: $proj contains test source but discovered no tests."
     return 1
   fi
   return 0
 }
 
-# Discover EVERY project of each tier, not just the first ('head -1' silently
-# ignored all but one in a multi-project solution). Use a real glob (not
-# `ls $pattern`, which word-splits and trips ShellCheck SC2012/SC2086): enable
-# nullglob so a no-match pattern expands to nothing instead of a literal.
 collect() {
   local pattern="$1"; local -n _out="$2"
   _out=()
@@ -142,29 +188,42 @@ collect() {
   shopt -s nullglob
   for p in $pattern; do _out+=("$p"); done
   [ "$had_nullglob" = "1" ] || shopt -u nullglob
-  # Deterministic order (glob is already sorted, but keep it explicit).
   if [ "${#_out[@]}" -gt 1 ]; then
     mapfile -t _out < <(printf '%s\n' "${_out[@]}" | sort)
   fi
 }
+
+project_mode() {
+  local project="$1" directory
+  directory="$(dirname "$project")"
+  if find "$directory" \( -path '*/bin' -o -path '*/obj' \) -prune -o \
+       -type f -name '*Tests.cs' -print -quit | grep -q .; then
+    echo required
+  else
+    echo optional-empty
+  fi
+}
+
 collect "tests/*.Contracts/*.Contracts.csproj" CONTRACTS_PROJS
 collect "tests/*.Golden/*.Golden.csproj"       GOLDEN_PROJS
 collect "tests/*.Unit/*.Unit.csproj"           UNIT_PROJS
+: > "$FAIL_LOG"
 
-: > "$FAIL_LOG"   # reset log now that the build passed
-
-# Contract tests are mandatory: they are the module's API gate.
 if [ "${#CONTRACTS_PROJS[@]}" -eq 0 ]; then
   echo "MISSING TEST PROJECT: no tests/*.Contracts/*.Contracts.csproj found."
+  exit 1
+fi
+if [ "${#GOLDEN_PROJS[@]}" -eq 0 ]; then
+  echo "MISSING TEST PROJECT: no tests/*.Golden/*.Golden.csproj found."
+  exit 1
+fi
+if [ "${#UNIT_PROJS[@]}" -eq 0 ]; then
+  echo "MISSING TEST PROJECT: no tests/*.Unit/*.Unit.csproj found."
   exit 1
 fi
 
 rc=0
 for p in "${CONTRACTS_PROJS[@]}"; do run_project "$p" required || rc=1; done
-# Golden and Unit tiers are optional-but-strict: a project that exists must
-# contain tests and pass, but a tier that has no tests yet (e.g. before the
-# golden harness is written, or a module with no unit tests) must not
-# deadlock the very first module. Their absence is reported, not fatal.
-for p in "${GOLDEN_PROJS[@]}"; do run_project "$p" optional || rc=1; done
-for p in "${UNIT_PROJS[@]}"; do run_project "$p" optional || rc=1; done
-exit $rc
+for p in "${GOLDEN_PROJS[@]}"; do run_project "$p" "$(project_mode "$p")" || rc=1; done
+for p in "${UNIT_PROJS[@]}"; do run_project "$p" "$(project_mode "$p")" || rc=1; done
+exit "$rc"

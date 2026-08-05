@@ -28,6 +28,16 @@ if (!isStaged && !isLastCommit && sinceRef is null)
     Environment.Exit(2);
 }
 
+if (isStaged)
+    RequireGitRef("HEAD");
+else if (isLastCommit)
+{
+    RequireGitRef("HEAD");
+    RequireGitRef("HEAD^");
+}
+else
+    RequireGitRef(sinceRef!);
+
 string oldRef;
 string newRef;
 List<string> files;
@@ -89,7 +99,7 @@ if (isStaged && changes.Count > 0)
 if (namesOnly)
 {
     foreach (var symbol in changes.Select(c => c.Symbol).Distinct().Order())
-        Console.WriteLine(symbol);
+        Console.WriteLine($"API\t{symbol}");
 }
 else if (!isStaged)
 {
@@ -141,6 +151,12 @@ Dictionary<string, ApiEntry> ExtractApi(string source, string file, bool strict)
             ConstructorDeclarationSyntax ctor => new ApiEntry(
                 QualifiedName(ctor, ctor.Identifier.Text),
                 $"{Mods(ctor.Modifiers)} {QualifiedName(ctor, ctor.Identifier.Text)}{Norm(ctor.ParameterList)}"),
+            OperatorDeclarationSyntax op => new ApiEntry(
+                QualifiedName(op, $"operator{op.OperatorToken.Text}"),
+                $"{Mods(op.Modifiers)} {Norm(op.ReturnType)} {QualifiedContainer(op)}.operator {op.OperatorToken.Text}{Norm(op.ParameterList)}"),
+            ConversionOperatorDeclarationSyntax conversion => new ApiEntry(
+                QualifiedName(conversion, $"{conversion.ImplicitOrExplicitKeyword.Text}operator{Norm(conversion.Type)}"),
+                $"{Mods(conversion.Modifiers)} {conversion.ImplicitOrExplicitKeyword.Text} operator {Norm(conversion.Type)} {QualifiedContainer(conversion)}{Norm(conversion.ParameterList)}"),
             PropertyDeclarationSyntax property => new ApiEntry(
                 QualifiedName(property, property.Identifier.Text),
                 $"{Mods(property.Modifiers)} {Norm(property.Type)} {QualifiedName(property, property.Identifier.Text)} {Accessors(property.AccessorList)}"),
@@ -155,7 +171,10 @@ Dictionary<string, ApiEntry> ExtractApi(string source, string file, bool strict)
                 $"{Mods(evf.Modifiers)} event {Norm(evf.Declaration.Type)} {QualifiedContainer(evf)}.{string.Join(",", evf.Declaration.Variables.Select(v => v.Identifier.Text))}"),
             FieldDeclarationSyntax field => new ApiEntry(
                 QualifiedName(field, string.Join(",", field.Declaration.Variables.Select(v => v.Identifier.Text))),
-                $"{Mods(field.Modifiers)} {Norm(field.Declaration.Type)} {QualifiedContainer(field)}.{string.Join(",", field.Declaration.Variables.Select(v => v.Identifier.Text))}"),
+                $"{Mods(field.Modifiers)} {Norm(field.Declaration.Type)} {QualifiedContainer(field)}.{string.Join(",", field.Declaration.Variables.Select(v => v.Identifier.Text + (!field.Modifiers.Any(m => m.IsKind(SyntaxKind.ConstKeyword)) || v.Initializer is null ? "" : " = " + Norm(v.Initializer.Value))))}"),
+            EnumMemberDeclarationSyntax enumMember => new ApiEntry(
+                QualifiedName(enumMember, enumMember.Identifier.Text),
+                $"enum-member {QualifiedName(enumMember, enumMember.Identifier.Text)}{(enumMember.EqualsValue is null ? "" : " = " + Norm(enumMember.EqualsValue.Value))}"),
             _ => null
         };
 
@@ -168,6 +187,17 @@ Dictionary<string, ApiEntry> ExtractApi(string source, string file, bool strict)
 }
 
 bool IsExposed(SyntaxNode node)
+{
+    if (!IsDirectlyExposed(node)) return false;
+
+    // A public member nested in an internal/private type is not part of the
+    // externally reachable API. Require every containing type to be exposed.
+    foreach (var container in node.Ancestors().OfType<BaseTypeDeclarationSyntax>())
+        if (!IsDirectlyExposed(container)) return false;
+    return true;
+}
+
+bool IsDirectlyExposed(SyntaxNode node)
 {
     var mods = node switch
     {
@@ -187,6 +217,9 @@ bool IsExposed(SyntaxNode node)
     {
         return true;
     }
+    // Enum members are implicitly public and carry no access modifier.
+    if (node.Parent is EnumDeclarationSyntax)
+        return true;
     return false;
 }
 
@@ -207,7 +240,13 @@ ApiEntry TypeEntry(BaseTypeDeclarationSyntax type)
         };
         var typeParams = type is TypeDeclarationSyntax td ? Norm(td.TypeParameterList) : "";
     var constraints = type is TypeDeclarationSyntax td2 ? Constraints(td2.ConstraintClauses) : "";
-    var primaryCtor = type is RecordDeclarationSyntax record ? Norm(record.ParameterList) : "";
+    var primaryCtor = type switch
+    {
+        RecordDeclarationSyntax record => Norm(record.ParameterList),
+        ClassDeclarationSyntax @class => Norm(@class.ParameterList),
+        StructDeclarationSyntax @struct => Norm(@struct.ParameterList),
+        _ => ""
+    };
     var bases = Norm(type.BaseList);
     var name = QualifiedName(type, type.Identifier.Text);
     return new ApiEntry(name, $"{Mods(type.Modifiers)} {keyword} {name}{typeParams}{primaryCtor}{bases}{constraints}");
@@ -250,15 +289,42 @@ string ReadVersion(string version, string file)
     if (version == ":WORKTREE:")
         return File.Exists(file) ? File.ReadAllText(file) : "";
     if (version == ":INDEX:")
-        return GitTextAllowFailure("show", $":{file}");
-    return GitTextAllowFailure("show", $"{version}:{file}");
+        return GitShowOrEmpty($":{file}");
+    return GitShowOrEmpty($"{version}:{file}");
 }
 
-List<string> GitLines(params string[] args) => GitTextAllowFailure(args)
+List<string> GitLines(params string[] args) => GitTextRequired(args)
     .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
     .ToList();
 
-string GitTextAllowFailure(params string[] args)
+void RequireGitRef(string reference)
+{
+    var result = RunGit("rev-parse", "--verify", "--quiet", $"{reference}^{{commit}}");
+    if (result.ExitCode != 0)
+        FailGit($"Git reference '{reference}' does not resolve to a commit.", result);
+}
+
+string GitShowOrEmpty(string objectSpec)
+{
+    var exists = RunGit("cat-file", "-e", objectSpec);
+    if (exists.ExitCode != 0)
+        return ""; // The path is legitimately absent in this version.
+
+    var shown = RunGit("show", objectSpec);
+    if (shown.ExitCode != 0)
+        FailGit($"Could not read '{objectSpec}'.", shown);
+    return shown.Stdout;
+}
+
+string GitTextRequired(params string[] args)
+{
+    var result = RunGit(args);
+    if (result.ExitCode != 0)
+        FailGit($"git {string.Join(" ", args)} failed.", result);
+    return result.Stdout;
+}
+
+GitResult RunGit(params string[] args)
 {
     var psi = new ProcessStartInfo("git")
     {
@@ -270,9 +336,22 @@ string GitTextAllowFailure(params string[] args)
         psi.ArgumentList.Add(arg);
 
     using var process = Process.Start(psi)!;
-    var stdout = process.StandardOutput.ReadToEnd();
+    var stdoutTask = process.StandardOutput.ReadToEndAsync();
+    var stderrTask = process.StandardError.ReadToEndAsync();
     process.WaitForExit();
-    return process.ExitCode == 0 ? stdout : "";
+    return new GitResult(
+        process.ExitCode,
+        stdoutTask.GetAwaiter().GetResult(),
+        stderrTask.GetAwaiter().GetResult());
+}
+
+void FailGit(string message, GitResult result)
+{
+    Console.Error.WriteLine($"ERROR: {message}");
+    if (!string.IsNullOrWhiteSpace(result.Stderr))
+        Console.Error.WriteLine(result.Stderr.TrimEnd());
+    Environment.Exit(2);
 }
 
 record ApiEntry(string Symbol, string Signature);
+record GitResult(int ExitCode, string Stdout, string Stderr);

@@ -15,7 +15,7 @@
 # (keep in step with CHANGELOG.md and the git tag). Because users COPY dev.sh
 # into their projects, this is how a project records which framework version it
 # is running; `dev.sh version` and `dev.sh help` print it.
-DEV_SH_VERSION="0.2.0"
+DEV_SH_VERSION="0.2.1"
 
 set -uo pipefail
 
@@ -104,12 +104,23 @@ AGENT_NETWORK_NAME="tenninety-agent"
 
 # Ensure the dedicated bridge exists (idempotent). Only used in restricted mode.
 ensure_agent_network() {
-  docker network inspect "$AGENT_NETWORK_NAME" >/dev/null 2>&1 && return 0
+  if docker network inspect "$AGENT_NETWORK_NAME" >/dev/null 2>&1; then
+    local properties
+    properties="$(docker network inspect "$AGENT_NETWORK_NAME" \
+      --format '{{.Driver}} {{.Internal}}' 2>/dev/null)" || return 1
+    if [ "$properties" != "bridge false" ]; then
+      echo "ERROR: Docker network '$AGENT_NETWORK_NAME' has unexpected properties: $properties" >&2
+      echo "Expected a non-internal bridge; restricted mode fails closed." >&2
+      return 1
+    fi
+    return 0
+  fi
   # A plain user-defined bridge (NOT --internal): the agent must still reach the
   # host gateway for llama-swap. Isolation from the wider internet is enforced
   # by the host firewall rule in Phase 5, targeted at this network's subnet.
   docker network create --driver bridge "$AGENT_NETWORK_NAME" >/dev/null 2>&1 || {
-    echo "WARNING: could not create Docker network '$AGENT_NETWORK_NAME'; falling back to default." >&2
+    echo "ERROR: could not create the required Docker network '$AGENT_NETWORK_NAME'." >&2
+    echo "Restricted mode fails closed; no agent container was started." >&2
     return 1
   }
 }
@@ -121,12 +132,15 @@ agent_net_args() {
   _net=()
   case "$DEV_AGENT_NETWORK" in
     restricted)
-      if ensure_agent_network; then
-        _net+=(--network "$AGENT_NETWORK_NAME")
-      fi
+      ensure_agent_network || return 1
+      _net+=(--network "$AGENT_NETWORK_NAME")
       ;;
-    default|*)
+    default)
       : # default bridge; no extra flag
+      ;;
+    *)
+      echo "ERROR: DEV_AGENT_NETWORK must be 'default' or 'restricted'; got '$DEV_AGENT_NETWORK'." >&2
+      return 1
       ;;
   esac
   # llama-swap lives on the host in both modes; keep the gateway alias.
@@ -142,7 +156,11 @@ agent_net_args() {
 # completion, so it stays fast. Returns 0 if reachable, 1 otherwise.
 preflight_llama_swap() {
   [ "$DEV_SKIP_PREFLIGHT" = "1" ] && return 0
-  command -v curl >/dev/null 2>&1 || return 0   # can't check; don't block
+  command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: curl is required for the llama-swap preflight check." >&2
+    echo "Install curl, or set DEV_SKIP_PREFLIGHT=1 for an explicit bypass." >&2
+    return 1
+  }
   local code
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
     "$LLAMA_SWAP_HOST_URL/v1/models" 2>/dev/null || echo "000")"
@@ -161,19 +179,45 @@ preflight_llama_swap() {
 }
 
 
-# Detect the Contracts and Golden test project directory names.
-CONTRACTS_DIR=$(find "$WORKSPACE/tests" -maxdepth 1 -type d -name '*.Contracts' -printf '%f\n' 2>/dev/null | head -1)
-GOLDEN_DIR=$(find "$WORKSPACE/tests" -maxdepth 1 -type d -name '*.Golden' -printf '%f\n' 2>/dev/null | head -1)
+# Detect every Contracts and Golden test project. Generation commands require
+# exactly one project of their tier, while read-only protection covers all of
+# them so adding a second project never silently weakens the sandbox.
+CONTRACTS_DIRS=()
+GOLDEN_DIRS=()
+mapfile -t CONTRACTS_DIRS < <(find "$WORKSPACE/tests" -maxdepth 1 -type d -name '*.Contracts' -printf '%f\n' 2>/dev/null | sort)
+mapfile -t GOLDEN_DIRS < <(find "$WORKSPACE/tests" -maxdepth 1 -type d -name '*.Golden' -printf '%f\n' 2>/dev/null | sort)
+CONTRACTS_DIR="${CONTRACTS_DIRS[0]:-}"
+GOLDEN_DIR="${GOLDEN_DIRS[0]:-}"
 
 # Always read-only to agents: contract tests, the golden harness project, the
 # fixture, the dependency manifest, and the frozen spec originals. Anything an
 # agent must not silently rewrite is a real :ro mount, not just a chmod.
 RO_MOUNTS=()
-[ -n "$CONTRACTS_DIR" ] && RO_MOUNTS+=(-v "$WORKSPACE/tests/$CONTRACTS_DIR:/workspace/tests/$CONTRACTS_DIR:ro")
-[ -n "$GOLDEN_DIR" ] && RO_MOUNTS+=(-v "$WORKSPACE/tests/$GOLDEN_DIR:/workspace/tests/$GOLDEN_DIR:ro")
-RO_MOUNTS+=(-v "$WORKSPACE/tests/fixtures:/workspace/tests/fixtures:ro")
-RO_MOUNTS+=(-v "$WORKSPACE/Directory.Packages.props:/workspace/Directory.Packages.props:ro")
+for test_dir in "${CONTRACTS_DIRS[@]}" "${GOLDEN_DIRS[@]}"; do
+  [ -n "$test_dir" ] && RO_MOUNTS+=(-v "$WORKSPACE/tests/$test_dir:/workspace/tests/$test_dir:ro")
+done
+[ -d "$WORKSPACE/tests/fixtures" ] && RO_MOUNTS+=(-v "$WORKSPACE/tests/fixtures:/workspace/tests/fixtures:ro")
+[ -f "$WORKSPACE/Directory.Packages.props" ] && RO_MOUNTS+=(-v "$WORKSPACE/Directory.Packages.props:/workspace/Directory.Packages.props:ro")
+[ -f "$WORKSPACE/Directory.Build.props" ] && RO_MOUNTS+=(-v "$WORKSPACE/Directory.Build.props:/workspace/Directory.Build.props:ro")
+[ -f "$WORKSPACE/Directory.Build.targets" ] && RO_MOUNTS+=(-v "$WORKSPACE/Directory.Build.targets:/workspace/Directory.Build.targets:ro")
+[ -f "$WORKSPACE/global.json" ] && RO_MOUNTS+=(-v "$WORKSPACE/global.json:/workspace/global.json:ro")
+[ -f "$WORKSPACE/REVIEW_QUEUE.md" ] && RO_MOUNTS+=(-v "$WORKSPACE/REVIEW_QUEUE.md:/workspace/REVIEW_QUEUE.md:ro")
+[ -d "$WORKSPACE/review-feedback" ] && RO_MOUNTS+=(-v "$WORKSPACE/review-feedback:/workspace/review-feedback:ro")
+[ -f "$WORKSPACE/.agent/rules/architecture.md" ] && RO_MOUNTS+=(-v "$WORKSPACE/.agent/rules/architecture.md:/workspace/.agent/rules/architecture.md:ro")
 [ -f "$WORKSPACE/.agent/rules/architecture.original.md" ] && RO_MOUNTS+=(-v "$WORKSPACE/.agent/rules/architecture.original.md:/workspace/.agent/rules/architecture.original.md:ro")
+
+# MSBuild project and solution files are trusted scaffold/build-control inputs.
+# A networked restore evaluates them, so implementation agents must never be
+# able to change an existing one or create a replacement that reaches a gate.
+while IFS= read -r -d '' build_file; do
+  rel="${build_file#"$WORKSPACE/"}"
+  RO_MOUNTS+=(-v "$build_file:/workspace/$rel:ro")
+done < <(find "$WORKSPACE" \
+  -path "$WORKSPACE/.git" -prune -o \
+  -path '*/bin' -prune -o -path '*/obj' -prune -o \
+  -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' -o \
+               -name '*.sln' -o -name '*.slnx' -o -name 'NuGet.Config' \) \
+  -print0 2>/dev/null)
 
 # --- aider invocation ----------------------------------------------------
 # run_agent <profile> <mode: code|ask> <writable: rw|ro> <prompt> [file-specs...]
@@ -234,9 +278,9 @@ run_agent() {
   # GIT_OPTIONAL_LOCKS=0 stops even incidental .git writes (e.g. index refresh)
   # from a read-only .git mount. --no-git keeps aider itself away from Git.
   # History files are redirected to /tmp so the workspace stays clean.
-  local net_args; agent_net_args net_args
+  local net_args; agent_net_args net_args || { rm -f "$prompt_file"; return 1; }
   local rc=0
-  docker run --rm -i \
+  docker run --rm --pull=never -i \
     -e GIT_OPTIONAL_LOCKS=0 \
     -e OPENAI_API_BASE="$OPENAI_API_BASE" \
     -e OPENAI_API_KEY="$OPENAI_API_KEY" \
@@ -286,8 +330,9 @@ stage_untracked() {
 # scope. Rather than trust the Reviewer model to catch out-of-scope edits,
 # the orchestrator parses the manifest itself and hard-fails on any changed
 # path not listed under the module's Implementation files / Shared
-# integration files. `.agent/rules/architecture.md` is the sole global
-# exception (a deliberate interface change).
+# integration files. Host-generated protected tests are admitted separately:
+# implementation agents cannot write them because every such path is mounted
+# read-only, but they must appear in the review diff and module commit.
 #
 # Manifest format (from the blueprint, rigidly specified):
 #   **Module ID:** `invoice-calculator`
@@ -298,9 +343,18 @@ stage_untracked() {
 
 manifest_allowed_paths() {
   # manifest_allowed_paths <module-id> -> allowed paths, one per line.
-  local module_id="$1"
+  # Optional second argument reads the manifest from that Git ref. Scope and
+  # agent attachment selection use the active baseline so an in-progress edit
+  # to architecture.md cannot grant itself new writable paths.
+  local module_id="$1" manifest_ref="${2:-}"
   local spec="$WORKSPACE/.agent/rules/architecture.md"
   [ -f "$spec" ] || return 0
+  local content
+  if [ -n "$manifest_ref" ]; then
+    content="$(git -C "$WORKSPACE" show "$manifest_ref:.agent/rules/architecture.md" 2>/dev/null)" || return 1
+  else
+    content="$(cat "$spec")" || return 1
+  fi
   awk -v id="$module_id" '
     # Enter this module block when its Module ID line matches exactly.
     /\*\*Module ID:\*\*[[:space:]]*`/ {
@@ -320,54 +374,174 @@ manifest_allowed_paths() {
       sub(/`.*$/, "", p)
       if (p != "" && tolower(p) != "none") print p
     }
-  ' "$spec"
+  ' <<< "$content"
+}
+
+manifest_protected_paths() {
+  # manifest_protected_paths <module-id> -> host-generated protected test
+  # artefact paths, one per line. The blueprint uses the first heading below;
+  # the alternatives keep existing projects compatible with earlier wording.
+  local module_id="$1" manifest_ref="${2:-}"
+  local spec="$WORKSPACE/.agent/rules/architecture.md"
+  [ -f "$spec" ] || return 0
+  local content
+  if [ -n "$manifest_ref" ]; then
+    content="$(git -C "$WORKSPACE" show "$manifest_ref:.agent/rules/architecture.md" 2>/dev/null)" || return 1
+  else
+    content="$(cat "$spec")" || return 1
+  fi
+  awk -v id="$module_id" '
+    /\*\*Module ID:\*\*[[:space:]]*`/ {
+      line = $0
+      sub(/^.*\*\*Module ID:\*\*[[:space:]]*`/, "", line)
+      sub(/`.*$/, "", line)
+      inblock = (line == id) ? 1 : 0
+      grab = 0
+      next
+    }
+    inblock && /^###[[:space:]]+(Protected\/generated test artefacts?|Protected contract-tests?|Protected contract-test paths?)([[:space:]]|$)/ { grab = 1; next }
+    inblock && /^###[[:space:]]/ { grab = 0 }
+    inblock && /^##[[:space:]]/  { inblock = 0; grab = 0 }
+    grab && /^-[[:space:]]+`/ {
+      p = $0
+      sub(/^-[[:space:]]+`/, "", p)
+      sub(/`.*$/, "", p)
+      if (p != "" && tolower(p) != "none") print p
+    }
+  ' <<< "$content"
+}
+
+module_baseline_ref() {
+  # Repairs run against a fresh baseline at the rejection commit. Initial
+  # implementation falls back to the permanent module-start tag.
+  local module_id="$1"
+  local marker="$WORKSPACE/.dev-runtime/$module_id/active-baseline"
+  if [ -s "$marker" ]; then
+    head -n 1 "$marker"
+  else
+    # .dev-runtime is intentionally disposable. Recover a repair baseline from
+    # durable Git tags if the runtime marker was cleaned or moved machines.
+    local repair
+    repair="$(git -C "$WORKSPACE" tag --list "module-repair-$module_id-*" \
+      --sort=-version:refname | head -n 1)"
+    if [ -n "$repair" ]; then echo "$repair"; else echo "module-start-$module_id"; fi
+  fi
+}
+
+module_diff_names() {
+  local module_id="$1" baseline
+  baseline="$(module_baseline_ref "$module_id")"
+  git -C "$WORKSPACE" diff --name-only "$baseline" -- . \
+    ':(exclude)REVIEW_QUEUE.md' \
+    ':(exclude)review-feedback/**'
+}
+
+module_diff_text() {
+  local module_id="$1" baseline
+  baseline="$(module_baseline_ref "$module_id")"
+  git -C "$WORKSPACE" diff --no-color "$baseline" -- . \
+    ':(exclude)REVIEW_QUEUE.md' \
+    ':(exclude)review-feedback/**'
+}
+
+is_build_control_path() {
+  case "$1" in
+    *.csproj|*.fsproj|*.vbproj|*.sln|*.slnx|*.props|*.targets|NuGet.Config|*/NuGet.Config|global.json)
+      return 0 ;;
+  esac
+  return 1
 }
 
 # Returns 0 if all changed paths are in scope, 1 otherwise (printing the
 # offending paths). Prints nothing on success.
 scope_check() {
   local module_id="$1"
-  local tag="module-start-$module_id"
+  local baseline
+  baseline="$(module_baseline_ref "$module_id")"
 
-  if ! git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-    echo "SCOPE ERROR: module '$module_id' was never started (no tag $tag)." >&2
+  if ! git -C "$WORKSPACE" rev-parse -q --verify "$baseline^{commit}" >/dev/null; then
+    echo "SCOPE ERROR: baseline '$baseline' for module '$module_id' does not exist." >&2
     return 1
   fi
 
   # Include untracked new files in the comparison (agents don't commit).
   stage_untracked
 
-  local allowed
-  allowed="$(manifest_allowed_paths "$module_id")"
+  local allowed protected
+  allowed="$(manifest_allowed_paths "$module_id" "$baseline")" || {
+    echo "SCOPE ERROR: could not read the baseline manifest from '$baseline'." >&2
+    return 1
+  }
   if [ -z "$allowed" ]; then
     echo "SCOPE ERROR: no Implementation/Shared files found for Module ID '$module_id' in .agent/rules/architecture.md." >&2
     echo "  Check the ID exists and its manifest lists paths under those headings." >&2
     return 1
   fi
-  # The architecture file itself is always allowed (interface-change exception).
+  protected="$(manifest_protected_paths "$module_id" "$baseline")" || {
+    echo "SCOPE ERROR: could not read protected paths from '$baseline'." >&2
+    return 1
+  }
+
+  # A manifest-declared protected artefact is required before review. This
+  # turns contract-test presence into a deterministic gate rather than a model
+  # suggestion. Modules without a public entry point may list None.
+  local protected_path
+  while IFS= read -r protected_path; do
+    [ -n "$protected_path" ] || continue
+    if [ ! -f "$WORKSPACE/$protected_path" ]; then
+      echo "SCOPE ERROR: required protected test artefact is missing: $protected_path" >&2
+      echo "Run 'dev.sh write-contract $module_id' before iterate." >&2
+      return 1
+    fi
+  done <<EOF
+$protected
+EOF
+
+  # architecture.md is the deliberate interface-change exception. Protected
+  # test artefacts are host-generated and read-only to every agent invocation.
   allowed="$allowed
+$protected
 .agent/rules/architecture.md"
+  if [ -n "$GOLDEN_DIR" ] && [ -f "$WORKSPACE/tests/$GOLDEN_DIR/CriticalLogicGoldenTests.cs" ]; then
+    allowed="$allowed
+tests/$GOLDEN_DIR/CriticalLogicGoldenTests.cs"
+  fi
 
   local changed
-  changed="$(git -C "$WORKSPACE" diff --name-only "$tag" 2>/dev/null)"
+  if ! changed="$(module_diff_names "$module_id" 2>&1)"; then
+    echo "SCOPE ERROR: could not diff module '$module_id' against '$baseline':" >&2
+    echo "$changed" >&2
+    return 1
+  fi
   [ -n "$changed" ] || return 0
 
-  local offenders=""
+  local offenders="" build_control=""
   local path
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    if ! printf '%s\n' "$allowed" | grep -qxF "$path"; then
+    if is_build_control_path "$path"; then
+      build_control="$build_control$path"$'\n'
+    elif ! printf '%s\n' "$allowed" | grep -qxF "$path"; then
       offenders="$offenders$path"$'\n'
     fi
   done <<EOF
 $changed
 EOF
 
+  if [ -n "$build_control" ]; then
+    echo "BUILD-CONTROL FILE(S) changed during module '$module_id':" >&2
+    printf '%s' "$build_control" | sed 's/^/  - /' >&2
+    echo "Project, solution, props and targets files are trusted restore inputs and are never agent-editable." >&2
+    echo "Make this change manually in a separate reviewed commit before starting or repairing a module." >&2
+    return 1
+  fi
+
   if [ -n "$offenders" ]; then
     echo "OUT-OF-SCOPE FILE(S) for module '$module_id' (not in its manifest):" >&2
     printf '%s' "$offenders" | sed 's/^/  - /' >&2
-    echo "  Allowed paths come from Implementation files / Shared integration files in the manifest." >&2
-    echo "  If this is a deliberate interface change, update the manifest to list the path (and follow the interface change policy)." >&2
+    echo "  Allowed paths come from Implementation files, Shared integration files, and host-generated protected test artefacts." >&2
+    echo "  Scope comes from the active baseline; an in-progress manifest edit cannot add paths." >&2
+    echo "  For a deliberate new path, have a human commit the reviewed spec change before starting a new baseline." >&2
     return 1
   fi
   return 0
@@ -383,12 +557,11 @@ EOF
 # frozen architecture.original.md so it can be reviewed deliberately.
 spec_changed_in_module() {
   # spec_changed_in_module <module-id> -> 0 if architecture.md is in the diff.
-  local module_id="$1"
-  local tag="module-start-$module_id"
-  git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/$tag" >/dev/null || return 1
+  local module_id="$1" baseline
+  baseline="$(module_baseline_ref "$module_id")"
+  git -C "$WORKSPACE" rev-parse -q --verify "$baseline^{commit}" >/dev/null || return 1
   stage_untracked
-  git -C "$WORKSPACE" diff --name-only "$tag" 2>/dev/null \
-    | grep -qx '.agent/rules/architecture.md'
+  module_diff_names "$module_id" 2>/dev/null | grep -qx '.agent/rules/architecture.md'
 }
 
 # Enforce the human gate. Returns 0 to proceed, 1 to refuse.
@@ -436,9 +609,12 @@ module_fingerprint() {
   # SHA-256 over the full working state relative to the module baseline.
   # .dev-runtime/ is excluded: it holds the markers themselves.
   {
-    git -C "$WORKSPACE" diff --binary HEAD 2>/dev/null
+    git -C "$WORKSPACE" diff --binary HEAD -- . \
+      ':(exclude)REVIEW_QUEUE.md' \
+      ':(exclude)review-feedback/**' 2>/dev/null
     git -C "$WORKSPACE" ls-files --others --exclude-standard 2>/dev/null \
       | grep -v '^\.dev-runtime/' \
+      | grep -v '^review-feedback/' \
       | while IFS= read -r f; do
           printf '%s\n' "$f"
           cat "$WORKSPACE/$f" 2>/dev/null
@@ -490,8 +666,12 @@ require_gate() {
 }
 
 cmd_start() {
-  local module_id="$1"
+  local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh start <module-id>"; return 1; }
+  [[ "$module_id" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] || {
+    echo "ERROR: invalid Module ID '$module_id' (expected lowercase kebab-case)."; return 1; }
+  [ -n "$(manifest_allowed_paths "$module_id")" ] || {
+    echo "ERROR: Module ID '$module_id' has no manifest implementation/shared paths."; return 1; }
 
   # Require an initial commit – the whole review architecture diffs against a
   # committed baseline.
@@ -523,18 +703,18 @@ cmd_start() {
   git -C "$WORKSPACE" tag "module-start-$module_id" "$base" || return 1
   mkdir -p "$WORKSPACE/.dev-runtime/$module_id"
   echo "$base" > "$WORKSPACE/.dev-runtime/$module_id/base-commit"
+  echo "module-start-$module_id" > "$WORKSPACE/.dev-runtime/$module_id/active-baseline"
   echo "Started module '$module_id' at base commit ${base:0:12} (tag module-start-$module_id)."
 }
 
-# Build the file-spec list for a Coder invocation: the architecture spec
-# (editable – a spec change is possible but gated on the human at
-# finalise/commit), the coder+tester skills (read-only), and every existing
+# Build the file-spec list for a Coder invocation: the architecture spec and
+# coder+tester skills (read-only), and every existing
 # file in the module's manifest (editable). Manifest files that don't exist
 # yet are skipped here and named in the task for the Coder to create.
 coder_file_specs() {
   local module_id="$1"
   printf '%s\n' \
-    "--edit:.agent/rules/architecture.md" \
+    "--read:.agent/rules/architecture.md" \
     "--read:.agent/skills/coder.md" \
     "--read:.agent/skills/tester.md"
   local p
@@ -542,7 +722,20 @@ coder_file_specs() {
     [ -n "$p" ] || continue
     case "$p" in .agent/rules/architecture.md) continue ;; esac
     [ -f "$WORKSPACE/$p" ] && printf '%s\n' "--edit:$p"
-  done < <(manifest_allowed_paths "$module_id")
+  done < <(manifest_allowed_paths "$module_id" "$(module_baseline_ref "$module_id")")
+}
+
+reviewer_file_specs() {
+  local module_id="$1" baseline
+  baseline="$(module_baseline_ref "$module_id")"
+  printf '%s\n' \
+    "--read:.agent/rules/architecture.md" \
+    "--read:.agent/skills/reviewer.md" \
+    "--read:review-feedback/$module_id.md"
+  local p
+  while IFS= read -r p; do
+    [ -n "$p" ] && [ -f "$WORKSPACE/$p" ] && printf '%s\n' "--read:$p"
+  done < <({ manifest_allowed_paths "$module_id" "$baseline"; manifest_protected_paths "$module_id" "$baseline"; } | sort -u)
 }
 
 # Run the Reviewer with the module diff inlined. aider runs single-shot and
@@ -552,27 +745,28 @@ coder_file_specs() {
 run_review() {
   # run_review <module-id>
   local module_id="$1"
-  local tag="module-start-$module_id"
+  local baseline
+  baseline="$(module_baseline_ref "$module_id")"
   local diff_text
-  if git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-    diff_text="$(git -C "$WORKSPACE" diff --no-color "$tag")"
+  if git -C "$WORKSPACE" rev-parse -q --verify "$baseline^{commit}" >/dev/null; then
+    diff_text="$(module_diff_text "$module_id")" || return 1
   else
     diff_text="$(git -C "$WORKSPACE" diff --no-color)"
   fi
   local prompt
   prompt="$(cat <<EOF
-Read the attached .agent/skills/reviewer.md and review the module diff below against its checklist and the attached .agent/rules/architecture.md.
+Read the attached .agent/skills/reviewer.md and review the module diff below against its checklist and the attached .agent/rules/architecture.md. The current full module files are also attached read-only. For a repair, the human rejection feedback is attached and the diff starts at that rejection baseline.
 
-The diff was generated on the host with 'git diff $tag' (new files appear in full via intent-to-add). You cannot run commands; this diff and the attached files are your complete evidence. End your response with a single verdict line that is exactly 'VERDICT: PASS' or 'VERDICT: FAIL' (list specific issues above it if it fails).
+The diff was generated on the host against baseline '$baseline' (new files appear in full via intent-to-add). Host-generated protected test artefacts listed in the manifest are valid diff paths and must be reviewed, but implementation agents cannot edit them. You cannot run commands; this diff and the attached files are your complete evidence. End your response with a single verdict line that is exactly 'VERDICT: PASS' or 'VERDICT: FAIL' (list specific issues above it if it fails).
 
 ----- BEGIN MODULE DIFF -----
 $diff_text
 ----- END MODULE DIFF -----
 EOF
 )"
-  run_agent "$REVIEWER_PROFILE" ask ro "$prompt" \
-    "--read:.agent/rules/architecture.md" \
-    "--read:.agent/skills/reviewer.md"
+  local specs=()
+  mapfile -t specs < <(reviewer_file_specs "$module_id")
+  run_agent "$REVIEWER_PROFILE" ask ro "$prompt" "${specs[@]}"
 }
 
 cmd_write() {
@@ -589,32 +783,29 @@ cmd_write() {
 }
 
 cmd_review() {
-  local module_id="${1:-current}"
-  # Run the deterministic scope gate first (only when a real module tag exists).
-  if [ "$module_id" != "current" ]; then
-    local scope_out
-    if ! scope_out="$(scope_check "$module_id" 2>&1)"; then
-      echo "$scope_out"
-      echo "VERDICT: FAIL"
-      return 1
-    fi
+  local module_id="${1:-}"
+  [ -n "$module_id" ] || { echo "usage: dev.sh review <module-id>"; return 1; }
+  require_started "$module_id" || return 1
+  local scope_out
+  if ! scope_out="$(scope_check "$module_id" 2>&1)"; then
+    echo "$scope_out"
+    echo "VERDICT: FAIL"
+    return 1
   fi
   preflight_llama_swap || return 1
   run_review "$module_id"
 }
 
 cmd_test() {
-  local module_id="$1"
+  local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh test <module-id>"; return 1; }
+  require_started "$module_id" || return 1
   # Scope-gate before the test container touches the tree: a bare `dev.sh test`
   # after `dev.sh write` would otherwise restore/build an unvetted tree.
-  if [ -n "$module_id" ] && git -C "$WORKSPACE" rev-parse -q --verify \
-       "refs/tags/module-start-$module_id" >/dev/null; then
-    local scope_out
-    if ! scope_out="$(scope_check "$module_id" 2>&1)"; then
-      echo "$scope_out" >&2
-      return 1
-    fi
+  local scope_out
+  if ! scope_out="$(scope_check "$module_id" 2>&1)"; then
+    echo "$scope_out" >&2
+    return 1
   fi
   (cd "$WORKSPACE" && ./scripts/run_tests_with_cascade_check.sh "$module_id")
 }
@@ -641,12 +832,15 @@ parse_verdict() {
 }
 
 cmd_iterate() {
-  local module_id="$1"
+  local module_id="${1:-}"
   # The original task is IMMUTABLE. Each retry sends the original task plus
   # ONLY the latest feedback (review findings or test log) – we never nest
   # the previous prompt inside the next one, which would grow the context
   # every iteration and work against the token-saving goal.
-  local original_task="$2"
+  local original_task="${2:-}"
+  [ -n "$module_id" ] && [ -n "$original_task" ] || {
+    echo 'usage: dev.sh iterate <module-id> "<task>"'; return 1; }
+  require_started "$module_id" || return 1
   local feedback=""
   local attempt=0
   local max_attempts=3
@@ -703,7 +897,9 @@ $feedback"
       echo "$scope_out"
       echo ""
       echo "==> Scope FAILED – back to Write (Reviewer and Test skipped this iteration)."
-      feedback="SCOPE FAILED. You changed files outside this module's manifest. Delete any newly-created out-of-scope files, and for a modified tracked file restore it with 'git show module-start-$module_id:<path> > <path>' (your .git is read-only, so 'git checkout' will fail). Only touch the paths listed under this module's Implementation files / Shared integration files:
+      local baseline
+      baseline="$(module_baseline_ref "$module_id")"
+      feedback="SCOPE FAILED. You changed files outside this module's manifest. Delete any newly-created out-of-scope files, and for a modified tracked file restore it with 'git show $baseline:<path> > <path>' (your .git is read-only, so 'git checkout' will fail). Only touch the paths listed under this module's Implementation files / Shared integration files:
 $(echo "$scope_out" | tail -n "$FEEDBACK_MAX_LINES")"
       continue
     fi
@@ -789,7 +985,7 @@ cmd_finalise() {
   # plus downstream interface-drift propagation – BEFORE the module can be
   # queued. The fast tier runs every iterate; integration runs once per
   # completed module. Only a successful finalise enables 'commit'/'queue'.
-  local module_id="$1"
+  local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh finalise <module-id> [--allow-spec-change]"; return 1; }
   shift || true
   local allow_spec=0
@@ -816,10 +1012,22 @@ cmd_finalise() {
     return 1
   fi
 
+  # The integration runner is required to leave protected and production
+  # content unchanged. Re-check both the fast-tier fingerprint and scope here
+  # so a broken/custom runner cannot stamp altered content as finalised.
+  require_gate "$module_id" fast-tests "review and the fast test tier" \
+    "dev.sh iterate $module_id \"<task>\"" || return 1
+  if ! scope_check "$module_id"; then
+    echo "Integration tests left the module outside its approved scope." >&2
+    return 1
+  fi
+
   echo ""
   echo "==> Downstream interface-drift check"
   # A crash in the drift tool must not be read as "no interface changed".
-  if ! (cd "$WORKSPACE" && ./scripts/check_interface_drift.sh "$module_id"); then
+  local baseline
+  baseline="$(module_baseline_ref "$module_id")"
+  if ! (cd "$WORKSPACE" && ./scripts/check_interface_drift.sh "$module_id" "$baseline"); then
     echo "ERROR: the interface-drift check failed to run."
     echo "Fix the drift tooling before finalising – a broken checker cannot be"
     echo "treated as 'no public API changes'."
@@ -831,7 +1039,7 @@ cmd_finalise() {
 }
 
 cmd_queue() {
-  local module_id="$1"
+  local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh queue <module-id>"; return 1; }
   require_started "$module_id" || return 1
 
@@ -854,7 +1062,11 @@ cmd_queue() {
   # next 'dev.sh start' can run.
   git -C "$WORKSPACE" add REVIEW_QUEUE.md >/dev/null 2>&1 || true
   if ! git -C "$WORKSPACE" diff --cached --quiet 2>/dev/null; then
-    git -C "$WORKSPACE" commit -q -m "queue($module_id): ready for review" || return 1
+    if ! git -C "$WORKSPACE" commit -q -m "queue($module_id): ready for review"; then
+      git -C "$WORKSPACE" restore --staged --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
+      echo "ERROR: could not commit the queue update; REVIEW_QUEUE.md was restored." >&2
+      return 1
+    fi
   fi
   echo "Queued $module_id. Working tree is clean; you can start the next module."
 }
@@ -863,7 +1075,7 @@ cmd_commit() {
   # The orchestrator owns all Git state: agents never commit. This is the step
   # that turns a finalised module into a fixed artefact and returns the tree to
   # a clean state so the NEXT module can start.
-  local module_id="$1"
+  local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh commit <module-id> [--allow-spec-change]"; return 1; }
   shift || true
   local allow_spec=0
@@ -872,8 +1084,13 @@ cmd_commit() {
   done
   require_started "$module_id" || return 1
   require_spec_change_ack "$module_id" "$allow_spec" "dev.sh commit" || return 1
+  require_gate "$module_id" reviewed "review" \
+    "dev.sh iterate $module_id \"<task>\"" || return 1
+  require_gate "$module_id" fast-tests "the fast test tier" \
+    "dev.sh iterate $module_id \"<task>\"" || return 1
   require_gate "$module_id" integration "the integration tier ('finalise')" \
     "dev.sh finalise $module_id" || return 1
+  scope_check "$module_id" || return 1
 
   # Stage everything except the orchestrator's own scratch directory.
   (cd "$WORKSPACE" && git add -A -- . ':!.dev-runtime' >/dev/null 2>&1) || {
@@ -902,38 +1119,108 @@ cmd_commit() {
 }
 
 cmd_fix() {
-  (cd "$WORKSPACE" && ./scripts/apply_review_feedback.sh "$1")
+  local module_id="${1:-}"
+  [ -n "$module_id" ] || { echo "usage: dev.sh fix <module-id>"; return 1; }
+  [ "$(queue_status_for "$module_id")" = "needs-fixes" ] || {
+    echo "ERROR: module '$module_id' is not in needs-fixes state." >&2
+    return 1
+  }
+  (cd "$WORKSPACE" && ./scripts/apply_review_feedback.sh "$module_id")
   local rc=$?
   if [ $rc -ne 0 ]; then
     echo ""
-    echo "After fix failure, check downstream modules:"
-    (cd "$WORKSPACE" && ./scripts/check_interface_drift.sh "$1" 2>/dev/null || true)
+    echo "Repair failed; downstream queue state was not changed."
+    echo "Interface propagation runs only after a successful integration finalise."
   fi
   # Propagate the real result: a failed fix must not look like success.
   return $rc
 }
 
 cmd_escalate() {
+  local module_id="${1:-}"
+  [ -n "$module_id" ] || { echo "usage: dev.sh escalate <module-id> [log] [--override] [--write-code]"; return 1; }
+  require_started "$module_id" || return 1
   (cd "$WORKSPACE" && python scripts/escalate.py "$@")
 }
 
-cmd_reject() {
+queue_status_for() {
   local module_id="$1"
+  awk -F'|' -v m=" $module_id " '$2==m {gsub(/^ +| +$/, "", $3); print $3; exit}' \
+    "$WORKSPACE/REVIEW_QUEUE.md" 2>/dev/null
+}
+
+require_review_decision_ready() {
+  local module_id="$1" status
+  status="$(queue_status_for "$module_id")"
+  [ "$status" = "ready-for-review" ] || {
+    echo "ERROR: module '$module_id' is not ready for review (status: ${status:-missing})." >&2
+    return 1
+  }
+  local dirty
+  dirty="$(git -C "$WORKSPACE" status --porcelain | grep -vE '^[ MARC?]{2} \.dev-runtime/' || true)"
+  [ -z "$dirty" ] || {
+    echo "ERROR: the working tree must be clean before recording a review decision:" >&2
+    printf '%s\n' "$dirty" >&2
+    return 1
+  }
+}
+
+cmd_reject() {
+  local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh reject <module-id> \"<feedback>\""; return 1; }
   shift
   local feedback="$*"
   [ -n "$feedback" ] || { echo "usage: dev.sh reject <module-id> \"<feedback>\""; return 1; }
+  require_review_decision_ready "$module_id" || return 1
+  local feedback_was_tracked=0
+  git -C "$WORKSPACE" ls-files --error-unmatch "review-feedback/$module_id.md" >/dev/null 2>&1 \
+    && feedback_was_tracked=1
   mkdir -p "$WORKSPACE/review-feedback"
-  echo "$feedback" > "$WORKSPACE/review-feedback/$module_id.md"
+  printf '%s\n' "$feedback" > "$WORKSPACE/review-feedback/$module_id.md"
   # Increment the rejection count in the same edit that sets the status, so the
   # documented three-strikes rule can actually fire.
   local count
   count=$(awk -F'|' -v m=" $module_id " '$2==m {gsub(/ /,"",$4); print $4}' "$WORKSPACE/REVIEW_QUEUE.md" | head -1)
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  if [ "$count" -ge 3 ]; then
+    echo "ERROR: '$module_id' has already been rejected three times." >&2
+    echo "Revise its specification before another implementation attempt." >&2
+    return 1
+  fi
   count=$((count + 1))
+  local repair_tag="module-repair-$module_id-$count"
+  if git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/$repair_tag" >/dev/null; then
+    echo "ERROR: repair baseline tag '$repair_tag' already exists." >&2
+    return 1
+  fi
   sed -i "s/| $module_id | [^|]* | [^|]* |/| $module_id | needs-fixes | $count |/" "$WORKSPACE/REVIEW_QUEUE.md"
-  # A rejected module must re-earn every gate.
+
+  # Commit review metadata immediately so the tree stays usable. A fresh repair
+  # baseline at this commit isolates the fix from both the original module
+  # implementation and every module committed since it was first queued.
+  git -C "$WORKSPACE" add REVIEW_QUEUE.md "review-feedback/$module_id.md" || return 1
+  if ! git -C "$WORKSPACE" commit -q -m "review($module_id): reject attempt $count"; then
+    git -C "$WORKSPACE" restore --staged --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
+    if [ "$feedback_was_tracked" = "1" ]; then
+      git -C "$WORKSPACE" restore --staged --worktree -- "review-feedback/$module_id.md" 2>/dev/null || true
+    else
+      git -C "$WORKSPACE" restore --staged -- "review-feedback/$module_id.md" 2>/dev/null || true
+      rm -f "$WORKSPACE/review-feedback/$module_id.md"
+    fi
+    echo "ERROR: could not commit rejection metadata; review files were restored." >&2
+    return 1
+  fi
+  # A successfully rejected module must re-earn every gate.
   rm -f "$WORKSPACE/.dev-runtime/$module_id/gates/"* 2>/dev/null || true
+  local repair_commit
+  repair_commit="$(git -C "$WORKSPACE" rev-parse HEAD)" || return 1
+  if ! git -C "$WORKSPACE" tag "$repair_tag" "$repair_commit"; then
+    echo "WARNING: could not create '$repair_tag'; using commit $repair_commit as the repair baseline." >&2
+    repair_tag="$repair_commit"
+  fi
+  mkdir -p "$WORKSPACE/.dev-runtime/$module_id"
+  printf '%s\n' "$repair_tag" > "$WORKSPACE/.dev-runtime/$module_id/active-baseline"
+  git -C "$WORKSPACE" rev-parse HEAD > "$WORKSPACE/.dev-runtime/$module_id/base-commit"
   echo "Rejected $module_id (rejections: $count) – feedback in review-feedback/$module_id.md"
   if [ "$count" -ge 3 ]; then
     echo ""
@@ -944,9 +1231,18 @@ cmd_reject() {
 }
 
 cmd_approve() {
-  local module_id="$1"
+  local module_id="${1:-}"
   [ -n "$module_id" ] || { echo "usage: dev.sh approve <module-id>"; return 1; }
+  require_review_decision_ready "$module_id" || return 1
   sed -i "s/| $1 | [^|]* |/| $1 | approved |/" "$WORKSPACE/REVIEW_QUEUE.md"
+  git -C "$WORKSPACE" add REVIEW_QUEUE.md || return 1
+  if ! git -C "$WORKSPACE" diff --cached --quiet; then
+    if ! git -C "$WORKSPACE" commit -q -m "review($module_id): approve"; then
+      git -C "$WORKSPACE" restore --staged --worktree -- REVIEW_QUEUE.md 2>/dev/null || true
+      echo "ERROR: could not commit approval metadata; REVIEW_QUEUE.md was restored." >&2
+      return 1
+    fi
+  fi
   echo "Approved $module_id"
 }
 
@@ -1014,46 +1310,93 @@ cmd_check_coverage() {
   return 0
 }
 
-cmd_reset() {
-  local module_id="$1"
-  [ -n "$module_id" ] || { echo "usage: dev.sh reset <module-id>"; return 1; }
+reset_scope_check() {
+  # Reset is intentionally workspace-wide at the Git plumbing level, so first
+  # prove that every change it would discard belongs to this module. This keeps
+  # an unrelated scratch edit from being swept into a module reset.
+  local module_id="$1" baseline="$2" allowed protected changed offenders="" path
+  allowed="$(manifest_allowed_paths "$module_id" "$baseline")" || return 1
+  protected="$(manifest_protected_paths "$module_id" "$baseline")" || return 1
+  allowed="$allowed
+$protected
+.agent/rules/architecture.md"
+  if [ -n "$GOLDEN_DIR" ] && [ -f "$WORKSPACE/tests/$GOLDEN_DIR/CriticalLogicGoldenTests.cs" ]; then
+    allowed="$allowed
+tests/$GOLDEN_DIR/CriticalLogicGoldenTests.cs"
+  fi
+  stage_untracked
+  changed="$(git -C "$WORKSPACE" diff --name-only HEAD -- . ':(exclude).dev-runtime/**')" || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if ! printf '%s\n' "$allowed" | grep -qxF "$path"; then
+      offenders="$offenders$path"$'\n'
+    fi
+  done <<EOF
+$changed
+EOF
+  if [ -n "$offenders" ]; then
+    echo "ERROR: reset would also discard changes outside module '$module_id':" >&2
+    printf '%s' "$offenders" | sed 's/^/  - /' >&2
+    echo "Commit, stash, or remove those changes before resetting the module." >&2
+    return 1
+  fi
+}
 
-  # reset --hard + clean -fd is destructive: it discards all module work,
-  # including uncommitted and untracked files. Stash a safety backup first so a
-  # mistaken reset is recoverable. We use a real stash bundle (tracked +
-  # untracked) written to .dev-runtime, which survives the reset because clean
-  # excludes .dev-runtime.
+cmd_reset() {
+  local module_id="${1:-}"
+  [ -n "$module_id" ] || { echo "usage: dev.sh reset <module-id>"; return 1; }
+  require_started "$module_id" || return 1
+  local baseline
+  baseline="$(module_baseline_ref "$module_id")"
+
+  # A queued/committed module is not an uncommitted workspace operation. Using
+  # reset --hard against its historical tag would roll back unrelated later
+  # commits. Such modules must go through reject/fix (or an explicit Git revert).
+  local start_commit head_commit
+  start_commit="$(git -C "$WORKSPACE" rev-parse "module-start-$module_id^{commit}")" || return 1
+  head_commit="$(git -C "$WORKSPACE" rev-parse HEAD)" || return 1
+  if [[ "$baseline" == module-start-* ]] \
+     && { [ "$head_commit" != "$start_commit" ] \
+          || gate_check "$module_id" committed 2>/dev/null \
+          || grep -q "^| $module_id |" "$WORKSPACE/REVIEW_QUEUE.md" 2>/dev/null; }; then
+    echo "ERROR: '$module_id' is already committed or queued; reset is only for uncommitted work." >&2
+    echo "HEAD has advanced beyond its start point, so history is left untouched." >&2
+    echo "Use 'dev.sh reject' + 'dev.sh fix', or create an explicit Git revert." >&2
+    return 1
+  fi
+
+  reset_scope_check "$module_id" "$baseline" || return 1
+
+  # Save a recoverable snapshot of current HEAD plus all uncommitted work.
   local backup_dir="$WORKSPACE/.dev-runtime/reset-backups"
   mkdir -p "$backup_dir"
   local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
   local bundle="$backup_dir/${module_id}-${stamp}.bundle"
   local patch="$backup_dir/${module_id}-${stamp}.uncommitted.patch"
-  # Bundle current HEAD history and save a patch of uncommitted+untracked work.
+  # The patch is against current HEAD, not the historical module-start tag, so
+  # it contains only work that this reset will actually discard.
   git -C "$WORKSPACE" bundle create "$bundle" HEAD >/dev/null 2>&1 || true
-  {
-    git -C "$WORKSPACE" diff "module-start-$module_id" 2>/dev/null
-  } > "$patch" 2>/dev/null || true
+  git -C "$WORKSPACE" diff --binary HEAD > "$patch" 2>/dev/null || true
   # Also snapshot untracked files as a tar so nothing is silently lost.
   ( cd "$WORKSPACE" && git ls-files --others --exclude-standard -z \
       | grep -zv '^\.dev-runtime/' \
       | tar --null -T - -czf "$backup_dir/${module_id}-${stamp}.untracked.tar.gz" 2>/dev/null ) || true
   echo "Safety backup saved under .dev-runtime/reset-backups/${module_id}-${stamp}.* (recover with 'git apply' / 'git bundle')."
 
-  # reset --hard restores tracked files to the baseline but leaves
-  # module-created UNTRACKED files behind. Clean those too (but preserve the
-  # per-module runtime dir until after, and never touch ignored build output
-  # you might want – we scope the clean to tracked-ignore rules with -d, not -x).
-  git -C "$WORKSPACE" reset --hard "module-start-$module_id" || return 1
-  git -C "$WORKSPACE" clean -fd -e '.dev-runtime' || return 1
-  # Delete the baseline tag too, so the module can be cleanly re-started.
-  git -C "$WORKSPACE" tag -d "module-start-$module_id" >/dev/null 2>&1 || true
+  # Restore the current committed branch state. This never moves HEAD, so later
+  # module and review commits are preserved. Then remove module-created
+  # untracked files while retaining ignored build output and reset backups.
+  git -C "$WORKSPACE" reset --hard HEAD || return 1
+  git -C "$WORKSPACE" clean -fd -e '.dev-runtime/' || return 1
 
-  # Remove the module's queue row whatever its status (ready-for-review,
-  # needs-fixes, interface-changed, ...), so a reset never orphans a row
-  # pointing at code that no longer exists.
-  [ -f "$WORKSPACE/REVIEW_QUEUE.md" ] && sed -i "/^| $module_id |/d" "$WORKSPACE/REVIEW_QUEUE.md"
-  rm -rf "$WORKSPACE/.dev-runtime/$module_id"
-  echo "Reset module '$module_id' to module-start-$module_id (tracked + untracked) and removed from queue."
+  if [[ "$baseline" == module-start-* ]]; then
+    git -C "$WORKSPACE" tag -d "module-start-$module_id" >/dev/null 2>&1 || true
+    rm -rf "$WORKSPACE/.dev-runtime/$module_id"
+    echo "Reset uncommitted module '$module_id' to current HEAD and removed its start tag."
+  else
+    rm -f "$WORKSPACE/.dev-runtime/$module_id/gates/"* 2>/dev/null || true
+    echo "Reset repair work for '$module_id' to current HEAD; the rejection and repair baseline remain active."
+  fi
 }
 
 cmd_broadcast() {
@@ -1080,19 +1423,18 @@ stage_llm_test_files() {
   # src/, not other tests, not the existing contract suite. The host then
   # validates what was produced and moves it into place, read-only.
   #
-  # Usage: stage_llm_test_files <destination_dir> <task> [exact_name]
+  # Usage: stage_llm_test_files <destination_dir> <task> [exact_name] [expected_names]
   #
-  # Name the third argument to require that one exact file and nothing else
-  # (the golden harness has a single documented path). Omit it and the agent
-  # chooses the names from the module manifest – one <Type>Tests.cs per public
-  # entry point.
+  # Name the third argument to require one exact file and nothing else. The
+  # fourth argument is a newline-delimited exact filename set from the module
+  # manifest; the agent never gets to choose additional names.
   #
   # Every staged file must be named <Type>Tests.cs and must not already exist:
   # the write-once guarantee is enforced per file, so a module can gain a test
   # for a new entry point later without ever overwriting an existing one. The
   # whole batch is validated before anything moves, so a rejected batch leaves
   # the destination untouched.
-  local destination_dir="$1" task="$2" exact_name="${3:-}"
+  local destination_dir="$1" task="$2" exact_name="${3:-}" expected_names="${4:-}"
   preflight_llama_swap || return 1
   [ -f "$CODER_PROFILE/aider.conf.yml" ] || {
     echo "ERROR: aider profile not found at $CODER_PROFILE – see SETUP_GUIDE.md Phase 7." >&2
@@ -1105,9 +1447,14 @@ stage_llm_test_files() {
   prompt_file="$(mktemp "${TMPDIR:-/tmp}/tenninety-prompt.XXXXXX")"
   printf '%s\n' "$task" > "$prompt_file"
 
-  local net_args; agent_net_args net_args
+  local net_args
+  if ! agent_net_args net_args; then
+    rm -f "$prompt_file"
+    rm -rf "$staging"
+    return 1
+  fi
   local rc=0
-  docker run --rm -i \
+  docker run --rm --pull=never -i \
     -e OPENAI_API_BASE="$OPENAI_API_BASE" \
     -e OPENAI_API_KEY="$OPENAI_API_KEY" \
     -w /staging \
@@ -1135,6 +1482,16 @@ stage_llm_test_files() {
   local generated=()
   while IFS= read -r f; do generated+=("$f"); done < <(find "$staging" -type f -name '*.cs' | sort)
 
+  local unexpected
+  unexpected="$(find "$staging" -mindepth 1 \
+    \( ! -type f -o ! -name '*.cs' \) -printf '%P\n' | sort)"
+  if [ -n "$unexpected" ]; then
+    echo "ERROR: the agent staged directories, links, or non-C# files:" >&2
+    printf '%s\n' "$unexpected" | sed 's/^/  - /' >&2
+    rm -rf "$staging"
+    return 1
+  fi
+
   if [ "${#generated[@]}" -eq 0 ]; then
     echo "ERROR: the agent staged no .cs files in /staging."
     rm -rf "$staging"
@@ -1143,8 +1500,26 @@ stage_llm_test_files() {
 
   # Validate every staged file BEFORE moving any of them.
   local f base
+  if [ -n "$expected_names" ]; then
+    local expected_count
+    expected_count="$(printf '%s\n' "$expected_names" | sed '/^$/d' | wc -l)"
+    if [ "${#generated[@]}" -ne "$expected_count" ]; then
+      echo "ERROR: expected $expected_count manifest-declared contract files; got ${#generated[@]}." >&2
+      echo "Expected:" >&2
+      printf '%s\n' "$expected_names" | sed '/^$/d; s/^/  - /' >&2
+      echo "Generated:" >&2
+      find "$staging" -type f -printf '  - %P\n' >&2
+      rm -rf "$staging"
+      return 1
+    fi
+  fi
   for f in "${generated[@]}"; do
     base=$(basename "$f")
+    if [ "$(dirname "$f")" != "$staging" ]; then
+      echo "ERROR: staged files must be directly under /staging, not in subdirectories: ${f#"$staging/"}" >&2
+      rm -rf "$staging"
+      return 1
+    fi
     if [ -n "$exact_name" ] && { [ "${#generated[@]}" -ne 1 ] || [ "$base" != "$exact_name" ]; }; then
       echo "ERROR: expected exactly /staging/$exact_name; got:"
       find "$staging" -type f -printf '  %P\n'
@@ -1159,6 +1534,11 @@ stage_llm_test_files() {
         return 1
         ;;
     esac
+    if [ -n "$expected_names" ] && ! printf '%s\n' "$expected_names" | grep -qxF "$base"; then
+      echo "ERROR: staged filename is not declared by the module manifest: $base" >&2
+      rm -rf "$staging"
+      return 1
+    fi
     if [ -e "$destination_dir/$base" ]; then
       echo "ERROR: $destination_dir/$base already exists."
       echo "Staged test files are write-once. Delete it by hand to regenerate."
@@ -1177,19 +1557,52 @@ stage_llm_test_files() {
 }
 
 cmd_write_contract() {
-  local module_id="${1:?Usage: dev.sh write-contract <module-id>}"
+  local module_id="${1:-}"
+  [ -n "$module_id" ] || { echo "usage: dev.sh write-contract <module-id>"; return 1; }
 
-  [ -n "$CONTRACTS_DIR" ] || { echo "Contracts project not found."; return 1; }
+  require_started "$module_id" || return 1
+  [ "${#CONTRACTS_DIRS[@]}" -eq 1 ] || {
+    echo "ERROR: write-contract requires exactly one Contracts project; found ${#CONTRACTS_DIRS[@]}."; return 1; }
   local destination="$WORKSPACE/tests/$CONTRACTS_DIR"
 
-  # The Module ID is a manifest key, not a class name. The manifest – not this
-  # script and not a filename – defines how many public entry points the module
-  # exposes, so the agent derives one contract file per entry point rather than
-  # having a single name imposed on it. The write-once guarantee is enforced
-  # per file inside stage_llm_test_files.
-  local task="Read the attached .agent/rules/architecture.md and .agent/skills/coder.md. Locate the module manifest whose Module ID is exactly '$module_id'; that manifest is the authoritative scope. Identify every public entry point the manifest documents for this module – a type that consumers outside the module call directly. For EACH entry point, create one NEW xUnit contract test file in the current directory named <TypeName>Tests.cs (PascalCase type name, bare filename, no directories, no other files). Do not create a file for types that are only reachable through another entry point. In each file, check every documented public type, constructor, method overload, generic arity, parameter name/type/order, return type, nullability, property type and relevant static/instance distinction for that entry point. Use exact reflection lookups with parameter-type arrays; never use GetMethod(name) alone when overloads are possible. Add [Trait(\"Category\", \"Contract\")] to every test. If a contract test for an entry point already exists in the repository (see /workspace/tests), do not write that file again. Do not write implementation code. Write files ONLY into the current directory; the workspace under /workspace is mounted read-only."
+  local protected_paths expected_names="" path base
+  protected_paths="$(manifest_protected_paths "$module_id" "$(module_baseline_ref "$module_id")")" || {
+    echo "ERROR: could not read protected contract paths from the active baseline." >&2
+    return 1
+  }
+  [ -n "$protected_paths" ] || {
+    echo "ERROR: module '$module_id' declares no protected/generated test artefact paths."; return 1; }
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      "tests/$CONTRACTS_DIR/"*Tests.cs) ;;
+      *)
+        echo "ERROR: protected artefact must be a direct *Tests.cs file in tests/$CONTRACTS_DIR: $path" >&2
+        return 1 ;;
+    esac
+    base="${path##*/}"
+    if [ ! -e "$WORKSPACE/$path" ]; then
+      expected_names="$expected_names$base"$'\n'
+    fi
+  done <<EOF
+$protected_paths
+EOF
 
-  stage_llm_test_files "$destination" "$(broadcast_prefix)$task"
+  expected_names="$(printf '%s' "$expected_names" | sed '/^$/d')"
+  if [ -z "$expected_names" ]; then
+    echo "All manifest-declared contract tests for '$module_id' already exist; nothing to write."
+    return 0
+  fi
+
+  # The Module ID is a manifest key, not a class name. The exact protected paths
+  # in the manifest define this batch; the write-once guarantee is enforced per
+  # file inside stage_llm_test_files.
+  local task="Read the attached .agent/rules/architecture.md and .agent/skills/coder.md. Locate the module manifest whose Module ID is exactly '$module_id'. Create exactly these missing manifest-declared contract files in the current directory, with no directories and no other files:
+$expected_names
+
+For every documented public entry point represented by those files, check every documented public type, constructor, method overload, generic arity, parameter name/type/order, return type, nullability, property type and relevant static/instance distinction. Use exact reflection lookups with parameter-type arrays; never use GetMethod(name) alone when overloads are possible. Add [Trait(\"Category\", \"Contract\")] to every test. Do not rewrite a contract file that already exists under /workspace/tests. Do not write implementation code. The workspace under /workspace is mounted read-only."
+
+  stage_llm_test_files "$destination" "$(broadcast_prefix)$task" "" "$expected_names"
 }
 
 cmd_write_golden_harness() {
@@ -1199,7 +1612,8 @@ cmd_write_golden_harness() {
   # parsing, reference equality) would silently let broken code pass. Instead we
   # instantiate a canonical, pre-tested harness shipped in the starter kit,
   # substituting the project name, and freeze it read-only.
-  [ -n "$GOLDEN_DIR" ] || { echo "Golden test project not found."; return 1; }
+  [ "${#GOLDEN_DIRS[@]}" -eq 1 ] || {
+    echo "ERROR: write-golden-harness requires exactly one Golden project; found ${#GOLDEN_DIRS[@]}."; return 1; }
   local destination="$WORKSPACE/tests/$GOLDEN_DIR"
   local filename="CriticalLogicGoldenTests.cs"
 
@@ -1249,7 +1663,8 @@ cmd_show_frontier_fix() {
   # NOTE: this only DISPLAYS the frontier-written fix for manual application;
   # it deliberately applies nothing (the human stays in the loop for
   # frontier-authored code).
-  local module_id="$1"
+  local module_id="${1:-}"
+  [ -n "$module_id" ] || { echo "usage: dev.sh show-frontier-fix <module-id>"; return 1; }
   local fix_file="$WORKSPACE/frontier-fix-${module_id}.md"
   if [ ! -f "$fix_file" ]; then
     echo "No frontier fix file found at $fix_file"
@@ -1272,7 +1687,7 @@ Usage: dev.sh <subcommand> [args]
 Subcommands:
   start <module-id>                          Create module-start-<module-id> tag (needs clean tree)
   write <module-id> "<task>"                 Run the Coder with a task
-  review [module-id]                         Run the Reviewer on the current diff
+  review <module-id>                         Run the Reviewer on the active module diff
   test <module-id>                           Run the fast test tier
   iterate <module-id> "<task>"               Full loop: write->review->test (3 attempts)
   finalise <module-id> [--allow-spec-change] Integration tests + drift check (once per feature)
@@ -1285,10 +1700,10 @@ Subcommands:
   approve <module-id>                        Approve a module
   status                                Show queue, escalations, recent commits
   check-coverage                        Verify every tracked src/*.cs file is in a module manifest
-  reset <module-id>                          Reset module (tracked + untracked) to baseline
+  reset <module-id>                          Back up and discard this module's uncommitted work
   broadcast "<note>"                    Add a note all Coders will see
   notes                                 Show current broadcast notes
-  write-contract <module-id>                 Write a contract test for a module (staged, write-once)
+  write-contract <module-id>                 Write the manifest's contract tests (exact, write-once batch)
   write-golden-harness                  Write the deterministic golden-fixture harness (staged, write-once)
   show-frontier-fix <module-id>              Display frontier-written fix (applies nothing)
   help                                  Show this message

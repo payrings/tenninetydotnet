@@ -6,6 +6,37 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-04
+
+Hardening release for module baselines, protected artefacts, test isolation,
+interface drift, escalation tiers, and reset safety. `DEV_SH_VERSION` in
+`starter-kit/scripts/dev.sh` is `0.2.1`.
+
+### Fixed
+- Contract-test batches now match the manifest's exact protected `.cs` paths;
+  protected host-generated tests pass module scope while agents still receive
+  every Contracts, Golden, fixture, architecture, and build-control input
+  read-only.
+- Restore/build/test invocations now use workspace integrity hashes, mask
+  `.env`, keep the offline NuGet cache read-only, and reject empty required test
+  tiers. Build-control inputs are agent-immutable because MSBuild may evaluate
+  them during networked restore.
+- Approval and rejection metadata are committed immediately. Rejection creates
+  a fresh repair baseline, and review, tests, drift checks, and escalation use
+  the active initial/repair baseline instead of an obsolete start tag.
+- Interface drift fails closed, covers operators, conversions, enum members and
+  primary constructors, and marks transitive consumers by Module ID using the
+  manifest dependency graph.
+- Escalation enforces exact plan/override/write-code tiers, writes counters
+  atomically, and refuses a fourth call.
+- `reset` backs up and discards only uncommitted module work; it never moves
+  `HEAD` or removes unrelated later commits.
+- Restricted agent networking fails closed, and the setup guide now separates
+  host-bound `ufw` policy from forwarded Docker egress policy.
+- The golden harness correctly unwraps `Task<T>`, resolves entry points only in
+  the production assembly, rejects extra input keys, and canonicalises
+  equivalent JSON number spellings.
+
 ## [0.2.0] - 2026-08-03
 
 Agent runtime migrated from the Cline CLI to aider. `DEV_SH_VERSION` in
@@ -77,6 +108,7 @@ Initial public release. `DEV_SH_VERSION` in `starter-kit/scripts/dev.sh` is
 - CI (ShellCheck, `bash -n`, markdown link check, Python compile, and a hermetic
   scaffold smoke test) and this changelog.
 
-[Unreleased]: https://github.com/payrings/tenninetydotnet/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/payrings/tenninetydotnet/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/payrings/tenninetydotnet/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/payrings/tenninetydotnet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/payrings/tenninetydotnet/releases/tag/v0.1.0

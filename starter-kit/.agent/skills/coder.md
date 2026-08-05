@@ -13,13 +13,20 @@ Implement the code exactly against the signatures defined in `.agent/rules/archi
 
 For the Module ID named in the task, locate its manifest and implement the complete module. Create or edit only paths listed under that manifest's **Implementation files** or **Shared integration files**, and make only the permitted change described for a shared file. Do not infer scope from a filename in the task and do not create convenience files outside the manifest. If the task, manifest and repository disagree, stop and ask a specific clarifying question.
 
+Project/solution and MSBuild control files (`*.csproj`, `*.sln`, `*.slnx`,
+`*.props`, `*.targets`, `global.json`, and `NuGet.Config`) are trusted restore
+inputs and are never implementation-agent scope, even if a manifest lists one
+by mistake. Ask the human to make such a change in a separate reviewed commit.
+
 ## Attached files
 The orchestrator attaches the files you may edit to this chat: the
-architecture spec and every file listed under the target module's
-manifest that already exists. Manifest files that do not exist yet are
-yours to create – create them with exactly the paths the manifest
-lists, and no others. You cannot see repository files outside the
-attached set; if you need one, stop and ask for it.
+read-only architecture spec and every implementation/shared file listed under
+the target module's baseline manifest that already exists. Manifest files that
+do not exist yet are yours to create – create them with exactly the paths that
+baseline manifest lists, and no others. You cannot edit the specification or
+grant yourself new scope; a human must make specification changes separately.
+You cannot see repository files outside the attached set; if you need one,
+stop and ask for it.
 
 ## Testing policy
 The testing policy is in `.agent/skills/tester.md`. Read and follow it. In

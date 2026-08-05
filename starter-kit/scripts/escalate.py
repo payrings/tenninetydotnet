@@ -19,11 +19,10 @@ Routed through OpenRouter so FRONTIER_MODEL env var picks the actual model.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
-
-from openai import OpenAI
 
 ESCALATION_LOG = Path(".escalations.json")
 FRONTIER_MODEL = os.environ.get("FRONTIER_MODEL", "z-ai/glm-5.2:floor")
@@ -87,21 +86,72 @@ def require_api_key():
 
 
 def load_counts():
-    return json.loads(ESCALATION_LOG.read_text()) if ESCALATION_LOG.exists() else {}
+    if not ESCALATION_LOG.exists():
+        return {}
+    try:
+        counts = json.loads(ESCALATION_LOG.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read {ESCALATION_LOG}: {exc}") from exc
+    if not isinstance(counts, dict) or any(
+        not isinstance(key, str) or not isinstance(value, int) or value < 0
+        for key, value in counts.items()
+    ):
+        raise RuntimeError(f"{ESCALATION_LOG} must contain an object of non-negative integer counters")
+    return counts
 
 
 def save_counts(counts):
-    ESCALATION_LOG.write_text(json.dumps(counts, indent=2))
+    temporary = ESCALATION_LOG.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(counts, indent=2) + "\n")
+    temporary.replace(ESCALATION_LOG)
 
 
-def get_diff(feature):
-    """Diff since the module's starting point, not just uncommitted work."""
-    for ref in (f"module-start-{feature}", "HEAD"):
+def git_text(args, *, accepted=(0,)):
+    result = subprocess.run(["git", *args], capture_output=True, text=True)
+    if result.returncode not in accepted:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
+    return result.stdout
+
+
+def get_diff(feature, *, allow_head=False):
+    """Diff since the active implementation/repair baseline."""
+    baseline_file = Path(".dev-runtime") / feature / "active-baseline"
+    active_baseline = None
+    try:
+        if baseline_file.is_file():
+            active_baseline = baseline_file.read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        active_baseline = None
+
+    repair_tags = git_text([
+        "tag", "--list", f"module-repair-{feature}-*", "--sort=-version:refname"
+    ]).splitlines()
+    refs = [ref for ref in (
+        active_baseline,
+        repair_tags[0] if repair_tags else None,
+        f"module-start-{feature}",
+        "HEAD" if allow_head else None,
+    ) if ref]
+    for ref in refs:
         if subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref],
                           capture_output=True).returncode == 0:
-            return subprocess.run(["git", "diff", ref],
-                                  capture_output=True, text=True).stdout
-    return subprocess.run(["git", "diff"], capture_output=True, text=True).stdout
+            diff = git_text([
+                "diff", "--no-color", ref, "--", ".",
+                ":(exclude)REVIEW_QUEUE.md",
+                ":(exclude)review-feedback/**",
+                ":(exclude).dev-runtime/**",
+            ])
+            untracked = git_text(["ls-files", "--others", "--exclude-standard"]).splitlines()
+            for path in untracked:
+                if path.startswith((".dev-runtime/", "review-feedback/")):
+                    continue
+                diff += git_text(["diff", "--no-index", "--no-color", "--", "/dev/null", path],
+                                 accepted=(0, 1))
+            return diff
+    raise RuntimeError(
+        f"no active baseline exists for '{feature}'; run dev.sh start first"
+    )
 
 
 def main():
@@ -110,7 +160,17 @@ def main():
         sys.exit(1)
 
     feature = sys.argv[1]
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", feature):
+        print(f"ERROR: invalid Module ID '{feature}' (expected lowercase kebab-case).", file=sys.stderr)
+        sys.exit(1)
     test_log_path = next((a for a in sys.argv[2:] if not a.startswith("--")), None)
+    allowed_flags = {"--override", "--write-code", "--dry-run"}
+    unknown_flags = [a for a in sys.argv[2:] if a.startswith("--") and a not in allowed_flags]
+    positional = [a for a in sys.argv[2:] if not a.startswith("--")]
+    if unknown_flags or len(positional) > 1:
+        print(f"ERROR: unrecognised or extra arguments: {' '.join(unknown_flags + positional[1:])}",
+              file=sys.stderr)
+        sys.exit(1)
     override = "--override" in sys.argv
     write_code = "--write-code" in sys.argv
     # --dry-run writes artefacts to a temp dir instead of the workspace and does
@@ -118,44 +178,50 @@ def main():
     # escalation-notes.md / frontier-fix-*.md behind for you to clean up.
     dry_run = "--dry-run" in sys.argv
 
-    if write_code and not override:
-        print("ERROR: --write-code requires --override (it's a second-escalation tier).")
-        print("The first escalation produces a plan. If that plan fails, you can")
-        print("explicitly request the frontier to write code with --override --write-code.")
-        sys.exit(1)
-
     # Load the key from a mode-600 .env (preferred) before reading it.
     load_env_file()
     frontier_model = os.environ.get("FRONTIER_MODEL", FRONTIER_MODEL)
 
-    counts = load_counts()
+    try:
+        counts = load_counts()
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     prior = counts.get(feature, 0)
 
-    if prior >= 1 and not override:
-        print(f"""
-STOP: '{feature}' was already escalated once, and the frontier-guided fix
-that came out of it still failed review or testing.
-
-This is not a signal to try again automatically. Read escalation-notes.md,
-the latest failure log, and the diff yourself, and decide whether the
-specification is wrong, the frontier's plan was wrong, or this needs a
-direct manual fix. That decision needs a person, not another AI pass.
-
-If you've genuinely reviewed this and still want one more AI-assisted
-attempt, re-run with --override. That flag exists to require a conscious
-action, not a habit.
-
-If you want the frontier model to write the actual fix code (not just a
-plan), re-run with --override --write-code. The output will be saved to
-frontier-fix-{feature}.md for you to apply.
-""")
+    # Enforce the documented order, rather than merely checking for an override
+    # flag. A first-call --override --write-code must not skip both plan tiers,
+    # and repeated overrides must not create an unbounded escalation loop.
+    if prior == 0 and (override or write_code):
+        print("ERROR: tier 1 must be a plan-only call without --override or --write-code.")
         sys.exit(2)
+    if prior == 1 and (not override or write_code):
+        print("ERROR: tier 2 requires --override and remains plan-only.")
+        sys.exit(2)
+    if prior == 2 and (not override or not write_code):
+        print("ERROR: tier 3 requires --override --write-code.")
+        sys.exit(2)
+    if prior >= 3:
+        print(f"STOP: '{feature}' has completed all three escalation tiers.")
+        print("Revise the specification or apply a direct human-authored fix.")
+        sys.exit(2)
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        print("ERROR: Python package 'openai' is not installed; see SETUP_GUIDE.md Phase 8.",
+              file=sys.stderr)
+        sys.exit(1)
 
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=require_api_key(),
     )
-    diff = get_diff(feature)
+    try:
+        diff = get_diff(feature, allow_head=dry_run)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     test_log = ""
     if test_log_path:
         try:
@@ -224,6 +290,10 @@ will implement it.{second_attempt_note}
     )
 
     content = resp.choices[0].message.content
+    if not isinstance(content, str) or not content.strip():
+        print("ERROR: frontier model returned no text; escalation counter was not changed.",
+              file=sys.stderr)
+        sys.exit(1)
     output_file.write_text(content)
 
     # Increment the one-shot counter only after the artefact is safely written,

@@ -14,3 +14,8 @@ Your responsibilities are exactly two:
 2. Never edit anything under the Contracts test project
    (`tests/[ProjectName].Contracts/`), the Golden project, or `tests/fixtures/`
    to make a failure go away. Fix the code, not the test.
+
+The host verifies that restore/build/test leave project content unchanged and
+mounts test definitions, fixtures, Git state and build-control files read-only.
+Any workspace-integrity failure is authoritative; do not work around it or ask
+for a broader writable mount.

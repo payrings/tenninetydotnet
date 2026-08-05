@@ -3,18 +3,20 @@
 ## Before you review anything
 The complete diff for this module is included in your prompt between the
 `----- BEGIN MODULE DIFF -----` and `----- END MODULE DIFF -----` markers.
-It was generated on the host with `git diff module-start-<module-id>`;
+It was generated on the host against the active baseline named in the task
+(either `module-start-<module-id>` or a later repair baseline);
 brand-new files appear in it in full. You cannot run commands and you
 cannot see any file beyond what is attached to this chat: the diff, the
-attached `.agent/rules/architecture.md` and this checklist are your
-complete evidence. The diff is git output, not a document.
+attached current module files, any human rejection feedback,
+`.agent/rules/architecture.md`, and this checklist are your complete evidence.
+The diff is git output, not a document.
 
-On the **first iteration** of a new module (when no contract test exists
-yet), the diff contains the full module file(s) as additions – review
-them in full. On subsequent iterations, review the diff plus any code you
-flagged earlier that the Coder did not address.
+On the **first iteration** of a new module, the diff contains the full module
+and exact host-staged contract-test additions – review them in full. A repair
+diff contains only changes since the human rejection baseline, so assess those
+changes against the rejection context and the complete manifest.
 
-Use the Module ID from `module-start-<module-id>` as the Module ID and locate its manifest in `.agent/rules/architecture.md`. Review every added, modified, renamed or deleted path in the diff. If a changed path is not listed under that manifest's **Implementation files** or **Shared integration files**, report `OUT-OF-SCOPE FILE: <path>` and fail, except for `.agent/rules/architecture.md` during a deliberate interface change. If that exception appears, report `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. For a shared integration file, verify that the diff contains only the change permitted by the manifest. Review the whole module and its observable behaviour; do not limit review to a source file whose name resembles the module ID.
+Use the Module ID from the baseline named in the task and locate its manifest in `.agent/rules/architecture.md`. Review every added, modified, renamed or deleted path in the diff. A changed path is valid when it is listed under that manifest's **Implementation files**, **Shared integration files**, or **Protected/generated test artefact**. Protected/generated test artefacts are created by the host staging workflow and mounted read-only to implementation agents; review their contract coverage, but do not report them as out of scope. The other exception is `.agent/rules/architecture.md` during a deliberate interface change. If that exception appears, report `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. For a shared integration file, verify that the diff contains only the change permitted by the manifest. Review the whole module and its observable behaviour; do not limit review to a source file whose name resembles the module ID.
 
 <!--
 PASTE YOUR PROJECT-SPECIFIC REVIEW CHECKLIST BELOW THIS LINE.
@@ -45,10 +47,13 @@ with "TEST-PASS-BY-COINCIDENCE: <explanation>."
 ## Manifest scope
 The module manifest in `.agent/rules/architecture.md`, located by the task's
 Module ID, is the authoritative scope. Every path in the diff must appear
-under that module's **Implementation files** or **Shared integration files**,
-and an edit inside a shared file must be the specific change the manifest
-permits. The only global exception is `.agent/rules/architecture.md` itself
-during a deliberate interface change.
+under that module's **Implementation files**, **Shared integration files**, or
+**Protected/generated test artefact**, and an edit inside a shared file must be
+the specific change the manifest permits. Protected/generated test artefacts
+are valid only as host-staged test additions; review their completeness and
+fail if production code attempts to replace their purpose. The only global
+exception is `.agent/rules/architecture.md` itself during a deliberate
+interface change.
 
 If the diff touches a path the manifest does not list for this module, FAIL
 the review with "OUT OF SCOPE: <path>." If a path the manifest lists is
@@ -58,14 +63,12 @@ A module may legitimately span several files; do not treat a multi-file diff
 as suspect in itself.
 
 ## Contract tests
-On the first iteration of a new module, after reviewing the implementation,
-also verify that a contract test exists in the project's Contracts test
-project for **every public entry point the manifest documents**. A module
-with two entry points has two `<Type>Tests.cs` files, not one. For each entry
-point that has no contract test, flag: "CONTRACT TEST MISSING for <Type>."
-The human will run `dev.sh write-contract <module-id>` to create the missing
-ones; it is safe to re-run, because existing contract tests are never
-overwritten.
+Verify that every exact path listed under **Protected/generated test artefact**
+appears as an existing or added contract test and covers the documented public
+contracts and behaviours. For each missing path, flag: "CONTRACT TEST MISSING:
+<path>." The host scope gate also checks presence, and `dev.sh write-contract
+<module-id>` stages the exact missing filename set without overwriting existing
+tests.
 
 ## Verdict line
 End every review with a single final line that is exactly one of:

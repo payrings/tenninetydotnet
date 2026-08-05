@@ -6,7 +6,7 @@
 
 An open architecture and framework for software engineering teams building C# and .NET systems with coding agents. It separates system design from mechanical execution: a high-reasoning cloud frontier model writes the specification once, two free local open-weight models handle routine implementation and automated peer review, and a deterministic test suite, with zero AI at runtime, acts as the quality gate. Roughly 10% of the intelligence budget goes to pay-per-token frontier reasoning, 90% to local inference that costs only electricity.
 
-Every safety property of the pipeline is mechanically enforced rather than requested: read-only mounts, locked dependency manifests, hash-checked specifications, and signature-drift hooks operate below the agents' permission level, so a misbehaving model can fail a gate but cannot move it.
+Every safety property of the pipeline is mechanically enforced rather than requested: fail-closed networking, read-only test and build-control mounts, locked dependency manifests, workspace integrity hashes, exact manifest scope, and signature-drift hooks operate below the agents' permission level, so a misbehaving model can fail a gate but cannot move it.
 
 ## Repository map
 
