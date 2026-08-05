@@ -112,7 +112,12 @@ class StaticInvariantTests(unittest.TestCase):
             STARTER / "scripts/signature-checker/Directory.Build.targets"
         ).read_text()
         wrapper = (STARTER / "scripts/check_signatures.sh").read_text()
+        semantic_test = (ROOT / "tests/framework/test_semantic_signatures.sh").read_text()
         self.assertNotIn("dotnet-script", workflow)
+        checkout = (
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        )
+        self.assertEqual(workflow.count(checkout), 2)
         self.assertIn("scripts/check_signatures.sh --staged", pre_commit)
         for package in (
             "Microsoft.Build",
@@ -125,6 +130,10 @@ class StaticInvariantTests(unittest.TestCase):
                 project,
             )
         self.assertIn("RejectBundledMSBuildRuntime", project)
+        self.assertIn(
+            'Include="System.Security.Cryptography.Xml" Version="10.0.10"',
+            project,
+        )
         self.assertIn("<TargetFramework>net10.0</TargetFramework>", checker_build)
         self.assertIn(
             "<ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>",
@@ -136,6 +145,7 @@ class StaticInvariantTests(unittest.TestCase):
         self.assertIn("--no-restore", wrapper)
         self.assertIn("-noAutoResponse", wrapper)
         self.assertIn('exec dotnet "$CHECKER_DLL"', wrapper)
+        self.assertNotIn("-noAutoResponse >/dev/null", semantic_test)
 
     def test_test_containers_never_mount_real_workspace(self):
         fast = (STARTER / "scripts/run_tests_with_cascade_check.sh").read_text()

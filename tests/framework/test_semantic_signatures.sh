@@ -18,6 +18,7 @@ printf '%s\n' \
   '  <PropertyGroup>' \
   '    <TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>' \
   '    <Nullable>enable</Nullable>' \
+'    <LangVersion>latest</LangVersion>' \
   '    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>' \
   '  </PropertyGroup>' \
   '</Project>' > "$FIXTURE/src/Demo/Demo.csproj"
@@ -34,8 +35,10 @@ printf '# architecture\n' > "$FIXTURE/.agent/rules/architecture.md"
 git -C "$FIXTURE" init -q
 git -C "$FIXTURE" config user.email framework@example.invalid
 git -C "$FIXTURE" config user.name framework-tests
-(cd "$FIXTURE" && dotnet restore scripts/signature-checker/Tenninety.SignatureChecker.csproj -noAutoResponse >/dev/null)
-(cd "$FIXTURE" && dotnet restore src/Demo/Demo.csproj --use-lock-file -noAutoResponse >/dev/null)
+(cd "$FIXTURE" && dotnet restore scripts/signature-checker/Tenninety.SignatureChecker.csproj \
+  -noAutoResponse --verbosity minimal)
+(cd "$FIXTURE" && dotnet restore src/Demo/Demo.csproj --use-lock-file \
+  -noAutoResponse --verbosity minimal)
 git -C "$FIXTURE" add .
 git -C "$FIXTURE" commit -qm baseline
 

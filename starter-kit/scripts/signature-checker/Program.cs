@@ -1,5 +1,7 @@
 #nullable enable
 
+using System;
+using System.Threading.Tasks;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
@@ -442,7 +444,7 @@ void Materialize(string version, string destination)
     if (version == ":WORKTREE:")
     {
         var root = Directory.GetCurrentDirectory();
-        foreach (var relative in GitNullPaths("ls-files", "--cached", "--others", "--exclude-standard"))
+        foreach (var relative in GitNullPaths("ls-files", "-z", "--cached", "--others", "--exclude-standard"))
         {
             var source = Path.GetFullPath(Path.Combine(root, relative));
             if (!source.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))

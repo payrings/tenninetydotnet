@@ -47,7 +47,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preloads `Microsoft.Build.Framework`; its compiled host excludes NuGet
   MSBuild runtime assets, verifies a clean output, registers the selected SDK
   first, uses Roslyn's current workspace-failure API, and preserves nullable
-  flow analysis for fatal exits.
+  flow analysis for fatal exits. Its audited XML-cryptography dependency is
+  pinned to the serviced `10.0.10` release, and CI preserves restore failures.
+- Python bytecode is ignored at the repository root, and the regression
+  workflow uses the Node 24-based `actions/checkout` release.
 - Dependency propagation rejects duplicate and unknown Module IDs before making
   one atomic review-queue update.
 - Contract-test batches and the canonical golden harness roll back or remain
