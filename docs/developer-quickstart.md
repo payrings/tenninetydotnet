@@ -9,7 +9,7 @@ Work through the phases in order; they are sequential by design, and each one's 
 1. Confirm the prerequisites in Phase 0, including cloning this repository to the location defined in the guide's *Path conventions* section. Every copy step later assumes you did this.
 2. Follow Phase 1 (base system and .NET SDK), Phase 2 (GPU runtime; reboot when told to), and Phase 3 (build the inference engine and verify it sees your GPU).
 3. Follow Phase 4 to install and launch the model server with the tested repositories and quantisations, then run a direct completion smoke test against each model. Leave that terminal running and do everything else in a second one, as the guide instructs.
-4. Follow Phase 5 (Docker plus the firewall rule; do not skip the firewall part, because it is the most common cause of "the agent can't reach the models") and Phase 6 (build both container images and check the three version numbers).
+4. Follow Phase 5 (Docker plus the restricted-network firewall rules; verify model access succeeds and public egress fails) and Phase 6 (build both container images and check the three version numbers).
 5. Follow Phase 7 to install the two aider profiles, one per model, and run the smoke checks at the end of that phase.
 6. Follow Phase 8 to set your OpenRouter key and chosen frontier model, and run the escalation smoke test. Even though your spec already exists, you still want escalation working before you need it mid-project.
 
@@ -39,8 +39,8 @@ Take the dependency-ordered build sequence from your architecture document; that
 
 ## 5. Review the queue on your own schedule
 
-18. Work through the queued modules following Phase 12.2. Approve, or reject with feedback specific enough for a model to act on.
-19. Feed rejections back with the fix command (Phase 12.3). Respect the hard stop there: a module rejected three times means your spec is ambiguous at that point; revise that part of the specification and re-attempt, rather than asking for a fourth fix.
+18. Work through the queued modules following Phase 12.2. Approve, or reject with feedback specific enough for a model to act on. Each decision is committed immediately; a rejection also records the repair baseline.
+19. Feed rejections back with the fix command (Phase 12.3). The repaired diff is measured from that rejection baseline. Respect the hard stop there: a module rejected three times means your spec is ambiguous at that point; revise that part of the specification and re-attempt, rather than asking for a fourth fix.
 
 ## 6. Close out
 

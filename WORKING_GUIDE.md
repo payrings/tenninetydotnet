@@ -434,6 +434,12 @@ The module start tag was already created successfully. Running `write-contract` 
 
 The workspace and all existing tests are mounted read-only. The Coder writes generated contract tests into an isolated temporary staging directory outside the workspace. Only after the Coder exits successfully does the host validate the generated files, move them into the Contracts project, and make them read-only with `chmod 444`.
 
+The filenames are not accepted on trust: they must exactly match every missing
+path listed under the module manifest's **Protected/generated test artefact**
+section. Those host-generated paths are explicit scope exceptions, so they
+remain visible in the module diff and are reviewed without being mistaken for
+implementation-agent edits.
+
 A failed or interrupted Coder run should not install a partial contract test. Check the Contracts project after an interrupted run:
 
 ```fish
@@ -503,8 +509,13 @@ dev.sh queue <module-id>
 `finalise` runs the slow (integration) tier once and propagates any interface
 drift to downstream modules. `commit` is the orchestrator's own Git step; agents never commit. It turns the finalised module into a fixed artefact,
 returning the tree to a clean state so the **next** module can start. `queue`
-then records the module for human review and folds the queue row into that
-commit.
+then records the module for human review in a small, separate metadata commit.
+
+Every restore/build/test container invocation hashes project content before and
+after it runs. Test definitions, fixtures, Git state and build-control files are
+also over-mounted read-only, and the offline build/test phase receives the NuGet
+cache read-only. A container that changes project content fails the gate even
+when the changed path would normally belong to the module.
 
 Each step is gated on a **content fingerprint**, not a commit hash: `finalise`
 refuses a module that has not passed review and the fast tier, `commit` and
@@ -514,13 +525,15 @@ a hash-of-HEAD marker would compare equal to itself forever; the fingerprint
 covers tracked, staged and untracked content, so any edit invalidates every gate
 the module had already earned.
 
-**Interface changes are gated on you, not the Coder.** The pre-commit
-signature-drift hook only checks that `.agent/rules/architecture.md` was edited
-in the same diff as a signature change — a condition the Coder can satisfy by
-itself. So if a module's diff touches `.agent/rules/architecture.md`, both
-`finalise` and `commit` refuse and print the change against the frozen
+**Interface changes are gated on you, not the Coder.** The working architecture
+file is mounted read-only to agents, and module scope/attachments are read from
+the active baseline manifest, so an in-progress spec edit cannot grant new
+paths. If you intentionally change a signature in the working specification,
+both `finalise` and `commit` refuse and print the change against the frozen
 `architecture.original.md`. Review it, confirm it had the frontier-model review
-the interface change policy requires, then re-run with the explicit flag:
+the interface change policy requires, then re-run with the explicit flag. If
+the change adds a new file path, reset/finish the active module and commit the
+human-authored specification change before starting a new baseline.
 
 ```fish
 dev.sh finalise <module-id> --allow-spec-change
@@ -612,11 +625,19 @@ Work through `REVIEW_QUEUE.md` whenever you have time, in the build order from `
 dev.sh approve <module-id>
 ```
 
+The command commits the queue status immediately, leaving the tree clean.
+
 **Found a real issue?** Run the rejection command with feedback specific enough for the AI to fix:
 
 ```fish
 dev.sh reject <module-id> "<what's wrong, specific enough for an AI to fix>"
 ```
+
+`reject` commits the queue row and feedback file, then creates a fresh
+`module-repair-<module-id>-<count>` baseline at the current commit. The repair
+diff therefore contains only the new fix, not the original implementation or
+modules committed while review was pending. Finish or reset any currently
+uncommitted module before recording an approval or rejection.
 
 ### 12.3 – Automated repair loops
 
@@ -636,13 +657,15 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 
 - [ ] the workspace repository has an initial commit and a clean tree (`git log --oneline` shows the Phase 10.4 commit; `git status --short` prints nothing)
 - [ ] `dotnet build` succeeds with 0 errors, 0 warnings
-- [ ] each test project builds and discovers tests: Contracts, Golden, and Unit all run explicitly (not filtered by trait)
+- [ ] Contracts, Golden, and Unit projects are all present; each tier runs explicitly, and any tier with `*Tests.cs` source discovers at least one test
 - [ ] the golden harness (in the Golden project) executes every case in `critical_logic_golden.json` and fails on a missing entry point or duplicate case ID
 - [ ] `dev.sh help` lists `finalise`, `write-golden-harness`, and `show-frontier-fix`
 - [ ] `pre-commit` blocks a deliberately-added raw SQL line in a `.cs` file (and ignores `bin/`/`obj/`)
 - [ ] `pre-commit` blocks a signature change in `src/` without `.agent/rules/architecture.md` in the same commit
-- [ ] `Directory.Packages.props`, Contracts, Golden, fixtures, and the frozen `.original.md` files are all mounted `:ro` to agents; agent-visible `.git` is read-only
+- [ ] the working/frozen architecture files, `Directory.Packages.props`, Contracts, Golden, and fixtures are all mounted `:ro` to agents; agent-visible `.git` is read-only
 - [ ] `run_tests_with_cascade_check.sh` runs `dotnet build`/`dotnet test` with `--network=none` (a test that attempts an outbound connection fails), while `dotnet restore --locked-mode` runs in a separate networked step
+- [ ] networked restore can evaluate only the read-only scaffold/MSBuild inputs; implementation agents cannot edit `*.csproj`, `*.sln[x]`, `*.props`, `*.targets`, `global.json`, or `NuGet.Config`
+- [ ] restore/build/test fail with `WORKSPACE INTEGRITY FAILURE` if any project file outside `bin/`, `obj/`, or `.dev-runtime/` changes; the offline phase mounts the NuGet cache read-only
 - [ ] `run_tests_with_cascade_check.sh` runs from the host inside `test-runner`, treats the container exit code as authoritative, and prints deliberate escalation instructions (it does NOT auto-escalate) when handed an artificially large build error log
 - [ ] `run_tests_with_cascade_check.sh` respects `DOTNET_ERROR_THRESHOLD`
 - [ ] `cmd_iterate` injects the captured test/review output into the next Coder attempt (verify the failing log text appears in the next prompt)
@@ -652,17 +675,18 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 - [ ] `escalate.py` reads `OPENROUTER_API_KEY` from a mode-600 `.env` (or the environment), warns on loose permissions, and `--dry-run` writes artefacts to a temp dir without touching `.escalations.json`
 - [ ] `dev.sh iterate`/`write`/`review`/`write-contract` fail fast with a clear message (not a silent hang) when llama-swap is unreachable, and `DEV_SKIP_PREFLIGHT=1` bypasses the check
 - [ ] the human-feedback repair (`dev.sh fix`) cannot proceed past a Reviewer `VERDICT: FAIL` (it delegates to `dev.sh iterate`)
-- [ ] `dev.sh` fails an iteration with `OUT-OF-SCOPE FILE(S)` — before invoking the Reviewer — when a module diff touches a path not listed under its manifest's **Implementation files** / **Shared integration files** (and allows `.agent/rules/architecture.md` as the interface-change exception)
-- [ ] `dev.sh write-contract` mounts the workspace read-only, accepts one staged `<Type>Tests.cs` file per documented public entry point, and refuses to overwrite an existing contract test
+- [ ] `dev.sh` fails an iteration with `OUT-OF-SCOPE FILE(S)` before invoking the Reviewer when a module diff touches a path not listed in the active baseline manifest; editing the working manifest cannot widen scope, while host-generated protected paths and deliberate human specification edits remain visible
+- [ ] `dev.sh` rejects every implementation-agent change to MSBuild/project/solution build-control files even if a malformed manifest lists one
+- [ ] `dev.sh write-contract` mounts the workspace read-only, accepts exactly the missing filenames declared under **Protected/generated test artefact**, and refuses to overwrite an existing contract test
 - [ ] re-running `dev.sh write-contract <module-id>` after a second entry point is added to the manifest creates only the new file and leaves existing contract tests untouched
 - [ ] a `write-contract` batch containing any already-existing filename is rejected whole, leaving the Contracts project unchanged
 - [ ] `dev.sh write-golden-harness` installs the canonical framework harness (not a model-authored file), substitutes the project name, and makes it read-only
 - [ ] contract tests use exact overload-aware reflection checks (not a bare `GetMethod(name)`)
 - [ ] `find_consumers.sh` correctly lists a known call site for a real symbol in the codebase
-- [ ] `check_signatures.csx -- --since module-start-<module-id>` reports an added/removed/overloaded method, a return-type-only change, and a base-list change
-- [ ] `check_signatures.csx -- --names-only` emits bare symbol names; `check_interface_drift.sh` marks downstream modules `interface-changed`
+- [ ] `check_signatures.csx -- --since <active-baseline>` reports added/removed/overloaded methods, return-type-only and base-list changes, constants, operators, conversions, enum members, and class/struct primary constructors
+- [ ] a signature-checker or Git failure makes `check_interface_drift.sh` exit non-zero; changed APIs mark queued transitive dependents from the manifest's Module-ID graph as `interface-changed`
 - [ ] `OPENROUTER_API_KEY` and `FRONTIER_MODEL` are both set, and `scripts/escalate.py` returns a real response on a dummy diff
-- [ ] the FIRST `dev.sh escalate <module-id> <log>` (no `--override`) produces a plan; `--override --write-code` produces fix code saved to `frontier-fix-<module-id>.md`
+- [ ] escalation order is enforced: tier 1 is plan-only without flags, tier 2 is plan-only with `--override`, tier 3 requires `--override --write-code`, and a fourth call is refused
 - [ ] `queue_for_review.sh` correctly adds a new row to `REVIEW_QUEUE.md`
 - [ ] `dev.sh finalise <module-id>` refuses a module that was never started, and refuses one that has not passed review and the fast tier
 - [ ] `dev.sh finalise`/`commit` refuse a module whose diff edits `.agent/rules/architecture.md`, print the change against `architecture.original.md`, and proceed only with `--allow-spec-change`
@@ -670,12 +694,13 @@ Machine-level items (GPU, model serving, images, profiles, frontier connectivity
 - [ ] `dev.sh queue <module-id>` refuses to run until `dev.sh commit <module-id>` has succeeded for the current content
 - [ ] after `queue`, `dev.sh start <next-module-id>` succeeds; the tree is clean and a second module can begin
 - [ ] `dev.sh reject <module-id>` increments the "Times rejected" column, and the third rejection prints the revise-the-spec instruction
+- [ ] `approve`/`reject` commit review metadata immediately; `reject` records a fresh repair baseline and `dev.sh fix` returns the repaired module to a clean review queue
 - [ ] `dev.sh fix <module-id>` exits non-zero when the underlying repair fails
 - [ ] `apply_review_feedback.sh` (via `dev.sh fix`) exits 1 when the gate fails all 3 attempts
 - [ ] `dev.sh broadcast "<note>"` adds a note, and `dev.sh write <module-id> "<task>"` includes it in the task
 - [ ] `dev.sh` refuses a state-changing command (e.g. `start`) run from a directory outside its own workspace, names the workspace it would have acted on, and is bypassable with `DEV_ALLOW_ANY_CWD=1`; read-only commands (`version`, `status`) still run from anywhere
 - [ ] `dev.sh start <module-id>` fails on a dirty tree, on a missing initial commit, and on an already-started module
-- [ ] `dev.sh reset <module-id>` restores tracked files, removes module-created untracked files, and deletes the `module-start-<module-id>` tag so the module can be re-started
+- [ ] `dev.sh reset <module-id>` never moves HEAD: it backs up and discards only uncommitted work, refuses an already committed/queued initial module, and preserves unrelated later commits
 - [ ] `.agent/rules/architecture.original.md` exists and is read-only
 
 ---
@@ -719,7 +744,7 @@ Produce the complete contents of `.agent/rules/architecture.md`. This file is th
   - use lowercase kebab-case matching `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`;
   - describe the module, not a particular source filename;
   - remain stable for the life of the project; and
-  - be a stable manifest key, not a class name. `dev.sh write-contract <module-id>` looks the ID up in the manifest and derives one contract-test file per documented public entry point (`<TypeName>Tests.cs`), so a module ID need not match any single type. For example, `invoice-calculator` yields `InvoiceCalculatorTests.cs`, plus a second file only if the manifest documents a second entry point.
+  - be a stable manifest key, not a class name. `dev.sh write-contract <module-id>` looks the ID up in the manifest and requires the exact `.cs` paths listed under **Protected/generated test artefact**. A module ID therefore need not match a production type or test filename.
 
   Begin with a dependency-ordered catalogue:
 
@@ -777,10 +802,11 @@ Produce the complete contents of `.agent/rules/architecture.md`. This file is th
   Rules for manifests:
   - List exact paths; do not use broad globs such as `src/**`.
   - Every production file in the project tree must belong to at least one module manifest.
-  - A changed path is allowed only when it appears under that module's **Implementation files** or **Shared integration files**. The sole global exception is `.agent/rules/architecture.md` during a deliberate interface change governed by the interface change policy below; do not list the architecture file as ordinary module scope.
+  - A changed path is allowed only when it appears under that module's **Implementation files**, **Shared integration files**, or **Protected/generated test artefact**. Protected/generated paths are admitted only because the host creates them through read-only staging; implementation agents cannot edit them. The other exception is `.agent/rules/architecture.md` during a deliberate interface change governed by the interface change policy below; do not list the architecture file as ordinary module scope.
+  - Never list `*.csproj`, `*.sln`, `*.slnx`, `*.props`, `*.targets`, `global.json`, or `NuGet.Config` as implementation/shared scope. They are trusted restore inputs changed only by a human in a separate reviewed commit.
   - If a shared file may be touched by several modules, state the permitted edit for each module so unrelated sections remain out of scope.
   - Do not tell the Coder to "implement `<Type>.cs`" when the module owns several files. The module manifest, not the task sentence, defines the complete scope.
-  - Mark each module's **public entry points** explicitly. These are the types consumers outside the module call directly. `dev.sh write-contract` derives one `<TypeName>Tests.cs` per entry point, so a type that is only reachable through another entry point must not be marked as one.
+  - Mark each module's **public entry points** explicitly. These are the types consumers outside the module call directly. For every protected contract-test file, list the exact repository-relative path under **Protected/generated test artefact**; `dev.sh write-contract` stages exactly those basenames and no others.
 - **Each module's single responsibility** and **public interface** must live inside its manifest. C# class/method signatures with full XML doc comments, not implementations. Include exact overloads, generic arity, parameter names/types/order, return types, nullability and static/instance distinctions (the contract tests and signature-drift hook are overload-aware).
 - **Dependency direction between modules.** Express dependencies by Module ID and state the global direction explicitly, e.g. "Service modules call repository modules; repository modules never call back up into services."
 - **The full data model.** List every `record` or class used as data, every field/property with its type and constraints, every relationship, and the manifest of the module that owns it.
@@ -803,18 +829,19 @@ Produce the complete contents of `.agent/rules/architecture.md`. This file is th
 
 Coding conventions and constraints: naming conventions (PascalCase for public, camelCase for private), where new code must go relative to the layout in `.agent/rules/architecture.md`, **the approved NuGet package list, with every package and version named explicitly** (this becomes `Directory.Packages.props`), and an explicit instruction to implement against the signatures in `.agent/rules/architecture.md` exactly rather than redesigning them.
 
-Also require the Coder to treat the task's Module ID as authoritative: locate that manifest, implement the **complete module**, create or edit only paths listed under its **Implementation files** or **Shared integration files**, and make only the specifically permitted change inside a shared file. It must not infer scope from a filename in the task, create convenience files outside the manifest, or edit another module to make the current one easier. If the task, manifest and existing repository disagree, it must stop and ask a specific clarifying question.
+Also require the Coder to treat the task's Module ID as authoritative: locate that manifest, implement the **complete module**, create or edit only paths listed under its **Implementation files** or **Shared integration files**, and make only the specifically permitted change inside a shared file. The architecture file is read-only context; the Coder must never edit it or attempt to expand its own scope. It must not infer scope from a filename in the task, create convenience files outside the manifest, or edit another module to make the current one easier. If the task, manifest and existing repository disagree, it must stop and ask a specific clarifying question.
 
 **Must also include these three sections:**
 
 ```markdown
 ## Attached files
-The orchestrator attaches the files you may edit to this chat: the
-architecture spec and every file listed under the target module's
-manifest that already exists. Manifest files that do not exist yet are
-yours to create – create them with exactly the paths the manifest
-lists, and no others. You cannot see repository files outside the
-attached set; if you need one, stop and ask for it.
+The orchestrator attaches the read-only architecture spec and every
+implementation/shared file listed under the target module's baseline manifest
+that already exists. Manifest files that do not exist yet are yours to create –
+create them with exactly the paths that baseline manifest lists, and no others.
+You cannot edit the specification or grant yourself new scope; a human must
+make specification changes separately. You cannot see repository files outside
+the attached set; if you need one, stop and ask for it.
 
 ## Testing policy
 The testing policy is in `.agent/skills/tester.md`. Read and follow it. In
@@ -835,9 +862,9 @@ A checklist a *different* model than the one that wrote the code will use to rev
 
 The checklist must make the module manifest operational. Require the Reviewer to:
 
-1. Extract the Module ID from the `module-start-<module-id>` tag named in its task and locate the matching manifest in `.agent/rules/architecture.md`.
+1. Extract the Module ID from the active initial/repair baseline named in its task and locate the matching manifest in `.agent/rules/architecture.md`.
 2. Review **every** added, modified, renamed or deleted file in the diff included in its prompt; it must not review only the file whose name resembles the module.
-3. Fail with `OUT-OF-SCOPE FILE: <path>` for any changed path not listed under that manifest's **Implementation files** or **Shared integration files**, except `.agent/rules/architecture.md` during a deliberate interface change. If that exception appears, flag `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. (Note: `dev.sh` already enforces this scope rule mechanically before the Reviewer runs, so an out-of-scope diff never reaches you; keep this check as a backstop for anything the path-level gate cannot see, such as a permitted shared file edited beyond its allowed change.)
+3. Fail with `OUT-OF-SCOPE FILE: <path>` for any changed path not listed under that manifest's **Implementation files**, **Shared integration files**, or **Protected/generated test artefact**, except `.agent/rules/architecture.md` during a deliberate interface change. Review protected/generated tests, but do not treat their host-staged additions as implementation-agent scope violations. If the architecture exception appears, flag `INTERFACE SPEC CHANGED – frontier review required` and verify the interface change policy is being followed. (Note: `dev.sh` already enforces this scope rule mechanically before the Reviewer runs, so an out-of-scope diff never reaches you; keep this check as a backstop for anything the path-level gate cannot see, such as a permitted shared file edited beyond its allowed change.)
 4. For a shared integration file, verify that only the permitted change described by the manifest was made.
 5. Verify that every required implementation file, public contract, behaviour, acceptance example and completion criterion in the manifest is satisfied.
 6. Treat tests as checks of module behaviour and public contracts, not checks of individual production files.
@@ -848,16 +875,18 @@ The checklist must make the module manifest operational. Require the Reviewer to
 ## Before you review anything
 The complete diff for this module is included in your prompt between the
 `----- BEGIN MODULE DIFF -----` and `----- END MODULE DIFF -----` markers.
-It was generated on the host with `git diff module-start-<module-id>`;
+It was generated on the host against the active baseline named in the task
+(either `module-start-<module-id>` or a later repair baseline);
 brand-new files appear in it in full. You cannot run commands and you
 cannot see any file beyond what is attached to this chat: the diff, the
-attached `.agent/rules/architecture.md` and this checklist are your
-complete evidence. The diff is git output, not a document.
+attached current module files, any human rejection feedback,
+`.agent/rules/architecture.md`, and this checklist are your complete evidence.
+The diff is git output, not a document.
 
-On the **first iteration** of a new module (when no contract test exists
-yet), the diff contains the full module file(s) as additions – review
-them in full. On subsequent iterations, review the diff plus any code you
-flagged earlier that the Coder did not address.
+On the **first iteration** of a new module, the diff contains the full module
+and exact host-staged contract-test additions – review them in full. A repair
+diff contains only changes since the human rejection baseline, so assess those
+changes against the rejection context and the complete manifest.
 ```
 
 **Must also include these five sections:**
@@ -884,7 +913,8 @@ with "TEST-PASS-BY-COINCIDENCE: <explanation>."
 ## Manifest scope
 The module manifest in `.agent/rules/architecture.md`, located by the task's
 Module ID, is the authoritative scope. Every path in the diff must appear
-under that module's **Implementation files** or **Shared integration files**,
+under that module's **Implementation files**, **Shared integration files**, or
+**Protected/generated test artefact**,
 and an edit inside a shared file must be the specific change the manifest
 permits. The only global exception is `.agent/rules/architecture.md` itself
 during a deliberate interface change.
@@ -1076,12 +1106,12 @@ For GPU, model-serving, firewall, and container-image symptoms, see the machine-
 | `dotnet build` fails with " NU1004: The version of package is not defined"        | `Directory.Packages.props` is missing a package version; add it                                                                        |
 | `dotnet restore --locked-mode` fails                                              | run `dotnet restore` first to (re)generate `packages.lock.json`, then commit it – required after any `Directory.Packages.props` change |
 | A test project reports "EMPTY TEST GATE"                                          | the project built but discovered no tests; check it has a `[Fact]`/`[Theory]` and references the project under test                    |
-| `dev.sh write-contract` writes to wrong path or wrong number of files             | the agent derives filenames from the module manifest's public entry points – check the Module ID exists in `.agent/rules/architecture.md` and its entry points are documented |
+| `dev.sh write-contract` rejects the staged batch                                  | check that the Module ID exists and **Protected/generated test artefact** lists the exact missing `.cs` contract-test paths; staged basenames must match that set exactly |
 | Fast test tier is slow every single run                                           | NuGet cache volume may have been removed; first run after `Directory.Packages.props` change is slow (cold cache)                       |
-| `escalate.py` produces an empty diff                                              | `module-start-<module-id>` tag was never created – run `dev.sh start <module-id>` first                                                          |
+| `escalate.py` produces an empty diff                                              | no module work differs from the active initial/repair baseline; run `dev.sh start <module-id>` for a new module or `dev.sh reject` before a repair |
 | A module keeps bouncing between `needs-fixes` and `ready-for-review`              | check "Times rejected" – if at 3, revise `.agent/rules/architecture.md` instead                                                                           |
 | Downstream modules break after an interface change                                | `check_interface_drift.sh` should have marked them as `interface-changed`                                                              |
-| The repo is in a broken state after a crash                                       | `dev.sh reset <module-id>`                                                                                                                  |
+| The repo is in a broken state after a crash                                       | `dev.sh reset <module-id>` backs up and discards only uncommitted work; it deliberately never rewinds committed history |
 | `BROADCAST.md` notes aren't being seen by the Coder                               | use `dev.sh write` / `dev.sh iterate`, which inject them automatically                                                                 |
 
 ---

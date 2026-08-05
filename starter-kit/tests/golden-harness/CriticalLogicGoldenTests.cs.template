@@ -72,6 +72,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -145,9 +146,9 @@ public sealed class CriticalLogicGoldenTests
 
         object? actual = InvokeAndUnwrap(method, instance, args);
 
-        // Compare by canonical JSON. This is exact and culture-independent: 2.50m
-        // and 2.5m serialise differently only if the production type differs, and
-        // string/collection/shape mismatches all surface here. Reference equality
+        // Compare by canonical JSON. Object property order and equivalent JSON
+        // number spellings (2.50, 2.5, 25e-1) do not affect equality, while
+        // string/collection/shape mismatches still surface. Reference equality
         // is never used.
         string expectedJson = Canonicalise(testCase.Expected);
         string actualJson = Canonicalise(JsonSerializer.SerializeToElement(actual, CanonicalJson));
@@ -185,12 +186,15 @@ public sealed class CriticalLogicGoldenTests
             case null:
                 return null;
             case Task task:
-                try { task.GetAwaiter().GetResult(); }
-                catch (AggregateException ae) when (ae.InnerException is not null)
-                { throw ae.InnerException; }
-                Type t = task.GetType();
-                if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(Task<>))
-                    return t.GetProperty("Result")!.GetValue(task);
+                task.GetAwaiter().GetResult();
+                // Async methods commonly return an internal Task<T> subclass,
+                // not an object whose runtime generic definition is Task<>.
+                // Resolve the inherited Result property instead of requiring an
+                // exact runtime type, or valid async results become null.
+                PropertyInfo? result = task.GetType().GetProperty(
+                    "Result", BindingFlags.Instance | BindingFlags.Public);
+                if (result is not null)
+                    return result.GetValue(task);
                 return null;
             default:
                 // ValueTask / ValueTask<T>: convert to Task via AsTask() and await.
@@ -290,8 +294,7 @@ public sealed class CriticalLogicGoldenTests
 
         // Resolve the type from the production assembly (the one under test).
         Assembly production = ProductionAssembly();
-        Type? type = production.GetType(typeName)
-                     ?? Type.GetType(typeName);
+        Type? type = production.GetType(typeName);
         if (type is null)
             throw new GoldenFixtureException(
                 $"entryPoint type '{typeName}' not found in assembly '{production.GetName().Name}'.");
@@ -342,6 +345,20 @@ public sealed class CriticalLogicGoldenTests
             args[i] = Deserialise(value, p.ParameterType, testCase.Name!, name);
         }
 
+        var parameterNames = parameters
+            .Select(p => p.Name ?? "")
+            .ToHashSet(StringComparer.Ordinal);
+        IEnumerable<string> inputKeys = testCase.Input is null
+            ? Enumerable.Empty<string>()
+            : testCase.Input.Keys;
+        string[] extras = inputKeys
+            .Where(k => !parameterNames.Contains(k))
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToArray();
+        if (extras.Length > 0)
+            throw new GoldenFixtureException(
+                $"Case '{testCase.Name}': input contains unknown parameter(s): {string.Join(", ", extras)}.");
+
         return args;
     }
 
@@ -349,11 +366,10 @@ public sealed class CriticalLogicGoldenTests
     {
         try
         {
-            return value.Deserialize(targetType, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true,
-                NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString,
-            });
+            // Fixture values are typed JSON, not loosely-coerced text. Keep
+            // property names and number kinds strict so "2" cannot silently
+            // stand in for 2 and a misspelled DTO property cannot bind.
+            return value.Deserialize(targetType, CanonicalJson);
         }
         catch (JsonException ex)
         {
@@ -401,9 +417,7 @@ public sealed class CriticalLogicGoldenTests
                 writer.WriteEndArray();
                 break;
             case JsonValueKind.Number:
-                // Preserve the exact numeric text so decimals aren't lossily
-                // widened to double.
-                writer.WriteRawValue(element.GetRawText(), skipInputValidation: true);
+                writer.WriteRawValue(CanonicalNumber(element.GetRawText()), skipInputValidation: true);
                 break;
             case JsonValueKind.String:
                 writer.WriteStringValue(element.GetString());
@@ -419,6 +433,41 @@ public sealed class CriticalLogicGoldenTests
             default:
                 throw new GoldenFixtureException($"Unsupported JSON kind: {element.ValueKind}");
         }
+    }
+
+    // Convert a valid JSON number into a unique, lossless scientific spelling
+    // without widening through double/decimal or allocating exponent-sized
+    // strings. Equivalent spellings therefore converge exactly.
+    private static string CanonicalNumber(string raw)
+    {
+        bool negative = raw.StartsWith("-", StringComparison.Ordinal);
+        string value = negative ? raw[1..] : raw;
+
+        int exponent = 0;
+        int exponentAt = value.IndexOfAny(new[] { 'e', 'E' });
+        if (exponentAt >= 0)
+        {
+            exponent = int.Parse(value[(exponentAt + 1)..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+            value = value[..exponentAt];
+        }
+
+        int decimalAt = value.IndexOf('.');
+        int fractionalDigits = decimalAt < 0 ? 0 : value.Length - decimalAt - 1;
+        string digits = value.Replace(".", "", StringComparison.Ordinal).TrimStart('0');
+        if (digits.Length == 0)
+            return "0";
+
+        int power = checked(exponent - fractionalDigits);
+        while (digits.EndsWith('0'))
+        {
+            digits = digits[..^1];
+            power = checked(power + 1);
+        }
+
+        string canonical = power == 0
+            ? digits
+            : digits + "e" + power.ToString(CultureInfo.InvariantCulture);
+        return negative ? "-" + canonical : canonical;
     }
 
     // --- fixture model ---------------------------------------------------

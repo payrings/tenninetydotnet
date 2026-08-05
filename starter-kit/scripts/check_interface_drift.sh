@@ -1,34 +1,48 @@
 #!/bin/bash
-# Usage: check_interface_drift.sh <module-id>
-# Compares the module's whole public surface against its start tag and, if it
-# changed, marks downstream consumers in REVIEW_QUEUE.md as interface-changed.
+# Usage: check_interface_drift.sh <module-id> [baseline-ref]
+# Compares a module's declared public surface against the active implementation
+# or repair baseline. If it changed, every queued transitive dependent declared
+# by Module ID in architecture.md is marked interface-changed.
 set -uo pipefail
 
-MODULE="${1:?Usage: check_interface_drift.sh <module-id>}"
-# Self-locate: the workspace is the parent of the scripts/ directory this file
-# lives in, so each project's copy operates on its own workspace regardless of
-# CWD or how it was invoked (PATH, ./scripts/dev.sh, absolute path). WORKSPACE
-# in the environment still overrides.
+MODULE="${1:?Usage: check_interface_drift.sh <module-id> [baseline-ref]}"
+BASE_REF="${2:-module-start-$MODULE}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE="${WORKSPACE:-$(dirname "$SCRIPT_DIR")}"
+SPEC="$WORKSPACE/.agent/rules/architecture.md"
 
-# Compare against the module's baseline tag (the entire module diff), NOT the
-# last commit – "last commit" is not necessarily this module's change set.
-BASE_TAG="module-start-$MODULE"
-if ! git -C "$WORKSPACE" rev-parse -q --verify "refs/tags/$BASE_TAG" >/dev/null; then
-  echo "No baseline tag $BASE_TAG – skipping drift check."
-  exit 0
+if ! git -C "$WORKSPACE" rev-parse -q --verify "$BASE_REF^{commit}" >/dev/null; then
+  echo "ERROR: interface-drift baseline '$BASE_REF' does not exist." >&2
+  exit 1
+fi
+[ -f "$SPEC" ] || { echo "ERROR: architecture spec not found: $SPEC" >&2; exit 1; }
+
+# Capture the checker status explicitly. The exit code of a process substitution
+# is not propagated by mapfile, so using `mapfile < <(checker)` would fail open.
+checker_output="$(mktemp "${TMPDIR:-/tmp}/tenninety-signatures.XXXXXX")"
+checker_errors="$(mktemp "${TMPDIR:-/tmp}/tenninety-signature-errors.XXXXXX")"
+trap 'rm -f "$checker_output" "$checker_errors"' EXIT
+if ! (cd "$WORKSPACE" && dotnet script scripts/check_signatures.csx -- \
+       --since "$BASE_REF" --names-only >"$checker_output" 2>"$checker_errors"); then
+  echo "ERROR: signature checker failed:" >&2
+  sed 's/^/  /' "$checker_errors" >&2
+  sed 's/^/  /' "$checker_output" >&2
+  exit 1
 fi
 
-# --names-only emits bare changed symbol names, one per line (no signature
-# text to parse).
-mapfile -t CHANGED_SYMBOLS < <(
-  cd "$WORKSPACE" && dotnet script scripts/check_signatures.csx -- \
-    --since "$BASE_TAG" --names-only 2>&1
-) || { echo "ERROR: signature checker failed."; exit 1; }
-
+CHANGED_SYMBOLS=()
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  case "$line" in
+    API$'\t'*) CHANGED_SYMBOLS+=("${line#*$'\t'}") ;;
+    *)
+      echo "ERROR: signature checker produced unexpected stdout: $line" >&2
+      exit 1 ;;
+  esac
+done < "$checker_output"
 if [ "${#CHANGED_SYMBOLS[@]}" -eq 0 ]; then
-  echo "No public-API changes since $BASE_TAG."
+  echo "No public-API changes since $BASE_REF."
   exit 0
 fi
 
@@ -36,44 +50,92 @@ echo "Public-API changes detected in module $MODULE:"
 printf '  %s\n' "${CHANGED_SYMBOLS[@]}"
 echo ""
 
-# Was .agent/rules/architecture.md also updated in the same module diff? Use grep -q in an
-# if-statement – never `grep -c ... || echo 0`, which prints two lines (grep's
-# "0" plus the echo) and then breaks the numeric test.
-if git -C "$WORKSPACE" diff --name-only "$BASE_TAG" 2>/dev/null \
-     | grep -qE '(^|/)architecture\.md$'; then
-  : # spec updated alongside the code – good
+if git -C "$WORKSPACE" diff --name-only "$BASE_REF" -- . \
+     ':(exclude)REVIEW_QUEUE.md' ':(exclude)review-feedback/**' \
+     | grep -qx '.agent/rules/architecture.md'; then
+  : # spec updated alongside code
 else
-  echo "WARNING: public API changed but .agent/rules/architecture.md was not updated."
-  echo "This may be an interface-change policy violation."
-  echo ""
+  echo "ERROR: public API changed but .agent/rules/architecture.md was not updated." >&2
+  echo "The interface-change policy requires the specification in the same diff." >&2
+  exit 1
 fi
 
-for symbol in "${CHANGED_SYMBOLS[@]}"; do
-  [ -n "$symbol" ] || continue
-  short_symbol="${symbol##*.}"   # last dotted segment
-  echo "Checking consumers of: $short_symbol"
+manifest_has_module() {
+  local wanted="$1"
+  awk -v id="$wanted" '
+    /\*\*Module ID:\*\*[[:space:]]*`/ {
+      line=$0
+      sub(/^.*\*\*Module ID:\*\*[[:space:]]*`/, "", line)
+      sub(/`.*$/, "", line)
+      if (line == id) found=1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$SPEC"
+}
 
-  while IFS= read -r consumer_file; do
-    [ -z "$consumer_file" ] && continue
-    # Convert filename to a candidate Module ID (src/[ProjectName]/SomeModule.cs -> some-module).
-    # NOTE: only round-trips with cmd_write_contract's PascalCase conversion for
-    # single-hump names. If your modules use acronyms, name them with a single
-    # leading cap per word (HttpClient, not HTTPClient) to keep the two in sync.
-    consumer_module=$(basename "$consumer_file" .cs \
-      | sed -E 's/([a-z0-9])([A-Z])/\1-\2/g' \
-      | sed -E 's/([A-Z]+)([A-Z][a-z])/\1-\2/g' \
-      | tr '[:upper:]' '[:lower:]')
+manifest_direct_dependents() {
+  local dependency="$1"
+  awk -v target="$dependency" '
+    /\*\*Module ID:\*\*[[:space:]]*`/ {
+      line=$0
+      sub(/^.*\*\*Module ID:\*\*[[:space:]]*`/, "", line)
+      sub(/`.*$/, "", line)
+      current=line
+      next
+    }
+    current != "" && /\*\*Depends on:\*\*/ {
+      rest=$0
+      while (match(rest, /`[^`]+`/)) {
+        dep=substr(rest, RSTART + 1, RLENGTH - 2)
+        if (dep == target) {
+          print current
+          next
+        }
+        rest=substr(rest, RSTART + RLENGTH)
+      }
+    }
+  ' "$SPEC" | sort -u
+}
 
-    if grep -q "| $consumer_module |" "$WORKSPACE/REVIEW_QUEUE.md" 2>/dev/null; then
-      sed -i "s/| $consumer_module | [^|]* |/| $consumer_module | interface-changed |/" \
-        "$WORKSPACE/REVIEW_QUEUE.md"
-      echo "  Marked $consumer_module as 'interface-changed' in REVIEW_QUEUE.md"
+manifest_has_module "$MODULE" || {
+  echo "ERROR: Module ID '$MODULE' is missing from architecture.md." >&2
+  exit 1
+}
+
+# Traverse the declared dependency graph instead of guessing a module ID from
+# a consumer filename. Modules may span files and their IDs need not resemble
+# any filename, so filename conversion cannot be authoritative.
+declare -A seen=(["$MODULE"]=1)
+queue=("$MODULE")
+dependents=()
+index=0
+while [ "$index" -lt "${#queue[@]}" ]; do
+  current="${queue[$index]}"
+  index=$((index + 1))
+  direct=()
+  mapfile -t direct < <(manifest_direct_dependents "$current")
+  for dependent in "${direct[@]}"; do
+    [ -n "$dependent" ] || continue
+    if [ -z "${seen[$dependent]+x}" ]; then
+      seen["$dependent"]=1
+      queue+=("$dependent")
+      dependents+=("$dependent")
     fi
-  done < <(
-    cd "$WORKSPACE" \
-      && ./scripts/find_consumers.sh "$short_symbol" 2>/dev/null \
-      | cut -d: -f1 \
-      | grep -E '^src/.*\.cs$' \
-      | sort -u
-  )
+  done
+done
+
+if [ "${#dependents[@]}" -eq 0 ]; then
+  echo "No dependent modules are declared for '$MODULE'."
+  exit 0
+fi
+
+echo "Declared downstream modules:"
+for dependent in "${dependents[@]}"; do
+  if grep -q "^| $dependent |" "$WORKSPACE/REVIEW_QUEUE.md" 2>/dev/null; then
+    sed -i "s/| $dependent | [^|]* |/| $dependent | interface-changed |/" \
+      "$WORKSPACE/REVIEW_QUEUE.md"
+    echo "  Marked $dependent as interface-changed"
+  else
+    echo "  $dependent is not queued yet; it will build against the new contract"
+  fi
 done

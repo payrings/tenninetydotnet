@@ -502,19 +502,27 @@ docker network inspect tenninety-agent \
   --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
 ```
 
-Then allow that subnet to reach only 8090 and deny its other outbound traffic
-(adjust the subnet to what the command printed):
+Then allow host-bound traffic to llama-swap and block forwarded traffic from
+that subnet. Adjust the subnet and bridge interface to the values Docker
+reported:
 
 ```bash
-sudo ufw allow from 172.20.0.0/16 to 172.17.0.1 port 8090
-sudo ufw deny out on br-<id> from 172.20.0.0/16
+sudo ufw allow in on br-<id> from 172.20.0.0/16 to 172.17.0.1 port 8090 proto tcp
+sudo iptables -I DOCKER-USER 1 -s 172.20.0.0/16 -j REJECT
 ```
 
 `br-<id>` is the host interface for the `tenninety-agent` bridge (visible in
-`ip addr`). This blocks the agent from exfiltrating the mounted workspace while
-leaving llama-swap reachable. If you skip this, at least keep the model endpoint
-bound to the bridge gateway (Phase 4) rather than `0.0.0.0` so it is not exposed
-to your LAN.
+`ip addr`). `ufw` governs traffic terminating on the host, while Docker's
+`DOCKER-USER` chain governs traffic forwarded through the host. The reject rule
+therefore blocks internet/LAN egress without blocking the host-bound 8090
+connection. Persist the `DOCKER-USER` rule using your distribution's firewall
+mechanism; raw `iptables` rules otherwise disappear on reboot. Verify both
+properties from a disposable container on the restricted network: llama-swap
+must respond and a public HTTPS URL must fail. If you cannot verify both, do not
+claim restricted egress. `dev.sh` fails closed when the dedicated network cannot
+be created or inspected, but it cannot prove that a host firewall rule persists.
+At minimum, keep the model endpoint bound to the bridge gateway (Phase 4), not
+`0.0.0.0`, so it is not exposed to your LAN.
 
 ---
 
@@ -523,7 +531,7 @@ to your LAN.
 The framework uses two isolated Docker containers:
 
 - **`aider-sandboxed`** – executes the AI coding agent. Needs Python (for the aider CLI) and git (so the agent can run `git diff` read-only if a prompt ever tells it to, but it does **not** commit; the orchestrator owns all Git state). It does **not** get the .NET SDK, test tools, Docker access, or any API keys.
-- **`test-runner`** – executes deterministic builds and tests. Contains the .NET 10 SDK and mounts the workspace read-write, but has no LLM tooling. Test execution is split in two: `dotnet restore --locked-mode` runs with network access to populate the NuGet cache (no test code runs in this step), then `dotnet build` and `dotnet test` run in a second invocation with `--network=none`, so the arbitrary Coder-written code that executes during build and test has no network at all and cannot exfiltrate the workspace or reach a model.
+- **`test-runner`** – executes deterministic builds and tests. Contains the .NET 10 SDK and mounts the workspace read-write, but has no LLM tooling. Test execution is split in two: `dotnet restore --locked-mode` runs with network access to populate the NuGet cache, then `dotnet build` and `dotnet test` run with `--network=none` and the cache read-only. Restore can evaluate MSBuild files, so project, solution, props, targets, `global.json`, and `NuGet.Config` are trusted scaffold inputs: agents cannot edit them and the scope gate rejects them. Test sources, fixtures, architecture files, review metadata, and those build-control inputs are mounted read-only during test execution; `.env` is masked; and the runner hashes the source workspace before and after each container invocation. A mutation fails the gate even if the process otherwise exits successfully.
 
 Both images run as a **non-root user whose UID/GID match your host user**, baked in at build time. This keeps agent-created files (and `bin/`, `obj/`, test output) owned by you on the host, keeps file permissions meaningful, and, since the container user isn't root, a bind mount marked `:ro` can't be written through with root's mode-bit override. The real immutability boundary remains the Docker `:ro` mount; non-root is what stops the guarantees from being quietly defeated. Because the user has a real home directory in the image, the aider profile mounts cleanly at `/conf` with nothing else to work around.
 
@@ -715,6 +723,7 @@ Run this once at the end of machine setup. Every item must pass before starting 
 - [ ] both images build: `docker run --rm aider-sandboxed --version`, `docker run --rm --entrypoint git aider-sandboxed --version`, and `docker run --rm test-runner dotnet --version` all print versions
 - [ ] both images run as non-root and create host-user-owned files: a file created inside a throwaway container's mounted directory is owned by you, not root
 - [ ] a throwaway container with `~/.aider-coder` mounted at `/conf` runs a real completion against `qwen-coder` (the Phase 7 smoke test) and can reach `http://host.docker.internal:8090/v1/models`
+- [ ] on `tenninety-agent`, the model endpoint is reachable while a public HTTPS request fails; the `DOCKER-USER` egress rule survives a reboot
 - [ ] the `~/.aider-reviewer` profile resolves to `devstral-reviewer`, not `qwen-coder` (check its `aider.conf.yml`, or run the Phase 7 smoke test with it mounted)
 - [ ] the agent container sees only its mounted directories (not your host home, no Docker socket, no API keys)
 - [ ] `OPENROUTER_API_KEY` is available to `escalate.py` (via a mode-600 `.env` or an exported var) and `FRONTIER_MODEL` is set, and the Phase 8.3 `--dry-run` smoke test returned a real triage response without leaving artefacts in the clone
