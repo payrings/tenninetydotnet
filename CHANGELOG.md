@@ -6,7 +6,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-08-04
+## [0.2.1] - 2026-08-05
 
 Hardening release for module baselines, protected artefacts, test isolation,
 interface drift, escalation tiers, and reset safety. `DEV_SH_VERSION` in
