@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Tenninety.Cli/Tenninety.Cli.csproj" />
+    <Project Path="src/Tenninety.Core/Tenninety.Core.csproj" />
+    <Project Path="src/Tenninety.Execution/Tenninety.Execution.csproj" />
+    <Project Path="src/Tenninety.Frontier/Tenninety.Frontier.csproj" />
+    <Project Path="src/Tenninety.Git/Tenninety.Git.csproj" />
+    <Project Path="src/Tenninety.Tui/Tenninety.Tui.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Tenninety.Tests/Tenninety.Tests.csproj" />
+  </Folder>
+</Solution>

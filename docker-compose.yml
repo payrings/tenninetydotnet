@@ -1,0 +1,83 @@
+# 10/90 tenninety - local model serving.
+#
+# Two OpenAI-compatible servers (vLLM) expose different coder and reviewer model identifiers
+# on loopback. The defaults require two NVIDIA GPUs; set CODER_GPU_ID/REVIEWER_GPU_ID to select
+# them. On one GPU, use llama-swap instead so the models load one at a time.
+# The model network permits egress so vLLM can download model weights. It is not an executor
+# sandbox; pre-download the models and set `internal: true` if your deployment requires no egress.
+#
+#   docker compose up -d
+#   # then set .tenninety/config.json:
+#   #   "provider_mode": "aider",
+#   #   "local_models": {
+#   #     "coder": "coder",
+#   #     "reviewer": "reviewer",
+#   #     "coder_endpoint": "http://localhost:8000/v1",
+#   #     "reviewer_endpoint": "http://localhost:8001/v1"
+#   #   }
+#
+services:
+  coder:
+    image: vllm/vllm-openai:latest
+    command: >
+      --model ${CODER_MODEL:-Qwen/Qwen3.6-27B}
+      --served-model-name coder
+      --max-model-len 16384
+      --gpu-memory-utilization 0.85
+    ports:
+      - "127.0.0.1:8000:8000"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${CODER_GPU_ID:-0}"]
+              capabilities: [gpu]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    networks:
+      - isolated
+    restart: unless-stopped
+
+  reviewer:
+    image: vllm/vllm-openai:latest
+    command: >
+      --model ${REVIEWER_MODEL:-mistralai/Devstral-Small-2507}
+      --served-model-name reviewer
+      --max-model-len 16384
+      --gpu-memory-utilization 0.85
+    ports:
+      - "127.0.0.1:8001:8000"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${REVIEWER_GPU_ID:-1}"]
+              capabilities: [gpu]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    networks:
+      - isolated
+    restart: unless-stopped
+
+  # Optional: PostgreSQL matching the sample spec's technical hints.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: example
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - isolated
+    profiles:
+      - sample-db
+
+networks:
+  isolated:
+    internal: false # required for on-demand model downloads; not a security boundary
+
+volumes:
+  hf-cache:
