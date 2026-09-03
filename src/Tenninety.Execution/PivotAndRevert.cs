@@ -5,6 +5,8 @@ using Tenninety.Core;
 using Tenninety.Core.Models;
 using Tenninety.Core.Stores;
 using Tenninety.Core.Validation;
+using Tenninety.Execution.Candidates;
+using Tenninety.Execution.Testing;
 using Tenninety.Frontier;
 using Tenninety.Git;
 
@@ -288,17 +290,13 @@ public sealed class RevertService
             _git.RevertCommitNoEdit(commit.Sha);
             var expectedHotfixSha = _git.HeadSha();
 
-            // Reviewer/Tester: validate the hotfix with the mechanical suite.
-            var testCtx = new WpContext
+            // Reviewer/Tester: validate the hotfix with the mechanical suite. The Tester
+            // candidate is the EXACT post-revert hotfix commit (never the pre-revert commit
+            // or current main), recorded before any test runs.
+            var testCtx = new TesterRunContext
             {
-                RepoPath = _git.RepoPath,
-                WorkPackage = new WorkPackage
-                {
-                    Id = "HOTFIX", Layer = "TEST", Title = $"Validate revert of {commit.Sha[..8]}",
-                    Goal = "Mechanical validation of the revert.",
-                    Directives = { "All tests must pass after revert." },
-                    AcceptanceCriteria = { "Test suite exits 0." },
-                },
+                Candidate = new CandidateRevision(branch, expectedHotfixSha, expectedMainSha),
+                WorkPackageId = "HOTFIX",
                 Attempt = 1,
             };
             var test = await _tester.RunTestsAsync(testCtx, ct);
@@ -310,6 +308,22 @@ public sealed class RevertService
                 {
                     Success = false,
                     Message = $"hotfix tests failed (exit {test.ExitCode}); branch '{branch}' left for inspection.",
+                    BranchLeftBehind = branch,
+                };
+            }
+
+            // Exact candidate identity enforcement before promotion: the returned result must
+            // bind to the recorded post-revert hotfix SHA; a missing or mismatched identity is
+            // never accepted as a passing gate.
+            if (!string.Equals(test.CandidateSha, expectedHotfixSha, StringComparison.Ordinal))
+            {
+                _git.CheckoutBranch(TenNinety.MainBranch);
+                _audit.Append("REVERT_FAILED_TESTS", detail: "candidate identity missing or mismatched");
+                return new RevertOutcome
+                {
+                    Success = false,
+                    Message = "the hotfix tester did not return the exact post-revert candidate " +
+                              $"identity; refusing promotion; branch '{branch}' left for inspection.",
                     BranchLeftBehind = branch,
                 };
             }

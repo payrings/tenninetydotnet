@@ -1,6 +1,9 @@
 using Tenninety.Core;
 using Tenninety.Core.Models;
 using Tenninety.Core.Stores;
+using Tenninety.Execution.Candidates;
+using Tenninety.Execution.Coding;
+using Tenninety.Execution.Testing;
 using Tenninety.Frontier;
 using Tenninety.Git;
 
@@ -73,10 +76,16 @@ public sealed class ExecutionEngine
         try
         {
             // Defensive checkpoint: a crashed previous attempt may have left uncommitted files.
-            if (!_git.IsClean())
+            if (!_git.IsClean() && (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock"))
             {
                 _git.CommitAll($"{wp.Id}: wip checkpoint");
                 _log?.Invoke($"[{wp.Id}] committed leftover working-tree changes as a WIP checkpoint");
+            }
+            else if (!_git.IsClean())
+            {
+                throw new InvalidOperationException(
+                    "the Docker execution path requires a clean authoritative repository; " +
+                    "automatic CommitAll checkpointing is forbidden.");
             }
             if (resumingBranch)
             {
@@ -109,7 +118,8 @@ public sealed class ExecutionEngine
                 _log?.Invoke($"[{wp.Id}] attempt {info.Total} (phase count {info.Count}/{info.Max})");
 
                 // 1. CODER
-                var coderCtx = MakeContext(wp, info);
+                var coderBase = new CandidateRevision(branch, _git.HeadSha(), expectedMainSha);
+                var coderCtx = MakeCoderContext(wp, info, coderBase);
                 CoderResult code;
                 try
                 {
@@ -117,9 +127,18 @@ public sealed class ExecutionEngine
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    CheckpointWork(wp.Id, branch, "interrupted");
+                    if (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock")
+                        CheckpointWork(wp.Id, branch, "interrupted");
                     state.StopRequested = true;
                     return HandleInterruption(wp, state);
+                }
+                catch (CoderInfrastructureException ex)
+                {
+                    ReleaseInfrastructureAttempt(info);
+                    Persist(state);
+                    _audit.Append("CODER_FAILED", wp.Id,
+                        $"infrastructure exception: {Truncate(Sanitise(ex.Message), 200)}");
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -132,7 +151,11 @@ public sealed class ExecutionEngine
                 }
 
                 EnsureBranchAndBaseUnchanged(branch, expectedMainSha, "coder");
-                var sha = _git.CommitAll($"{wp.Id}: {Truncate(Sanitise(code.Summary), 80)} [attempt {info.Total}]");
+                var sha = code.CommitSha;
+                if (sha is null &&
+                    (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock"))
+                    sha = _git.CommitAll(
+                        $"{wp.Id}: {Truncate(Sanitise(code.Summary), 80)} [attempt {info.Total}]");
                 if (sha is null || !code.ProducesRealChange)
                 {
                     RecordFailure(info, TenNinety.FailureTypes.Coder,
@@ -141,43 +164,49 @@ public sealed class ExecutionEngine
                     if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
                     continue;
                 }
+                if (!string.Equals(_git.HeadSha(), sha, StringComparison.Ordinal))
+                    throw new InvalidOperationException(
+                        "the coder result commit does not equal the authoritative work-branch HEAD.");
                 EnsureBranchAndBaseUnchanged(branch, expectedMainSha, "coder commit", requireClean: true);
                 _audit.Append("CODER_COMMITTED", wp.Id, $"{sha[..Math.Min(12, sha.Length)]} {code.FilesTouched.Count} files");
 
                 if (PollControl(state, wp) is { } afterCoder) return afterCoder;
 
-                // 2. REVIEWER – receives the real bounded patch, never just a stat line
-                // (external review finding 4). A missing patch fails closed instead of
-                // letting an unreviewed change pass.
-                var diffPatch = Sanitise(_git.DiffPatchAgainstMain(branch));
-                if (string.IsNullOrWhiteSpace(diffPatch))
-                {
-                    RecordFeedback(info, TenNinety.FailureTypes.Reviewer,
-                        "diff could not be captured for review – failing closed.");
-                    _audit.Append("REVIEW_FAILED", wp.Id, "diff unavailable");
-                    if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
-                    continue;
-                }
-
+                // 2. REVIEWER - receives only the exact committed candidate plus instructions.
+                // Docker review explores a fresh offline materialization through bounded guest
+                // actions; explicit unsafe-host may derive a bounded diff through its trusted
+                // constructor-injected Git dependency.
                 ReviewResult review;
                 try
                 {
-                    review = await _reviewer.ReviewAsync(MakeContext(wp, info, diffPatch), ct);
+                    review = await _reviewer.ReviewAsync(
+                        MakeReviewerContext(wp, info,
+                            new CandidateRevision(branch, sha, expectedMainSha)), ct);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    CheckpointWork(wp.Id, branch, "interrupted");
+                    if (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock")
+                        CheckpointWork(wp.Id, branch, "interrupted");
                     state.StopRequested = true;
                     return HandleInterruption(wp, state);
                 }
                 catch (Exception ex)
                 {
+                    ReleaseInfrastructureAttempt(info);
                     Persist(state);
                     _audit.Append("REVIEW_FAILED", wp.Id,
                         $"infrastructure exception: {Truncate(Sanitise(ex.Message), 200)}");
                     throw;
                 }
                 EnsureBranchAndBaseUnchanged(branch, expectedMainSha, "reviewer", requireClean: true);
+                if (!string.Equals(review.CandidateSha, sha, StringComparison.Ordinal))
+                {
+                    RecordFeedback(info, TenNinety.FailureTypes.Reviewer,
+                        "the reviewer did not return the exact requested candidate identity.");
+                    _audit.Append("REVIEW_FAILED", wp.Id, "candidate identity missing or mismatched");
+                    if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
+                    continue;
+                }
                 if (!review.Passed)
                 {
                     foreach (var reason in review.Reasons.Take(5))
@@ -189,24 +218,32 @@ public sealed class ExecutionEngine
                     continue;
                 }
                 _audit.Append("REVIEW_PASSED", wp.Id, review.ReviewerModel);
-                var reviewedTip = _git.HeadSha();
+                var reviewedTip = sha;
 
                 if (PollControl(state, wp) is { } afterReview) return afterReview;
 
-                // 3. TESTER (mechanical)
+                // 3. TESTER (mechanical) – receives ONLY the trusted candidate identity
+                // (the reviewed tip), never the authoritative repo path: the Tester context
+                // is TesterRunContext, not WpContext.
                 TestRunResult test;
                 try
                 {
-                    test = await _tester.RunTestsAsync(MakeContext(wp, info), ct);
+                    test = await _tester.RunTestsAsync(new TesterRunContext
+                    {
+                        Candidate = new CandidateRevision(branch, reviewedTip, expectedMainSha),
+                        WorkPackageId = wp.Id,
+                        Attempt = Math.Max(1, info.Count),
+                        Advice = info.Advice,
+                    }, ct);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    CheckpointWork(wp.Id, branch, "interrupted");
                     state.StopRequested = true;
                     return HandleInterruption(wp, state);
                 }
                 catch (Exception ex)
                 {
+                    ReleaseInfrastructureAttempt(info);
                     Persist(state);
                     _audit.Append("TESTS_FAILED", wp.Id,
                         $"infrastructure exception: {Truncate(Sanitise(ex.Message), 200)}");
@@ -219,6 +256,19 @@ public sealed class ExecutionEngine
                         Sanitise($"tests exited {test.ExitCode}. Output tail:\n{test.OutputTail}"));
                     _audit.Append("TESTS_FAILED", wp.Id, $"exit={test.ExitCode}");
                     _log?.Invoke($"[{wp.Id}] tests FAILED (exit {test.ExitCode})");
+                    if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
+                    continue;
+                }
+
+                // Exact candidate identity enforcement: a missing or mismatched result SHA is
+                // never accepted as a passing gate, and it is never "repaired" from the
+                // current HEAD. Identity comes from trusted orchestration only.
+                if (!string.Equals(test.CandidateSha, reviewedTip, StringComparison.Ordinal))
+                {
+                    RecordFeedback(info, TenNinety.FailureTypes.Tester,
+                        "the tester did not return the exact requested candidate identity; refusing the gate.");
+                    _audit.Append("TESTS_FAILED", wp.Id, "candidate identity missing or mismatched");
+                    _log?.Invoke($"[{wp.Id}] tests rejected: candidate identity missing or mismatched");
                     if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
                     continue;
                 }
@@ -248,7 +298,8 @@ public sealed class ExecutionEngine
         }
         catch
         {
-            if (_git.CurrentBranch() == branch && !_git.IsClean())
+            if (_git.CurrentBranch() == branch && !_git.IsClean() &&
+                (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock"))
                 CheckpointWork(wp.Id, branch, "fault");
             // Infrastructure/process faults abort the run by owner decision, but the persisted
             // package must remain resumable rather than becoming a stale ACTIVE deadlock.
@@ -346,6 +397,12 @@ public sealed class ExecutionEngine
         return false;
     }
 
+    private static void ReleaseInfrastructureAttempt(AttemptInfo info)
+    {
+        info.Count = Math.Max(0, info.Count - 1);
+        info.Total = Math.Max(0, info.Total - 1);
+    }
+
     /// <summary>
     /// Consumes cross-process control requests at a safe point. Returns non-null when the
     /// loop must stop: the job is reset to PENDING exactly like HandleInterruption, so
@@ -367,15 +424,26 @@ public sealed class ExecutionEngine
         return null;
     }
 
-    private WpContext MakeContext(WorkPackage wp, AttemptInfo info, string diffPatch = "") => new()
+    private CoderRunContext MakeCoderContext(
+        WorkPackage wp, AttemptInfo info, CandidateRevision candidate) => new()
     {
-        RepoPath = _git.RepoPath,
+        Candidate = candidate,
         WorkPackage = wp,
         Global = _global,
         Attempt = Math.Max(1, info.Count),
         Feedback = info.Feedback,
         Advice = info.Advice,
-        DiffPatch = diffPatch,
+    };
+
+    private ReviewerRunContext MakeReviewerContext(
+        WorkPackage wp, AttemptInfo info, CandidateRevision candidate) => new()
+    {
+        Candidate = candidate,
+        WorkPackage = wp,
+        Global = _global,
+        Attempt = Math.Max(1, info.Count),
+        Feedback = info.Feedback,
+        Advice = info.Advice,
     };
 
     private static AttemptInfo GetAttemptInfo(RuntimeState state, string wpId)

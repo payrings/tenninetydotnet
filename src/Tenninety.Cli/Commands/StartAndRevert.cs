@@ -67,7 +67,7 @@ public static class RevertCommand
     public static async Task<int> Run(string commit, string? reason)
     {
         var ws = Workspace.Load();
-        var tester = new AgentFactory(ws.Config).CreateTester(line => Console.WriteLine($"[tenninety] {line}"));
+        var tester = new AgentFactory(ws.Config).CreateTester(ws.Git, line => Console.WriteLine($"[tenninety] {line}"));
         var service = new RevertService(ws.Git, ws.Config, ws.CreateFrontier(), tester, ws.Audit,
             log: line => Console.WriteLine($"[tenninety] {line}"));
 

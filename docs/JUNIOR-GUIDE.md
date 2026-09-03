@@ -151,10 +151,12 @@ $ dotnet build -c Release
   ... Build succeeded.        ← the compiler translated all C# to runnable form; 0 warnings
 
 $ dotnet test
-  Passed! - Failed: 0, Passed: 145, Skipped: 0, Total: 145
+  Passed! - Failed: 0, Passed: 1,063, Skipped: 10, Total: 1,073
 ```
 
-Why run tests? They simulate dozens of scenarios (broken plans, failing reviews, git
+The 10 skips are the Docker integration categories (they stay skipped until you opt in with
+the documented environment variables). Why run tests? They simulate dozens of scenarios
+(broken plans, failing reviews, git
 operations) in milliseconds and prove the framework behaves as documented before you trust
 it with real work.
 
@@ -419,14 +421,17 @@ When mocks feel boring:
 
 1. Start local model servers (they imitate the standard OpenAI web-API shape):
    `docker compose up -d` from the framework root (coder on port 8000, reviewer on 8001).
-2. Install a coding agent for the Coder robot – [aider](https://aider.chat) by default
-   (`python -m pip install aider-install && aider-install`); OpenCode and Pi work too via the
-   `"coder_agent"` knob. OpenCode/Pi require an explicit agent `model` setting in live mode.
-   The Reviewer stays a plain model call.
+2. Build or obtain digest-pinned role images. The Coder image must contain
+   [aider](https://aider.chat), OpenCode, or Pi according to the `"coder_agent"` knob;
+   OpenCode/Pi require an explicit agent `model`. The Reviewer model call stays host-controlled,
+   while its repository exploration runs in an offline Reviewer image.
 3. Edit `.tenninety/config.json`:
    `"provider_mode": "aider"`,
    `"local_models": { "coder": "coder", "reviewer": "reviewer", "coder_endpoint": "http://localhost:8000/v1", "reviewer_endpoint": "http://localhost:8001/v1" }`, and set your real
-   `"frontier_endpoint"` / `"frontier_model"` if you have one.
+   `"frontier_endpoint"` / `"frontier_model"` if you have one. For Docker mode, also configure
+   the pinned role images and internal model network from
+   [`SANDBOX-CONFIG.example.jsonc`](SANDBOX-CONFIG.example.jsonc); the Coder's in-container
+   endpoint is `sandbox.roles.coder.model_endpoint`, not host loopback.
 4. Use different coder and reviewer identifiers, and verify that your model server maps them
    to genuinely different weights – different aliases can otherwise point at the same model.
    If both models do not fit your GPU card together, set `"use_llama_swap": true` for the
@@ -444,9 +449,9 @@ When mocks feel boring:
 6. Commit the config change, then `tenninety plan --spec ./spec.md` and review very carefully
    – now the plan comes from a real model, and plans are only as good as your spec.
 
-Live-mode safety note: coding agents and tests still run directly as your user in this alpha.
-Use a disposable project directory and a least-privilege account; the environment allowlist is
-not a container sandbox.
+Live-mode safety note: Docker mode isolates role commands from the authoritative repository, but
+the Docker daemon and host orchestrator are still trusted. Use pinned images and least privilege.
+Never select `sandbox.mode=unsafe-host` for untrusted generated code.
 
 ---
 

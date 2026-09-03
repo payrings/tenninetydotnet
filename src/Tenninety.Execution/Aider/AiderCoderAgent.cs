@@ -12,8 +12,10 @@ public sealed class AiderCoderAgent : CliCoderAgentBase
     private readonly TenNinetyConfig _config;
     private readonly string _localEndpoint;
 
-    public AiderCoderAgent(TenNinetyConfig config, string localEndpoint)
-        : base(TimeSpan.FromMinutes(Math.Max(1, config.AttemptTimeoutMinutes)))
+    public AiderCoderAgent(
+        TenNinetyConfig config, string localEndpoint, string? authoritativeRepositoryPath = null)
+        : base(TimeSpan.FromMinutes(Math.Max(1, config.AttemptTimeoutMinutes)),
+            authoritativeRepositoryPath)
     {
         _config = config;
         _localEndpoint = localEndpoint;

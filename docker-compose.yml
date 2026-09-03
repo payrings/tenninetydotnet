@@ -1,10 +1,11 @@
 # 10/90 tenninety - local model serving.
 #
-# Two OpenAI-compatible servers (vLLM) expose different coder and reviewer model identifiers
-# on loopback. The defaults require two NVIDIA GPUs; set CODER_GPU_ID/REVIEWER_GPU_ID to select
-# them. On one GPU, use llama-swap instead so the models load one at a time.
-# The model network permits egress so vLLM can download model weights. It is not an executor
-# sandbox; pre-download the models and set `internal: true` if your deployment requires no egress.
+# Two OpenAI-compatible MODEL SERVERS expose different coder and reviewer identifiers. They are
+# not the disposable Coder/Reviewer execution containers. The Coder model server joins the
+# internal `tenninety-coder-model` network so the sandboxed Coder can reach
+# http://coder-model:8000/v1 without receiving general network egress. A separate server-egress
+# network permits model downloads; pre-populate the cache and remove that attachment for a fully
+# offline model server. The defaults require two NVIDIA GPUs; set CODER_GPU_ID/REVIEWER_GPU_ID.
 #
 #   docker compose up -d
 #   # then set .tenninety/config.json:
@@ -17,7 +18,7 @@
 #   #   }
 #
 services:
-  coder:
+  coder-model:
     image: vllm/vllm-openai:latest
     command: >
       --model ${CODER_MODEL:-Qwen/Qwen3.6-27B}
@@ -37,10 +38,11 @@ services:
     volumes:
       - hf-cache:/root/.cache/huggingface
     networks:
-      - isolated
+      - coder-model-internal
+      - model-server-egress
     restart: unless-stopped
 
-  reviewer:
+  reviewer-model:
     image: vllm/vllm-openai:latest
     command: >
       --model ${REVIEWER_MODEL:-mistralai/Devstral-Small-2507}
@@ -60,7 +62,7 @@ services:
     volumes:
       - hf-cache:/root/.cache/huggingface
     networks:
-      - isolated
+      - model-server-egress
     restart: unless-stopped
 
   # Optional: PostgreSQL matching the sample spec's technical hints.
@@ -71,13 +73,16 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     networks:
-      - isolated
+      - model-server-egress
     profiles:
       - sample-db
 
 networks:
-  isolated:
-    internal: false # required for on-demand model downloads; not a security boundary
+  coder-model-internal:
+    name: tenninety-coder-model
+    internal: true
+  model-server-egress:
+    internal: false # model-server downloads only; sandbox role containers never join it
 
 volumes:
   hf-cache:

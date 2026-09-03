@@ -76,8 +76,8 @@ arbitrates their disagreement.
 
 ## The coding agent: aider, OpenCode or Pi
 
-In live mode the Coder role runs inside a terminal coding agent – you choose which one with
-the `coder_agent` knob in `.tenninety/config.json`:
+In live mode the Coder role runs a terminal coding agent inside a hardened disposable container –
+you choose which one with the `coder_agent` knob in `.tenninety/config.json`:
 
 | `coder_agent` | Tool | Behaviour |
 | --- | --- | --- |
@@ -86,13 +86,15 @@ the `coder_agent` knob in `.tenninety/config.json`:
 | `"pi"` | [Pi](https://pi.dev) | print mode (`-p --no-session`); model follows pi's `provider/id` notation |
 
 Every agent receives the same instruction – the job card (goal, directives, acceptance
-criteria, repair advice, previous feedback) – edits the working tree directly, and hands back
-to the engine, which owns the commit (`--no-auto-commits`, ephemeral sessions). Attempt
-accounting, feedback accumulation and promotion are therefore identical no matter which agent
-typed. Per-agent settings live under `"aider"`, `"opencode"` and `"pi"`
+criteria, repair advice, previous feedback) – and edits only a disposable candidate tree mounted
+at `/workspace`. After the container is proven removed, trusted host code scans the opaque patch
+and promotes it under the already-held daemon lock. The agent never receives an authoritative
+repository path or commit capability. Per-agent settings live under `"aider"`, `"opencode"` and `"pi"`
 (`model`, `extra_args`) in `.tenninety/config.json`.
 OpenCode and Pi require an explicit `model` in live mode so the framework can mechanically
-verify that the coder and reviewer identifiers differ.
+verify that the coder and reviewer identifiers differ. Docker-mode `extra_args` are closed;
+Aider also receives `/dev/null` config and environment-file paths. Repository files remain
+untrusted tool input, so provider credentials should be narrowly scoped and never stored there.
 
 ## llama-swap – two models on one card
 
@@ -126,10 +128,19 @@ Every gate in the pipeline is mechanically enforced rather than requested:
 - Work packages execute on disposable branches and promote as ONE squashed commit –
   reverting a package is exact. A stuck job is quarantined as BLOCKED and a human is called
   instead of the queue inventing a way forward. In live mode the mechanical gate fails
-  closed: no discovered tests or empty commands mean failure, never silent success.
+   closed: no discovered tests or empty commands mean failure, never silent success.
+- Live Docker roles receive only an exact disposable candidate workspace. Coder joins the
+  pre-existing model network; Reviewer and Tester are `network=none`. Optional Restore runs first
+  in a separate operator-accepted restricted network, then a fresh offline Tester validates the
+  derived tree.
+- Every attempt is recorded in `.tenninety/sandbox-resources.json` before container creation.
+  Startup recovery runs under the daemon lock, inventories only this instance/repository label
+  scope, deletes only journal-proven direct-child workspaces, and refuses execution if cleanup
+  remains quarantined. `tenninety status` reports persisted recovery facts.
 
-The environment allowlist is defense in depth, not a sandbox. In this alpha, coding agents and
-mechanical tests still run as host processes with the current user's filesystem permissions.
+The container boundary is defense in depth, not a substitute for a patched least-privilege Docker
+deployment. An explicit `sandbox.mode=unsafe-host` selects the legacy host path and is prominently
+reported; Docker failures never fall back to it.
 
 ## Frontier blueprint (v3.2 Enterprise)
 
@@ -153,7 +164,7 @@ framework's `plan.json` contract exactly.
 | `src/Tenninety.Core` | Data contracts (`plan.json`, `state.json`, `config.json`), DAG validator, marker detection, secret sanitiser, audit log |
 | `src/Tenninety.Git` | Git-first state engine: branches, squash-only promotions, mechanical reverts |
 | `src/Tenninety.Frontier` | Frontier prompts (v3.2 Enterprise blueprint), OpenAI-compatible HTTP client, deterministic offline mock |
-| `src/Tenninety.Execution` | Agents – aider-backed Coder, local-model Reviewer, mechanical Tester – plus the 10/20-attempt Execution Engine, serial Orchestrator, Pivot & Revert services |
+| `src/Tenninety.Execution` | Docker Coder, offline agentic Reviewer, restricted Restore, offline mechanical Tester, startup recovery, plus the 10/20-attempt Execution Engine, serial Orchestrator, Pivot & Revert services |
 | `src/Tenninety.Tui` | Supervisor dashboard: queue view, system health, `[P]/[S]/[R]/[L]/[Q]` controls |
 | `src/Tenninety.Cli` | `tenninety` executable: `init`, `plan`, `start`, `status`, `pause/resume/stop`, `revert` |
 | `tests/Tenninety.Tests` | Validator, sanitiser, JSON extraction, git, engine, agent factory, pivot & store tests |

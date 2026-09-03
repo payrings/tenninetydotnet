@@ -21,9 +21,12 @@ namespace Tenninety.Execution;
 /// </summary>
 public abstract class CliCoderAgentBase : ICoderAgent
 {
-    protected CliCoderAgentBase(TimeSpan attemptTimeout)
+    private readonly string? _authoritativeRepositoryPath;
+
+    protected CliCoderAgentBase(TimeSpan attemptTimeout, string? authoritativeRepositoryPath = null)
     {
         AttemptTimeout = attemptTimeout < TimeSpan.Zero ? TimeSpan.FromMinutes(10) : attemptTimeout;
+        _authoritativeRepositoryPath = authoritativeRepositoryPath;
     }
 
     protected TimeSpan AttemptTimeout { get; }
@@ -40,14 +43,18 @@ public abstract class CliCoderAgentBase : ICoderAgent
     /// <summary>Hook for agents that need extra environment variables beyond the allowlist.</summary>
     protected virtual void ConfigureEnvironment(System.Diagnostics.ProcessStartInfo psi) { }
 
-    public async Task<CoderResult> ImplementAsync(WpContext ctx, CancellationToken ct = default)
+    public async Task<CoderResult> ImplementAsync(CoderRunContext ctx, CancellationToken ct = default)
     {
-        if (ArtefactPrefix is not null) ExcludeArtefactsFromGit(ctx.RepoPath, ArtefactPrefix);
+        ctx.Validate();
+        var repoPath = _authoritativeRepositoryPath
+            ?? throw new InvalidOperationException(
+                "the legacy host coder is unavailable without an explicit unsafe-host repository binding.");
+        if (ArtefactPrefix is not null) ExcludeArtefactsFromGit(repoPath, ArtefactPrefix);
 
         var psi = new ProcessStartInfo
         {
             FileName = Executable,
-            WorkingDirectory = ctx.RepoPath,
+            WorkingDirectory = repoPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -96,7 +103,7 @@ public abstract class CliCoderAgentBase : ICoderAgent
     }
 
     /// <summary>The job card rendered as the agent's instruction. Identical for every backend.</summary>
-    internal static string BuildInstruction(WpContext ctx)
+    internal static string BuildInstruction(CoderRunContext ctx)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"Work package {ctx.WorkPackage.Id} ({ctx.WorkPackage.Layer}) – {ctx.WorkPackage.Title}");

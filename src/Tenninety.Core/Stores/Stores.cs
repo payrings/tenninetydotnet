@@ -46,15 +46,14 @@ public sealed class PlanStore
 
 public sealed class StateStore
 {
+    private const int MaxStateBytes = 16 * 1024 * 1024;
     public string Path { get; }
     public StateStore(string? path = null) => Path = path ?? TenNinety.Resolve(TenNinety.StateFile);
 
     public bool Exists() => File.Exists(Path);
     public RuntimeState Load()
     {
-        var state = File.Exists(Path)
-            ? Json.Deserialize<RuntimeState>(File.ReadAllText(Path))
-            : new RuntimeState();
+        var state = LoadFileOrDefault();
         Validate(state);
         return state;
     }
@@ -76,9 +75,7 @@ public sealed class StateStore
         lock (this)
         {
             using var fileLock = AcquireFileLock();
-            var state = File.Exists(Path)
-                ? Json.Deserialize<RuntimeState>(File.ReadAllText(Path))
-                : new RuntimeState();
+            var state = LoadFileOrDefault();
             Validate(state);
             update(state);
             Validate(state);
@@ -107,14 +104,75 @@ public sealed class StateStore
     private void SaveUnlocked(RuntimeState state)
     {
         var tmp = $"{Path}.tmp.{Guid.NewGuid():N}";
-        File.WriteAllText(tmp, Json.Serialize(state));
+        var json = Json.Serialize(state);
+        if (System.Text.Encoding.UTF8.GetByteCount(json) > MaxStateBytes)
+            throw new InvalidOperationException("state.json exceeds its persisted size bound.");
+        File.WriteAllText(tmp, json);
         File.Move(tmp, Path, overwrite: true);
+    }
+
+    private RuntimeState LoadFileOrDefault()
+    {
+        if (!File.Exists(Path)) return new RuntimeState();
+        if (new FileInfo(Path).Length > MaxStateBytes)
+            throw new InvalidOperationException("state.json exceeds its persisted size bound.");
+        var bytes = File.ReadAllBytes(Path);
+        EnsureNoDuplicateFields(bytes);
+        return Json.Deserialize<RuntimeState>(System.Text.Encoding.UTF8.GetString(bytes));
+    }
+
+    private static void EnsureNoDuplicateFields(byte[] json)
+    {
+        var reader = new Utf8JsonReader(json, new JsonReaderOptions
+        {
+            AllowTrailingCommas = true,
+            CommentHandling = JsonCommentHandling.Skip,
+            MaxDepth = 64,
+        });
+        var objects = new Stack<HashSet<string>>();
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.StartObject)
+                objects.Push(new HashSet<string>(StringComparer.Ordinal));
+            else if (reader.TokenType == JsonTokenType.EndObject)
+                objects.Pop();
+            else if (reader.TokenType == JsonTokenType.PropertyName)
+            {
+                var name = reader.GetString() ?? "";
+                if (name.Length > 256 || !objects.Peek().Add(name))
+                    throw new InvalidOperationException(
+                        "state.json contains an overlong or duplicate field.");
+            }
+        }
     }
 
     private static void Validate(RuntimeState state)
     {
-        if (state.Attempts is null || state.QueueStatus is null)
+        if (state.Attempts is null || state.QueueStatus is null ||
+            state.SandboxRecovery is null || state.SandboxRecovery.Quarantined is null)
             throw new InvalidOperationException("state.json contains a null collection.");
+        var recovery = state.SandboxRecovery;
+        var allowedRecoveryStatuses = new HashSet<string>(StringComparer.Ordinal)
+            { "not-run", "not-required", "clean", "recovered", "quarantined" };
+        if (recovery.ContainersFound < 0 || recovery.ContainersRemoved < 0 ||
+            recovery.WorkspacesFound < 0 || recovery.WorkspacesRemoved < 0 ||
+            recovery.ContainersRemoved > recovery.ContainersFound ||
+            recovery.WorkspacesRemoved > recovery.WorkspacesFound ||
+            recovery.Quarantined.Count > 1000 || recovery.Detail is null ||
+            recovery.Detail.Length > 2000 || recovery.Detail.Any(char.IsControl) ||
+            !allowedRecoveryStatuses.Contains(recovery.Status ?? "") ||
+            recovery.Quarantined.Any(value => string.IsNullOrWhiteSpace(value) ||
+                value.Length > 128 || value.Any(char.IsControl)) ||
+            recovery.Quarantined.Distinct(StringComparer.Ordinal).Count() !=
+                recovery.Quarantined.Count ||
+            (recovery.Status == "quarantined") != (recovery.Quarantined.Count > 0) ||
+            (recovery.Status == "not-run"
+                ? recovery.LastRunUtc is not null
+                : !DateTimeOffset.TryParseExact(
+                    recovery.LastRunUtc, "O", System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var recoveryTime) ||
+                  recoveryTime.Offset != TimeSpan.Zero))
+            throw new InvalidOperationException("state.json contains invalid sandbox recovery facts.");
         foreach (var (wpId, attempt) in state.Attempts)
         {
             if (attempt is null || attempt.Feedback is null || attempt.Advice is null ||

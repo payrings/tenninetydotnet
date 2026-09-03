@@ -7,6 +7,11 @@ public sealed class ReviewResult
     public bool Passed { get; init; }
     public List<string> Reasons { get; init; } = new();
     public string ReviewerModel { get; init; } = "";
+
+    /// <summary>Exact committed candidate inspected by the reviewer. A passing result with a
+    /// missing or mismatched identity is rejected by the engine.</summary>
+    public string? CandidateSha { get; init; }
+
 }
 
 public sealed class TestRunResult
@@ -15,6 +20,15 @@ public sealed class TestRunResult
     public int ExitCode { get; init; }
     public string OutputTail { get; init; } = "";
     public string Command { get; init; } = "";
+
+    /// <summary>Exact candidate commit SHA the tester ran against, supplied by trusted
+    /// orchestration. A missing or mismatched value is never accepted as a passing gate by
+    /// the engine or the hotfix flow; it is never "repaired" from the current HEAD.</summary>
+    public string? CandidateSha { get; init; }
+
+    /// <summary>Deterministic digest of accepted Restore-derived output, when the optional
+    /// restricted Restore phase ran.</summary>
+    public string? RestoreOutputSha256 { get; init; }
 }
 
 public sealed class CoderResult

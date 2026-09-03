@@ -2,6 +2,8 @@ using Tenninety.Core;
 using Tenninety.Core.Models;
 using Tenninety.Core.Stores;
 using Tenninety.Execution;
+using Tenninety.Execution.Coding;
+using Tenninety.Execution.Testing;
 using Tenninety.Frontier;
 using Tenninety.Git;
 
@@ -10,15 +12,28 @@ namespace Tenninety.Tests;
 /// <summary>Scripted fakes for deterministic engine tests.</summary>
 public sealed class SpyCoder : ICoderAgent
 {
-    public readonly List<WpContext> Contexts = new();
+    private readonly string _repoPath;
+    private readonly IGitService? _git;
+    public readonly List<CoderRunContext> Contexts = new();
 
-    public Task<CoderResult> ImplementAsync(WpContext ctx, CancellationToken ct = default)
+    public SpyCoder(string repoPath, IGitService? git = null)
+    {
+        _repoPath = repoPath;
+        _git = git;
+    }
+
+    public Task<CoderResult> ImplementAsync(CoderRunContext ctx, CancellationToken ct = default)
     {
         Contexts.Add(ctx);
-        var file = System.IO.Path.Combine(ctx.RepoPath, "app", $"{ctx.WorkPackage.Id}.txt");
+        var file = System.IO.Path.Combine(_repoPath, "app", $"{ctx.WorkPackage.Id}.txt");
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(file)!);
         File.WriteAllText(file, $"attempt {ctx.Attempt}\n");
-        return Task.FromResult(new CoderResult { ProducedChanges = true, Summary = "spy change" });
+        return Task.FromResult(new CoderResult
+        {
+            ProducedChanges = true,
+            Summary = "spy change",
+            CommitSha = _git?.CommitAll($"{ctx.WorkPackage.Id}: spy change [attempt {ctx.Attempt}]"),
+        });
     }
 }
 
@@ -32,12 +47,13 @@ public sealed class ScriptedReviewer : IReviewerAgent
     /// </param>
     public ScriptedReviewer(int failAttempts) => _failAttempts = failAttempts;
 
-    public Task<ReviewResult> ReviewAsync(WpContext ctx, CancellationToken ct = default) =>
+    public Task<ReviewResult> ReviewAsync(ReviewerRunContext ctx, CancellationToken ct = default) =>
         Task.FromResult(new ReviewResult
         {
             Passed = ctx.Feedback.Count >= _failAttempts,
             Reasons = ctx.Feedback.Count >= _failAttempts ? new List<string>() : new List<string> { "not good enough yet" },
             ReviewerModel = "scripted",
+            CandidateSha = ctx.Candidate.CommitSha,
         });
 }
 
@@ -46,14 +62,18 @@ public sealed class ScriptedTester : ITesterAgent
     private readonly int _failAttempts;
     public ScriptedTester(int failAttempts) => _failAttempts = failAttempts;
 
-    public Task<TestRunResult> RunTestsAsync(WpContext ctx, CancellationToken ct = default) =>
-        Task.FromResult(new TestRunResult
+    public Task<TestRunResult> RunTestsAsync(TesterRunContext ctx, CancellationToken ct = default)
+    {
+        ctx.Validate();
+        return Task.FromResult(new TestRunResult
         {
             Passed = ctx.Attempt > _failAttempts,
             ExitCode = ctx.Attempt > _failAttempts ? 0 : 1,
             OutputTail = "simulated test failure",
             Command = "(scripted)",
+            CandidateSha = ctx.Candidate.CommitSha,
         });
+    }
 }
 
 public sealed class EngineHarness : IDisposable
@@ -65,7 +85,7 @@ public sealed class EngineHarness : IDisposable
     public TenNinetyConfig Config { get; }
     public RuntimeState State { get; } = new();
     public Plan Plan { get; }
-    public SpyCoder Coder { get; } = new();
+    public SpyCoder Coder { get; }
 
     public EngineHarness(int maxAttempts = 3, int maxTotal = 6)
     {
@@ -76,6 +96,7 @@ public sealed class EngineHarness : IDisposable
         Directory.CreateDirectory(System.IO.Path.Combine(Dir.Root, ".tenninety"));
         File.WriteAllText(System.IO.Path.Combine(Dir.Root, "README.md"), "demo\n");
         Git.CommitAll("initial");
+        Coder = new SpyCoder(Dir.Root);
 
         Config = new TenNinetyConfig
         {
@@ -208,7 +229,7 @@ public class ExecutionEngineTests
 
         Assert.Equal("main", h.Git.CurrentBranch());
         Assert.True(h.Git.BranchExists("work/WP-001"));
-        Assert.Equal(1, h.States.Load().Attempts["WP-001"].Total);
+        Assert.Equal(0, h.States.Load().Attempts["WP-001"].Total);
         Assert.Equal(TenNinety.WpStatus.Pending, wp.Status);
         Assert.Null(h.States.Load().CurrentWp);
     }
@@ -217,7 +238,7 @@ public class ExecutionEngineTests
     public async Task Passing_tester_cannot_mutate_files_after_review()
     {
         using var h = new EngineHarness();
-        var engine = h.CreateEngine(tester: new MutatingPassingTester());
+        var engine = h.CreateEngine(tester: new MutatingPassingTester(h.Dir.Root));
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => engine.ExecuteWpAsync(h.Plan.WorkPackages[0], h.State, CancellationToken.None));
@@ -233,7 +254,7 @@ public class ExecutionEngineTests
     {
         using var h = new EngineHarness();
         var engine = new ExecutionEngine(
-            h.Git, h.Config, new MockFrontierClient(), new BlockingPartialCoder(),
+            h.Git, h.Config, new MockFrontierClient(), new BlockingPartialCoder(h.Dir.Root),
             new ScriptedReviewer(0), new ScriptedTester(0), h.States, h.Audit);
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
 
@@ -246,32 +267,221 @@ public class ExecutionEngineTests
         Assert.Contains("interrupted checkpoint", h.Git.FindCommit("work/WP-001")!.Subject);
     }
 
+    // ---- Phase 5A: exact candidate identity at the mechanical gate ----------------------
+
+    private sealed class RecordingTester(List<TesterRunContext> seen, string? forcedSha, bool forceValidShape)
+        : ITesterAgent
+    {
+        public Task<TestRunResult> RunTestsAsync(TesterRunContext ctx, CancellationToken ct = default)
+        {
+            seen.Add(ctx);
+            // forcedSha null → return the requested identity; otherwise return the forced one.
+            var returned = forcedSha ?? ctx.Candidate.CommitSha;
+            return Task.FromResult(new TestRunResult
+            {
+                Passed = true,
+                ExitCode = 0,
+                Command = "(recording)",
+                CandidateSha = forceValidShape ? returned : null,
+            });
+        }
+    }
+
+    [Fact]
+    public async Task The_engine_passes_the_reviewed_tip_to_the_tester()
+    {
+        using var h = new EngineHarness(maxAttempts: 3);
+        var seen = new List<TesterRunContext>();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), h.Coder,
+            new ScriptedReviewer(0), new RecordingTester(seen, forcedSha: null, forceValidShape: true),
+            h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(h.Plan.WorkPackages[0], h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Done, outcome);
+        var ctx = Assert.Single(seen);
+        Assert.Equal("WP-001", ctx.WorkPackageId);
+        Assert.Equal("work/WP-001", ctx.Candidate.WorkBranch);
+        // The requested candidate is the reviewed tip: the coder commit for this attempt.
+        Assert.True(Tenninety.Execution.Testing.TesterRunContext.IsFullCommitSha(ctx.Candidate.CommitSha));
+        var candidateCommit = h.Git.FindCommit(ctx.Candidate.CommitSha);
+        Assert.NotNull(candidateCommit);
+        Assert.Contains("[attempt 1]", candidateCommit!.Subject);
+        // The recorded base is main's tip BEFORE the promotion (the initial fixture commit).
+        Assert.Equal("initial", h.Git.FindCommit(ctx.Candidate.MainBaseSha)!.Subject);
+    }
+
+    [Fact]
+    public async Task The_engine_rejects_a_pass_bound_to_a_wrong_candidate_sha()
+    {
+        using var h = new EngineHarness(maxAttempts: 1, maxTotal: 1);
+        var seen = new List<TesterRunContext>();
+        var wrongSha = new string('f', 40);
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), h.Coder,
+            new ScriptedReviewer(0), new RecordingTester(seen, forcedSha: wrongSha, forceValidShape: true),
+            h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(h.Plan.WorkPackages[0], h.State, CancellationToken.None);
+
+        // The pass is not accepted: no promotion, the mismatch is fed back as tester failure.
+        Assert.Equal(WpOutcome.Blocked, outcome);
+        Assert.DoesNotContain(h.Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");
+        Assert.Contains(h.Audit.ReadTail(100), e =>
+            e.Event == "TESTS_FAILED" && e.Detail.Contains("candidate identity"));
+        var feedback = h.States.Load().Attempts["WP-001"].Feedback;
+        Assert.Contains(feedback, f => f.Contains("candidate identity"));
+        Assert.Equal("main", h.Git.CurrentBranch());
+    }
+
+    [Fact]
+    public async Task The_engine_rejects_a_pass_without_any_candidate_sha()
+    {
+        using var h = new EngineHarness(maxAttempts: 1, maxTotal: 1);
+        var seen = new List<TesterRunContext>();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), h.Coder,
+            new ScriptedReviewer(0), new RecordingTester(seen, forcedSha: null, forceValidShape: false),
+            h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(h.Plan.WorkPackages[0], h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Blocked, outcome);
+        Assert.DoesNotContain(h.Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");
+        Assert.Contains(h.Audit.ReadTail(100), e =>
+            e.Event == "TESTS_FAILED" && e.Detail.Contains("candidate identity"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_engine_rejects_a_reviewer_without_the_exact_candidate_identity(
+        bool omitIdentity)
+    {
+        using var h = new EngineHarness(maxAttempts: 1, maxTotal: 1);
+        var testerCalls = new List<TesterRunContext>();
+        var reviewer = new IdentityReviewer(omitIdentity ? null : new string('f', 40));
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), h.Coder, reviewer,
+            new RecordingTester(testerCalls, forcedSha: null, forceValidShape: true),
+            h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(
+            h.Plan.WorkPackages[0], h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Blocked, outcome);
+        Assert.Empty(testerCalls);
+        Assert.DoesNotContain(h.Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");
+        Assert.Contains(h.Audit.ReadTail(100), e =>
+            e.Event == "REVIEW_FAILED" && e.Detail.Contains("candidate identity"));
+    }
+
+    [Fact]
+    public async Task Coder_infrastructure_failure_does_not_consume_a_candidate_attempt()
+    {
+        using var h = new EngineHarness(maxAttempts: 1, maxTotal: 1);
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), new InfrastructureCoder(),
+            new ScriptedReviewer(0), new ScriptedTester(0), h.States, h.Audit);
+
+        await Assert.ThrowsAsync<CoderInfrastructureException>(() =>
+            engine.ExecuteWpAsync(h.Plan.WorkPackages[0], h.State, CancellationToken.None));
+
+        var attempt = h.States.Load().Attempts["WP-001"];
+        Assert.Equal(0, attempt.Count);
+        Assert.Equal(0, attempt.Total);
+        Assert.Equal(TenNinety.WpStatus.Pending, h.Plan.WorkPackages[0].Status);
+    }
+
+    [Fact]
+    public async Task Docker_reviewer_cancellation_never_checkpoints_authoritative_dirt()
+    {
+        using var h = new EngineHarness();
+        h.Config.ProviderMode = "aider";
+        h.Config.Sandbox.Mode = "docker";
+        using var cts = new CancellationTokenSource();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), new SpyCoder(h.Dir.Root, h.Git),
+            new CancellingMutatingReviewer(h.Dir.Root, cts), new ScriptedTester(0),
+            h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(h.Plan.WorkPackages[0], h.State, cts.Token);
+
+        Assert.Equal(WpOutcome.Stopped, outcome);
+        Assert.Equal("work/WP-001", h.Git.CurrentBranch());
+        Assert.False(h.Git.IsClean());
+        Assert.DoesNotContain("interrupted checkpoint",
+            h.Git.FindCommit("work/WP-001")!.Subject);
+    }
+
     private sealed class AlwaysFailReviewer : IReviewerAgent
     {
-        public Task<ReviewResult> ReviewAsync(WpContext ctx, CancellationToken ct = default) =>
-            Task.FromResult(new ReviewResult { Passed = false, Reasons = { "hopeless" } });
+        public Task<ReviewResult> ReviewAsync(ReviewerRunContext ctx, CancellationToken ct = default) =>
+            Task.FromResult(new ReviewResult
+            {
+                Passed = false,
+                Reasons = { "hopeless" },
+                CandidateSha = ctx.Candidate.CommitSha,
+            });
     }
 
     private sealed class ThrowingReviewer : IReviewerAgent
     {
-        public Task<ReviewResult> ReviewAsync(WpContext ctx, CancellationToken ct = default) =>
+        public Task<ReviewResult> ReviewAsync(ReviewerRunContext ctx, CancellationToken ct = default) =>
             throw new InvalidOperationException("review service unavailable");
     }
 
-    private sealed class MutatingPassingTester : ITesterAgent
+    private sealed class IdentityReviewer(string? candidateSha) : IReviewerAgent
     {
-        public Task<TestRunResult> RunTestsAsync(WpContext ctx, CancellationToken ct = default)
+        public Task<ReviewResult> ReviewAsync(
+            ReviewerRunContext ctx, CancellationToken ct = default) =>
+            Task.FromResult(new ReviewResult
+            {
+                Passed = true,
+                ReviewerModel = "identity-test",
+                CandidateSha = candidateSha,
+            });
+    }
+
+    private sealed class InfrastructureCoder : ICoderAgent
+    {
+        public Task<CoderResult> ImplementAsync(
+            CoderRunContext ctx, CancellationToken ct = default) =>
+            throw new CoderInfrastructureException("simulated Docker startup failure");
+    }
+
+    private sealed class CancellingMutatingReviewer(
+        string repoPath, CancellationTokenSource cancellation) : IReviewerAgent
+    {
+        public Task<ReviewResult> ReviewAsync(
+            ReviewerRunContext ctx, CancellationToken ct = default)
         {
-            File.WriteAllText(System.IO.Path.Combine(ctx.RepoPath, "post-review.txt"), "unreviewed");
-            return Task.FromResult(new TestRunResult { Passed = true, ExitCode = 0 });
+            File.WriteAllText(System.IO.Path.Combine(repoPath, "reviewer-host-dirt.txt"), "dirt");
+            cancellation.Cancel();
+            throw new OperationCanceledException(cancellation.Token);
         }
     }
 
-    private sealed class BlockingPartialCoder : ICoderAgent
+    private sealed class MutatingPassingTester(string repoPath) : ITesterAgent
     {
-        public async Task<CoderResult> ImplementAsync(WpContext ctx, CancellationToken ct = default)
+        public Task<TestRunResult> RunTestsAsync(TesterRunContext ctx, CancellationToken ct = default)
         {
-            File.WriteAllText(System.IO.Path.Combine(ctx.RepoPath, "partial.txt"), "partial");
+            File.WriteAllText(System.IO.Path.Combine(repoPath, "post-review.txt"), "unreviewed");
+            return Task.FromResult(new TestRunResult
+            {
+                Passed = true,
+                ExitCode = 0,
+                CandidateSha = ctx.Candidate.CommitSha,
+            });
+        }
+    }
+
+    private sealed class BlockingPartialCoder(string repoPath) : ICoderAgent
+    {
+        public async Task<CoderResult> ImplementAsync(CoderRunContext ctx, CancellationToken ct = default)
+        {
+            File.WriteAllText(System.IO.Path.Combine(repoPath, "partial.txt"), "partial");
             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return new CoderResult();
         }
@@ -313,23 +523,24 @@ public class BranchLifecycleRegressionTests
         File.WriteAllText(System.IO.Path.Combine(h.Dir.Root, "main-after-pause.txt"), "required");
         h.Git.CommitAll("advance main while paused");
         h.State.Paused = false;
-        var engine = h.CreateEngine(tester: new RequiresFileTester("main-after-pause.txt"));
+        var engine = h.CreateEngine(tester: new RequiresFileTester("main-after-pause.txt", h.Dir.Root));
 
         var outcome = await engine.ExecuteWpAsync(wp, h.State, CancellationToken.None);
 
         Assert.Equal(WpOutcome.Done, outcome);
     }
 
-    private sealed class RequiresFileTester(string fileName) : ITesterAgent
+    private sealed class RequiresFileTester(string fileName, string repoPath) : ITesterAgent
     {
-        public Task<TestRunResult> RunTestsAsync(WpContext ctx, CancellationToken ct = default)
+        public Task<TestRunResult> RunTestsAsync(TesterRunContext ctx, CancellationToken ct = default)
         {
-            var exists = File.Exists(System.IO.Path.Combine(ctx.RepoPath, fileName));
+            var exists = File.Exists(System.IO.Path.Combine(repoPath, fileName));
             return Task.FromResult(new TestRunResult
             {
                 Passed = exists,
                 ExitCode = exists ? 0 : 1,
                 OutputTail = exists ? "present" : "required main file missing",
+                CandidateSha = ctx.Candidate.CommitSha,
             });
         }
     }

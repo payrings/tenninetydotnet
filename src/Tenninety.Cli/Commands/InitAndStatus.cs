@@ -2,6 +2,7 @@ using Spectre.Console;
 using Tenninety.Core;
 using Tenninety.Core.Security;
 using Tenninety.Execution;
+using Tenninety.Execution.Sandbox;
 
 namespace Tenninety.Cli.Commands;
 
@@ -110,6 +111,34 @@ public static class StatusCommand
             new Markup($"[b]Tree[/] {(ws.Git.IsClean() ? "[green]clean[/]" : "[red]dirty[/]")}"),
             new Markup($"[b]Spec hash[/] {SpecHash(ws)}"),
             new Markup($"[b]Frontier[/] {Markup.Escape(ws.Config.FrontierEndpoint)}"));
+        var sandbox = ws.Config.Sandbox;
+        var sandboxMode = SandboxStatusText.SandboxMode(ws.Config);
+        var sandboxImages = SandboxStatusText.SandboxImages(ws.Config);
+        var sandboxRecovery = SandboxStatusText.SandboxRecovery(
+            ws.Config, state.SandboxRecovery);
+        health.AddRow(
+            new Markup($"[b]Sandbox[/] {(sandboxMode.Warning
+                ? $"[red]{Markup.Escape(sandboxMode.Text)}[/]"
+                : Markup.Escape(sandboxMode.Text))}"),
+            new Markup($"[b]Sandbox images[/] {(sandboxImages.Warning
+                ? $"[yellow]{Markup.Escape(sandboxImages.Text)}[/]"
+                : Markup.Escape(sandboxImages.Text))}"),
+            new Markup($"[b]Workspace root[/] {Markup.Escape(string.IsNullOrWhiteSpace(sandbox.WorkspaceRoot) ? "(default)" : sandbox.WorkspaceRoot)}"),
+            new Markup($"[b]Max workspace[/] {sandbox.MaxWorkspaceMb} MB"));
+        health.AddRow(
+            new Markup($"[b]Sandbox recovery[/] {(sandboxRecovery.Warning
+                ? $"[red]{Markup.Escape(sandboxRecovery.Text)}[/]"
+                : Markup.Escape(sandboxRecovery.Text))}"),
+            new Markup($"[b]Restore[/] {(sandbox.Roles.Tester.Restore.Enabled
+                ? "[yellow]restricted network enabled[/]"
+                : "disabled (offline Tester)")}"),
+            new Markup($"[b]Recovered containers[/] {state.SandboxRecovery.ContainersRemoved}/{state.SandboxRecovery.ContainersFound}"),
+            new Markup($"[b]Recovered workspaces[/] {state.SandboxRecovery.WorkspacesRemoved}/{state.SandboxRecovery.WorkspacesFound}"));
+        health.AddRow(
+            new Markup($"[b]Repository scope[/] {Markup.Escape(SandboxPolicy.RepositoryIdentity(ws.Root))}"),
+            new Markup($"[b]Restore network[/] {Markup.Escape(string.IsNullOrWhiteSpace(sandbox.Roles.Tester.Restore.NetworkName) ? "(not configured)" : sandbox.Roles.Tester.Restore.NetworkName)}"),
+            new Markup($"[b]Restore feeds[/] {sandbox.Roles.Tester.Restore.ApprovedFeeds.Count}"),
+            new Markup($"[b]Recovery time[/] {Markup.Escape(state.SandboxRecovery.LastRunUtc ?? "never")}"));
 
         var table = new Table().Border(TableBorder.Rounded)
             .Title($"Queue — {plan.WorkPackages.Count} work packages");

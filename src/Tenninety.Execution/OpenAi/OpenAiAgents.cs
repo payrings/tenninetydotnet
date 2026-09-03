@@ -15,7 +15,13 @@ namespace Tenninety.Execution.OpenAi;
 /// </summary>
 public interface IChatClient
 {
-    Task<string> CompleteAsync(string model, string system, string user, CancellationToken ct);
+    Task<string> CompleteAsync(
+        string model, string system, string user, long maxResponseBytes, CancellationToken ct);
+}
+
+public sealed class ChatResponseLimitExceededException : Exception
+{
+    public ChatResponseLimitExceededException(string message) : base(message) { }
 }
 
 public sealed class LocalChatClient : IChatClient
@@ -30,8 +36,11 @@ public sealed class LocalChatClient : IChatClient
             _http.DefaultRequestHeaders.UserAgent.ParseAdd("tenninety-local/3.2");
     }
 
-    public async Task<string> CompleteAsync(string model, string system, string user, CancellationToken ct)
+    public async Task<string> CompleteAsync(
+        string model, string system, string user, long maxResponseBytes, CancellationToken ct)
     {
+        if (maxResponseBytes is < 1 or > 16L * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(maxResponseBytes));
         var payload = new
         {
             model,
@@ -44,8 +53,14 @@ public sealed class LocalChatClient : IChatClient
         };
         var json = System.Text.Json.JsonSerializer.Serialize(payload);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
-        using var response = await _http.PostAsync("chat/completions", httpContent, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
+        {
+            Content = httpContent,
+        };
+        using var response = await _http.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, ct);
+        var envelopeLimit = checked(maxResponseBytes * 6 + 65_536);
+        var body = await ReadBoundedAsync(response.Content, envelopeLimit, ct);
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(
                 $"local model call failed ({(int)response.StatusCode}): " +
@@ -57,7 +72,33 @@ public sealed class LocalChatClient : IChatClient
             .GetProperty("message")
             .GetProperty("content")
             .GetString();
-        return content ?? throw new InvalidOperationException("local model returned empty content.");
+        if (content is null)
+            throw new InvalidOperationException("local model returned empty content.");
+        if (Encoding.UTF8.GetByteCount(content) > maxResponseBytes)
+            throw new ChatResponseLimitExceededException(
+                "local model content exceeded the configured response bound.");
+        return content;
+    }
+
+    private static async Task<string> ReadBoundedAsync(
+        HttpContent content, long maxBytes, CancellationToken ct)
+    {
+        if (content.Headers.ContentLength is > 0 and var declared && declared > maxBytes)
+            throw new ChatResponseLimitExceededException(
+                "local model response exceeded the configured transport bound.");
+        await using var stream = await content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var block = new byte[81920];
+        while (true)
+        {
+            var read = await stream.ReadAsync(block, ct);
+            if (read == 0) break;
+            if (buffer.Length + read > maxBytes)
+                throw new ChatResponseLimitExceededException(
+                    "local model response exceeded the configured transport bound.");
+            buffer.Write(block, 0, read);
+        }
+        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
     }
 
     private static string Truncate(string s) => s.Length <= 300 ? s : s[..300] + "…";
@@ -82,39 +123,49 @@ public sealed class OpenAiReviewerAgent : IReviewerAgent
 
     private readonly IChatClient _chat;
     private readonly string _model;
+    private readonly Func<ReviewerRunContext, string>? _diffProvider;
 
-    public OpenAiReviewerAgent(IChatClient chat, string model, int attemptTimeoutMinutes = 10)
+    public OpenAiReviewerAgent(
+        IChatClient chat, string model, int attemptTimeoutMinutes = 10,
+        Func<ReviewerRunContext, string>? diffProvider = null)
     {
         _chat = chat;
         _model = model;
         _attemptTimeout = TimeSpan.FromMinutes(Math.Max(1, attemptTimeoutMinutes));
+        _diffProvider = diffProvider;
     }
 
     private readonly TimeSpan _attemptTimeout;
 
-    public async Task<ReviewResult> ReviewAsync(WpContext ctx, CancellationToken ct = default)
+    public async Task<ReviewResult> ReviewAsync(ReviewerRunContext ctx, CancellationToken ct = default)
     {
-        if (ctx.DiffPatch.Contains("[diff truncated", StringComparison.OrdinalIgnoreCase))
+        ctx.Validate();
+        var diffPatch = _diffProvider?.Invoke(ctx)
+            ?? throw new InvalidOperationException(
+                "the legacy host reviewer is unavailable without an explicit unsafe-host diff provider.");
+        if (diffPatch.Contains("[diff truncated", StringComparison.OrdinalIgnoreCase))
             return new ReviewResult
             {
                 Passed = false,
                 Reasons = { "diff was truncated; complete review is required before promotion." },
                 ReviewerModel = _model,
+                CandidateSha = ctx.Candidate.CommitSha,
             };
 
         var sb = new StringBuilder();
         sb.AppendLine("WORK PACKAGE:");
         sb.AppendLine(Json.Serialize(ctx.WorkPackage));
         sb.AppendLine("CHANGES ON WORK BRANCH – unified diff vs main (bounded, sanitised):");
-        sb.AppendLine(string.IsNullOrWhiteSpace(ctx.DiffPatch)
+        sb.AppendLine(string.IsNullOrWhiteSpace(diffPatch)
             ? "(no diff available – you cannot verify the change; verdict must be FAIL with reason \"no diff\")"
-            : ctx.DiffPatch);
+            : diffPatch);
         sb.AppendLine("Review now. Respond with only the JSON verdict object.");
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(_attemptTimeout);
         var prompt = Core.Security.Sanitizer.SanitizeText(sb.ToString());
-        var response = await _chat.CompleteAsync(_model, System, prompt, timeoutCts.Token);
+        var response = await _chat.CompleteAsync(
+            _model, System, prompt, 1024L * 1024, timeoutCts.Token);
         var json = Frontier.JsonExtractor.ExtractFirstJsonObject(response);
         using var doc = JsonDocument.Parse(json);
         var verdict = doc.RootElement.GetProperty("verdict").GetString()?.Trim().ToUpperInvariant();
@@ -134,6 +185,7 @@ public sealed class OpenAiReviewerAgent : IReviewerAgent
             Passed = verdict == "PASS" && protocolValid,
             Reasons = reasons,
             ReviewerModel = _model,
+            CandidateSha = ctx.Candidate.CommitSha,
         };
     }
 

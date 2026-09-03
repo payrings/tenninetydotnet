@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Tenninety.Core\Tenninety.Core.csproj" />
+    <ProjectReference Include="..\..\src\Tenninety.Cli\Tenninety.Cli.csproj" />
     <ProjectReference Include="..\..\src\Tenninety.Git\Tenninety.Git.csproj" />
     <ProjectReference Include="..\..\src\Tenninety.Execution\Tenninety.Execution.csproj" />
     <ProjectReference Include="..\..\src\Tenninety.Frontier\Tenninety.Frontier.csproj" />

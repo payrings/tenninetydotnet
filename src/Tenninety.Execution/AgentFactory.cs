@@ -1,9 +1,13 @@
 using Tenninety.Core.Models;
 using Tenninety.Execution.Aider;
+using Tenninety.Execution.Coding;
 using Tenninety.Execution.Mock;
 using Tenninety.Execution.OpenAi;
 using Tenninety.Execution.OpenCode;
 using Tenninety.Execution.Pi;
+using Tenninety.Execution.Reviewing;
+using Tenninety.Execution.Testing;
+using Tenninety.Git;
 
 namespace Tenninety.Execution;
 
@@ -24,7 +28,6 @@ public sealed class AgentFactory
 {
     private readonly TenNinetyConfig _config;
     private readonly string _providerMode;
-    private bool _distinctModelsValidated;
 
     public AgentFactory(TenNinetyConfig config)
     {
@@ -72,7 +75,7 @@ public sealed class AgentFactory
 
     private void ValidateLiveConfiguration()
     {
-        if (IsMock || _distinctModelsValidated) return;
+        if (IsMock) return;
 
         if (CoderAgent == "opencode" && string.IsNullOrWhiteSpace(_config.OpenCode.Model) ||
             CoderAgent == "pi" && string.IsNullOrWhiteSpace(_config.Pi.Model))
@@ -99,8 +102,6 @@ public sealed class AgentFactory
             throw new InvalidOperationException(
                 "the coder and reviewer identifiers must differ " +
                 $"(both resolve to '{coderIdentity}'). Configure genuinely different models for independent review.");
-
-        _distinctModelsValidated = true;
     }
 
     private string CoderAgent => _config.CoderAgent.Trim().ToLowerInvariant();
@@ -111,39 +112,114 @@ public sealed class AgentFactory
         return slash >= 0 ? model[(slash + 1)..] : model;
     }
 
-    public ICoderAgent CreateCoder()
+    /// <summary>Builds a Coder without any implicit host fallback. Docker mode requires the
+    /// authoritative Git service and the orchestrator's already-held daemon-lock lease so the
+    /// trusted gate can promote only after removal. Mock and explicit unsafe-host never touch
+    /// Docker.</summary>
+    public ICoderAgent CreateCoder(
+        IGitService authoritativeGit,
+        DaemonLockLease? lease = null,
+        Action<string>? log = null)
     {
-        if (IsMock) return new MockCoderAgent();
+        ArgumentNullException.ThrowIfNull(authoritativeGit);
+        if (IsMock) return new MockCoderAgent(authoritativeGit.RepoPath);
         ValidateLiveConfiguration();
+        if (CoderAgent is not ("aider" or "opencode" or "pi"))
+            throw new NotSupportedException(
+                $"unknown coder_agent '{CoderAgent}' - supported: aider, opencode, pi.");
+        if (_config.Sandbox.NormalizedMode == "docker")
+        {
+            _config.Sandbox.ValidateLiveDocker();
+            return new SandboxCoderGate(
+                authoritativeGit,
+                _config,
+                lease ?? throw new InvalidOperationException(
+                    "live Docker Coder construction requires the orchestrator's existing " +
+                    "daemon-lock lease; a nested acquire or host fallback is forbidden."),
+                log);
+        }
+
+        log?.Invoke("WARNING: sandbox.mode=unsafe-host; the Coder runs on the authoritative host checkout.");
         var timeout = TimeSpan.FromMinutes(Math.Max(1, _config.AttemptTimeoutMinutes));
         return CoderAgent switch
         {
-            "aider" => new AiderCoderAgent(_config, EndpointFor("coder")),
+            "aider" => new AiderCoderAgent(
+                _config, EndpointFor("coder"), authoritativeGit.RepoPath),
             "opencode" => new OpenCode.OpenCodeCoderAgent(
-                _config.OpenCode.Model, _config.OpenCode.ExtraArgs, timeout),
+                _config.OpenCode.Model, _config.OpenCode.ExtraArgs, timeout,
+                authoritativeGit.RepoPath),
             "pi" => new Pi.PiCoderAgent(
-                _config.Pi.Model, _config.Pi.ExtraArgs, timeout),
+                _config.Pi.Model, _config.Pi.ExtraArgs, timeout,
+                authoritativeGit.RepoPath),
             var other => throw new NotSupportedException(
                 $"unknown coder_agent '{other}' – supported: aider, opencode, pi."),
         };
     }
 
-    public IReviewerAgent CreateReviewer()
+    public IReviewerAgent CreateReviewer(
+        IGitService authoritativeGit, Action<string>? log = null)
     {
+        ArgumentNullException.ThrowIfNull(authoritativeGit);
         if (IsMock) return new MockReviewerAgent(_config.Mock.ReviewerFailAttempts, _config.Mock.ReviewerIgnoresAdvice);
         ValidateLiveConfiguration();
+        var chat = new LocalChatClient(HttpClientFor(EndpointFor("reviewer")));
+        var model = string.IsNullOrWhiteSpace(_config.LocalModels.Reviewer)
+            ? "reviewer"
+            : _config.LocalModels.Reviewer;
+        if (_config.Sandbox.NormalizedMode == "docker")
+        {
+            _config.Sandbox.ValidateLiveDocker();
+            return new SandboxReviewerGate(authoritativeGit, _config, chat, model, log);
+        }
+        log?.Invoke(
+            "WARNING: sandbox.mode=unsafe-host; the Reviewer reads a host-derived patch.");
         return new OpenAiReviewerAgent(
-            new LocalChatClient(HttpClientFor(EndpointFor("reviewer"))),
-            string.IsNullOrWhiteSpace(_config.LocalModels.Reviewer) ? "reviewer" : _config.LocalModels.Reviewer,
-            _config.AttemptTimeoutMinutes);
+            chat,
+            model,
+            _config.AttemptTimeoutMinutes,
+            ctx => authoritativeGit.DiffPatchAgainstMain(ctx.Candidate.WorkBranch));
     }
 
-    public ITesterAgent CreateTester(Action<string>? log = null) =>
-        new ShellTesterAgent(
-            _config.TestCommand,
-            IsMock ? _config.Mock.TesterFailAttempts : 0,
-            log,
-            failWhenNoProject: !IsMock,
-            buildCommand: IsMock ? "" : _config.BuildCommand,
-            attemptTimeout: TimeSpan.FromMinutes(Math.Max(1, _config.AttemptTimeoutMinutes) * 2));
+    /// <summary>
+    /// Builds the Tester implementation for the configured modes (fail closed):
+    ///   - mock provider            → <see cref="Mock.MockTesterAgent"/> (no Docker, no shell);
+    ///   - live docker mode         → <see cref="Testing.SandboxTesterGate"/> (offline Docker
+    ///     sandbox; Docker resources are created lazily at run time only);
+    ///   - explicit unsafe-host     → <see cref="Testing.UnsafeHostTesterAgent"/> (prominent warning).
+    /// Unknown modes fail closed; unsafe-host is NEVER a fallback for Docker failures, failed
+    /// preflight, invalid images, failed workspace creation, timeouts or enabled restore.
+    /// Docker failures surface as failed gate results, never as host execution.
+    /// Trusted callers supply the authoritative Git dependency; the Tester context never
+    /// carries the repository path.
+    /// </summary>
+    public ITesterAgent CreateTester(IGitService authoritativeGit, Action<string>? log = null)
+    {
+        ArgumentNullException.ThrowIfNull(authoritativeGit);
+
+        // Mock selection must never touch Docker: no executable resolution, no settings, no
+        // temporary directories — only the deterministic in-process implementation.
+        if (IsMock) return new MockTesterAgent(_config.Mock.TesterFailAttempts);
+
+        return _config.Sandbox.NormalizedMode switch
+        {
+            "unsafe-host" => new UnsafeHostTesterAgent(
+                authoritativeGit,
+                _config.TestCommand,
+                _config.BuildCommand,
+                TimeSpan.FromMinutes(Math.Max(1, _config.AttemptTimeoutMinutes) * 2),
+                log),
+            "docker" => CreateDockerTester(authoritativeGit, log),
+            var mode => throw new InvalidOperationException(
+                $"unknown sandbox mode '{mode}' for the Tester role; failing closed."),
+        };
+    }
+
+    /// <summary>Live Docker configuration validation for the Tester path, then the offline
+    /// gate. Construction is lazy: no Docker executable is resolved, no settings read and no
+    /// temporary directory created until the gate actually runs.</summary>
+    private ITesterAgent CreateDockerTester(IGitService authoritativeGit, Action<string>? log)
+    {
+        _config.Sandbox.ValidateLiveDocker();
+        return new SandboxTesterGate(authoritativeGit, _config, log);
+    }
 }

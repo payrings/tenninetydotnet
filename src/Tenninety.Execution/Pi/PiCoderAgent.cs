@@ -17,8 +17,10 @@ public sealed class PiCoderAgent : CliCoderAgentBase
     private readonly string _modelOverride;
     private readonly string _extraArgs;
 
-    public PiCoderAgent(string modelOverride, string extraArgs, TimeSpan attemptTimeout)
-        : base(attemptTimeout)
+    public PiCoderAgent(
+        string modelOverride, string extraArgs, TimeSpan attemptTimeout,
+        string? authoritativeRepositoryPath = null)
+        : base(attemptTimeout, authoritativeRepositoryPath)
     {
         _modelOverride = modelOverride;
         _extraArgs = extraArgs;

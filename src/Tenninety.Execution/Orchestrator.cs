@@ -2,6 +2,7 @@ using Tenninety.Core;
 using Tenninety.Core.Models;
 using Tenninety.Core.Stores;
 using Tenninety.Core.Validation;
+using Tenninety.Execution.Sandbox;
 using Tenninety.Frontier;
 using Tenninety.Git;
 
@@ -31,6 +32,9 @@ public sealed class Orchestrator
     private readonly StateStore _stateStore;
     private readonly AuditLog _audit;
     private readonly Action<string>? _log;
+
+    /// <summary>Deterministic fake-first seam; production always uses scoped Docker recovery.</summary>
+    internal Func<CancellationToken, Task<SandboxRecoveryInfo>>? RecoveryOverride { get; set; }
 
     public Orchestrator(
         IGitService git, Plan plan, RuntimeState state, TenNinetyConfig config,
@@ -66,7 +70,7 @@ public sealed class Orchestrator
 
     public async Task<OrchestratorExit> RunAsync(CancellationToken ct)
     {
-        using var _daemonLock = DaemonLock.Acquire(_git.RepoPath);
+        using var daemonLock = DaemonLock.Acquire(_git.RepoPath);
         if (_git.CurrentBranch() != TenNinety.MainBranch)
             throw new InvalidOperationException(
                 $"the framework must start from branch '{TenNinety.MainBranch}', not '{_git.CurrentBranch()}'.");
@@ -81,6 +85,7 @@ public sealed class Orchestrator
         if (!_git.IsClean())
             throw new InvalidOperationException(
                 "runtime-ignore migration left the working tree dirty; commit .tenninety/.gitignore and retry.");
+        await RecoverSandboxResourcesAsync(ct);
         _audit.Append("DAEMON_STARTED", detail: $"mode={_config.ExecutionMode} provider={_config.ProviderMode}");
         try
         {
@@ -117,8 +122,9 @@ public sealed class Orchestrator
 
                 var engine = new ExecutionEngine(
                     _git, _config, _frontier,
-                    _agents.CreateCoder(), _agents.CreateReviewer(),
-                    _agents.CreateTester(_log), _stateStore, _audit,
+                    _agents.CreateCoder(_git, daemonLock, _log),
+                    _agents.CreateReviewer(_git, _log),
+                    _agents.CreateTester(_git, _log), _stateStore, _audit,
                     _plan.GlobalContext, _log);
 
                 var outcome = await engine.ExecuteWpAsync(wp, _state, ct);
@@ -221,6 +227,47 @@ public sealed class Orchestrator
     {
         SyncQueueStatuses();
         _stateStore.Save(_state);
+    }
+
+    private async Task RecoverSandboxResourcesAsync(CancellationToken ct)
+    {
+        SandboxRecoveryInfo recovery;
+        try
+        {
+            recovery = RecoveryOverride is { } recover
+                ? await recover(ct)
+                : await new SandboxRecoveryService(_git, _config).RecoverAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            recovery = new SandboxRecoveryInfo
+            {
+                Status = "quarantined",
+                LastRunUtc = DateTimeOffset.UtcNow.ToString("O"),
+                Quarantined = ["recovery-inventory"],
+                Detail = "Scoped sandbox inventory or cleanup failed (" +
+                         ex.GetType().Name + "); execution is refused.",
+            };
+        }
+
+        _state.SandboxRecovery = recovery;
+        Persist();
+        _audit.Append(
+            recovery.Status == "quarantined"
+                ? "SANDBOX_RECOVERY_QUARANTINED"
+                : "SANDBOX_RECOVERY_COMPLETED",
+            detail: $"status={recovery.Status} containers=" +
+                    $"{recovery.ContainersRemoved}/{recovery.ContainersFound} workspaces=" +
+                    $"{recovery.WorkspacesRemoved}/{recovery.WorkspacesFound} " +
+                    $"quarantined={recovery.Quarantined.Count}");
+        if (recovery.Status == "quarantined" || recovery.Quarantined.Count > 0)
+            throw new InvalidOperationException(
+                "sandbox startup recovery did not prove complete cleanup; " +
+                "execution is refused until the scoped quarantine is resolved.");
     }
 
     private void SyncQueueStatuses()

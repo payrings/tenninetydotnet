@@ -61,6 +61,20 @@ public static partial class Sanitizer
         return text;
     }
 
+    /// <summary>
+    /// Best-effort DETECTION of high-confidence secret material (private key blocks, known
+    /// token formats such as sk-/ghp_/github_pat_/AKIA, and Azure key shapes). Used by the
+    /// candidate promotion policy's bounded content scan: a detected secret rejects the whole
+    /// candidate patch. Best-effort by design — it never claims completeness.
+    /// </summary>
+    public static bool ContainsLikelySecret(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return false;
+        return PrivateKeyBlock().IsMatch(input) ||
+               KnownTokenFormats().IsMatch(input) ||
+               AzureKey().IsMatch(input);
+    }
+
     public static IEnumerable<string> FilterContextFiles(IEnumerable<string> paths) =>
         paths.Where(p => !IsExcludedFile(p));
 }

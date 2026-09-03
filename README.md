@@ -4,8 +4,8 @@
   <img src="docs/assets/architecture.svg" alt="10/90 tenninety architecture: preparation pipeline, frontier architect, guarded local execution loop, human supervision" width="920" />
 </p>
 
-*The diagram shows the target sandbox boundary. In the current alpha, the local loop uses
-host processes with an allowlisted environment; see the warning below.*
+*The diagram shows the implemented live sandbox boundary. Mock mode remains entirely in-process;
+`sandbox.mode=unsafe-host` is an explicit compatibility opt-out.*
 
 **By G. Paganelli - rift-demote-fence@duck.com**
 
@@ -24,10 +24,12 @@ From there AI takes over under supervision: an embedded *blueprint prompt* casts
 Every gate is mechanically enforced rather than requested: framework-built prompt text is sanitised, newly added secret-shaped files are kept out of commits, plans are re-validated after every change, every promotion lands as ONE squashed commit on `main`, and history is never rewritten. Humans stay in command through a real-time dashboard – pause, redirect (**pivot**: KEEP / REWORK / CANCEL), or revert a bad promotion.
 
 > [!WARNING]
-> **This is an experimental alpha.** Live coding and test processes still execute directly on
-> the host with an allowlisted environment; container sandboxing is not implemented yet. Use
-> live mode only in a disposable, least-privilege workspace. Coding-agent CLIs can read workspace
-> files and make their own model calls, so do not place credentials in the workspace.
+> **This is an experimental alpha.** Live Docker mode runs Coder, Reviewer exploration, Restore,
+> and Tester commands in hardened disposable containers. The authoritative repository is never
+> mounted; only an exact disposable candidate is writable. The host still controls Docker and the
+> local Reviewer model transport, so use a least-privilege Docker deployment, digest-pinned role
+> images, and keep credentials out of project files. `sandbox.mode=unsafe-host` deliberately gives
+> up this isolation and is never an automatic fallback.
 
 **Platform: .NET 10 (`net10.0`) with C# 14.** Built on the latest .NET release; C# 14 features (extension members, `field`-backed properties) are used where they clarify intent.
 
@@ -59,8 +61,10 @@ tenninety status                        # inspect queue & health
 
 Out of the box `provider_mode` is `"mock"`: everything is simulated deterministically so the
 whole pipeline runs offline. Live mode (`provider_mode = "aider"`) needs a coding agent – aider
-by default, or OpenCode or Pi via the `coder_agent` knob – plus two different local models, and
-optionally llama-swap when they share one GPU card. Details in [`docs/OVERVIEW.md`](docs/OVERVIEW.md).
+by default, or OpenCode or Pi via the `coder_agent` knob – plus two different local models,
+Docker, three digest-pinned role images, and a pre-existing internal model network. llama-swap
+remains optional when the models share one GPU card. Details in
+[`docs/OVERVIEW.md`](docs/OVERVIEW.md).
 
 ## Documentation
 
@@ -70,3 +74,5 @@ optionally llama-swap when they share one GPU card. Details in [`docs/OVERVIEW.m
 | [`docs/SPEC-AUTHORING.md`](docs/SPEC-AUTHORING.md) | Business analyst + developer: the recommended pipeline for producing `spec.md` (business need → analysis → OpenSpec → spec) |
 | [`docs/JUNIOR-GUIDE.md`](docs/JUNIOR-GUIDE.md) | New to .NET/C#: every step explained, glossary, guided first run, exercises |
 | [`docs/SENIOR-GUIDE.md`](docs/SENIOR-GUIDE.md) | Practitioners: command reference, state model, engine semantics, config, extension points, troubleshooting matrix |
+| [`docs/TESTER-SANDBOX.md`](docs/TESTER-SANDBOX.md) | Operators: Docker role boundaries, restricted Restore acceptance, cleanup, recovery, and verification |
+| [`docs/SANDBOX-CONFIG.example.jsonc`](docs/SANDBOX-CONFIG.example.jsonc) | Annotated live-Docker and restricted-Restore configuration template |

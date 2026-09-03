@@ -11,6 +11,9 @@ public static class RuntimeGitignoreMigration
         "state.json.tmp*",
         "state.json.lock",
         "audit-log.jsonl",
+        "sandbox-resources.json",
+        "sandbox-resources.json.tmp*",
+        "sandbox-resources.json.lock",
         "control/",
     ];
 

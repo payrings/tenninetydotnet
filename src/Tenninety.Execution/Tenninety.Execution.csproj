@@ -1,6 +1,10 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Tenninety.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Tenninety.Core\Tenninety.Core.csproj" />
     <ProjectReference Include="..\Tenninety.Git\Tenninety.Git.csproj" />
     <ProjectReference Include="..\Tenninety.Frontier\Tenninety.Frontier.csproj" />

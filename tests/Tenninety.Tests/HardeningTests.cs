@@ -2,6 +2,7 @@ using Tenninety.Core;
 using Tenninety.Core.Models;
 using Tenninety.Core.Stores;
 using Tenninety.Execution;
+using Tenninety.Execution.Testing;
 using Tenninety.Execution.Mock;
 using Tenninety.Execution.OpenAi;
 using Tenninety.Core.Validation;
@@ -158,7 +159,8 @@ public class HardeningTests
     private sealed class RecordingChat(string reply) : IChatClient
     {
         public string? LastPrompt { get; private set; }
-        public Task<string> CompleteAsync(string model, string system, string user, CancellationToken ct)
+        public Task<string> CompleteAsync(
+            string model, string system, string user, long maxResponseBytes, CancellationToken ct)
         {
             LastPrompt = user;
             return Task.FromResult(reply);
@@ -169,15 +171,11 @@ public class HardeningTests
     public async Task Reviewer_prompt_contains_the_unified_patch()
     {
         var chat = new RecordingChat("{\"verdict\":\"PASS\",\"reasons\":[]}");
-        var agent = new OpenAiReviewerAgent(chat, "devstral-reviewer");
-        var ctx = MakeCtx();
-        var ctxWithDiff = new WpContext
-        {
-            RepoPath = ctx.RepoPath, WorkPackage = ctx.WorkPackage,
-            Attempt = 1, DiffPatch = "diff --git a/Game.cs b/Game.cs\n+new code",
-        };
+        var agent = new OpenAiReviewerAgent(
+            chat, "devstral-reviewer", diffProvider: _ =>
+                "diff --git a/Game.cs b/Game.cs\n+new code");
 
-        var result = await agent.ReviewAsync(ctxWithDiff, CancellationToken.None);
+        var result = await agent.ReviewAsync(MakeCtx(), CancellationToken.None);
 
         Assert.True(result.Passed);
         Assert.Contains("diff --git", chat.LastPrompt);
@@ -187,7 +185,8 @@ public class HardeningTests
     public async Task Reviewer_flags_a_missing_diff_instead_of_passing_blindly()
     {
         var chat = new RecordingChat("{\"verdict\":\"FAIL\",\"reasons\":[\"no diff\"]}");
-        var agent = new OpenAiReviewerAgent(chat, "devstral-reviewer");
+        var agent = new OpenAiReviewerAgent(
+            chat, "devstral-reviewer", diffProvider: _ => "");
 
         var result = await agent.ReviewAsync(MakeCtx(), CancellationToken.None);
 
@@ -199,16 +198,11 @@ public class HardeningTests
     public async Task Reviewer_fails_closed_without_calling_model_for_a_truncated_diff()
     {
         var chat = new RecordingChat("{\"verdict\":\"PASS\",\"reasons\":[]}");
-        var agent = new OpenAiReviewerAgent(chat, "devstral-reviewer");
-        var ctx = MakeCtx();
+        var agent = new OpenAiReviewerAgent(
+            chat, "devstral-reviewer", diffProvider: _ =>
+                "diff --git a/a b/a\n[diff truncated - showing head and tail]");
 
-        var result = await agent.ReviewAsync(new WpContext
-        {
-            RepoPath = ctx.RepoPath,
-            WorkPackage = ctx.WorkPackage,
-            Attempt = 1,
-            DiffPatch = "diff --git a/a b/a\n[diff truncated - showing head and tail]",
-        });
+        var result = await agent.ReviewAsync(MakeCtx());
 
         Assert.False(result.Passed);
         Assert.Null(chat.LastPrompt);
@@ -218,7 +212,8 @@ public class HardeningTests
     public async Task Reviewer_rejects_pass_with_failure_reasons()
     {
         var chat = new RecordingChat("{\"verdict\":\"PASS\",\"reasons\":[\"serious defect\"]}");
-        var result = await new OpenAiReviewerAgent(chat, "devstral-reviewer")
+        var result = await new OpenAiReviewerAgent(
+                chat, "devstral-reviewer", diffProvider: _ => "diff")
             .ReviewAsync(MakeCtx());
 
         Assert.False(result.Passed);
@@ -233,33 +228,44 @@ public class HardeningTests
         var wp = TestPlans.Wp("WP-001");
         wp.Goal = $"Use client_secret={secret}";
 
-        await new OpenAiReviewerAgent(chat, "devstral-reviewer").ReviewAsync(new WpContext
+        await new OpenAiReviewerAgent(
+            chat, "devstral-reviewer", diffProvider: _ => "diff").ReviewAsync(new ReviewerRunContext
         {
-            RepoPath = "/tmp",
+            Candidate = Candidate(),
             WorkPackage = wp,
             Attempt = 1,
-            DiffPatch = "diff --git a/a b/a\n+safe",
         });
 
         Assert.DoesNotContain(secret, chat.LastPrompt);
         Assert.Contains("REDACTED", chat.LastPrompt);
     }
 
-    private static WpContext MakeCtx() => new()
+    private static ReviewerRunContext MakeCtx() => new()
     {
-        RepoPath = "/tmp",
+        Candidate = Candidate(),
         WorkPackage = TestPlans.Wp("WP-001"),
         Attempt = 1,
     };
 
-    // ---------- F7 · mechanical gate fails closed in live mode ----------
+    private static Execution.Candidates.CandidateRevision Candidate() =>
+        new("work/WP-001", new string('a', 40), new string('b', 40));
+
+    // ---------- F7 · mechanical gate fails closed (Phase 5A migration note) ----------
+    //
+    // Phase 5A moved the Tester onto the offline Docker sandbox. The fail-closed semantics
+    // originally proven here against the host shell are now exercised on the Docker path
+    // through fakes in TestProjectDiscoveryTests (no test project / application-only /
+    // hostile markers), TestOutputClassifierTests and ShellTesterAgentTests (empty commands,
+    // zero-test summaries, operational failures, structured environment), and
+    // SandboxTesterGateTests (end-to-end gate refusals). The tests below remain as
+    // compatibility coverage for the explicitly selected UnsafeHostTesterAgent; they are no
+    // longer the evidence for Docker behavior.
 
     [Fact]
     public async Task Live_mode_without_any_project_fails_closed()
     {
         using var tmp = new TempDir();
-        var tester = new ShellTesterAgent("dotnet test", simulatedFailAttempts: 0,
-            log: null, failWhenNoProject: true, buildCommand: "dotnet build");
+        var tester = MakeUnsafeHostTester(tmp.Root, "dotnet test", "dotnet build");
 
         var result = await tester.RunTestsAsync(MakeTesterCtx(tmp.Root), CancellationToken.None);
 
@@ -274,8 +280,7 @@ public class HardeningTests
         // A real TEST project exists, but no test command was configured.
         File.WriteAllText(System.IO.Path.Combine(tmp.Root, "tests.csproj"),
             "<Project><ItemGroup><PackageReference Include=\"xunit\" /></ItemGroup></Project>");
-        var tester = new ShellTesterAgent("", simulatedFailAttempts: 0,
-            log: null, failWhenNoProject: true, buildCommand: "");
+        var tester = MakeUnsafeHostTester(tmp.Root, "", "");
 
         var result = await tester.RunTestsAsync(MakeTesterCtx(tmp.Root), CancellationToken.None);
 
@@ -288,8 +293,7 @@ public class HardeningTests
     {
         using var tmp = new TempDir();
         File.WriteAllText(System.IO.Path.Combine(tmp.Root, "app.csproj"), "<Project/>");
-        var tester = new ShellTesterAgent("dotnet test", simulatedFailAttempts: 0,
-            log: null, failWhenNoProject: true, buildCommand: "");
+        var tester = MakeUnsafeHostTester(tmp.Root, "dotnet test", "");
 
         var result = await tester.RunTestsAsync(MakeTesterCtx(tmp.Root), CancellationToken.None);
 
@@ -304,7 +308,7 @@ public class HardeningTests
     {
         using var tmp = new TempDir();
         File.WriteAllText(System.IO.Path.Combine(tmp.Root, "fake.csproj"), project);
-        var tester = new ShellTesterAgent("true", failWhenNoProject: true, buildCommand: "");
+        var tester = MakeUnsafeHostTester(tmp.Root, "true", "");
 
         var result = await tester.RunTestsAsync(MakeTesterCtx(tmp.Root));
 
@@ -318,8 +322,8 @@ public class HardeningTests
         using var tmp = new TempDir();
         File.WriteAllText(System.IO.Path.Combine(tmp.Root, "tests.csproj"),
             "<Project><ItemGroup><PackageReference Include=\"xunit\" /></ItemGroup></Project>");
-        var tester = new ShellTesterAgent(
-            "printf 'No test is available in the selected project'", failWhenNoProject: true, buildCommand: "");
+        var tester = MakeUnsafeHostTester(
+            tmp.Root, "printf 'No test is available in the selected project'", "");
 
         var result = await tester.RunTestsAsync(MakeTesterCtx(tmp.Root));
 
@@ -335,8 +339,7 @@ public class HardeningTests
         using var tmp = new TempDir();
         File.WriteAllText(System.IO.Path.Combine(tmp.Root, "tests.csproj"),
             "<Project><ItemGroup><PackageReference Include=\"xunit\" /></ItemGroup></Project>");
-        var tester = new ShellTesterAgent(
-            $"printf '{output}'", failWhenNoProject: true, buildCommand: "");
+        var tester = MakeUnsafeHostTester(tmp.Root, $"printf '{output}'", "");
 
         var result = await tester.RunTestsAsync(MakeTesterCtx(tmp.Root));
 
@@ -353,8 +356,7 @@ public class HardeningTests
         File.WriteAllText(System.IO.Path.Combine(nested, "app.Tests.csproj"),
             "<Project><ItemGroup><PackageReference Include=\"xunit\" /></ItemGroup></Project>");
 
-        var tester = new ShellTesterAgent("true", simulatedFailAttempts: 0,
-            log: null, failWhenNoProject: false, buildCommand: "touch build.ran");
+        var tester = MakeUnsafeHostTester(tmp.Root, "true", "touch build.ran", failWhenNoProject: false);
 
         var result = await tester.RunTestsAsync(MakeTesterCtx(tmp.Root), CancellationToken.None);
 
@@ -375,8 +377,8 @@ public class HardeningTests
         Environment.SetEnvironmentVariable(variable, "sentinel");
         try
         {
-            var tester = new ShellTesterAgent(
-                $"test -z \"${{{variable}:-}}\"", failWhenNoProject: true, buildCommand: "");
+            var tester = MakeUnsafeHostTester(
+                tmp.Root, $"test -z \"${{{variable}:-}}\"", "");
             var result = await tester.RunTestsAsync(MakeTesterCtx(tmp.Root));
             Assert.True(result.Passed, result.OutputTail);
         }
@@ -399,10 +401,18 @@ public class HardeningTests
         using var reacquired = DaemonLock.Acquire(tmp.Root);
     }
 
-    private static WpContext MakeTesterCtx(string root) => new()
+
+    private static UnsafeHostTesterAgent MakeUnsafeHostTester(
+        string root, string testCommand, string buildCommand, bool failWhenNoProject = true) =>
+        new(new GitService(root), testCommand, buildCommand,
+            TimeSpan.FromMinutes(5), log: null, failWhenNoProject: failWhenNoProject);
+
+    private static readonly string FixtureCandidateSha = new string('a', 40);
+
+    private static TesterRunContext MakeTesterCtx(string root) => new()
     {
-        RepoPath = root,
-        WorkPackage = TestPlans.Wp("WP-001"),
+        Candidate = new Tenninety.Execution.Candidates.CandidateRevision("work/WP-001", FixtureCandidateSha, FixtureCandidateSha),
+        WorkPackageId = "WP-001",
         Attempt = 1,
     };
 

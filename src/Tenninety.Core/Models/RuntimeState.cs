@@ -25,6 +25,36 @@ public sealed class RuntimeState
 
     [JsonPropertyName("spec_hash")]
     public string? SpecHash { get; set; }
+
+    [JsonPropertyName("sandbox_recovery")]
+    public SandboxRecoveryInfo SandboxRecovery { get; set; } = new();
+}
+
+public sealed class SandboxRecoveryInfo
+{
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "not-run";
+
+    [JsonPropertyName("last_run_utc")]
+    public string? LastRunUtc { get; set; }
+
+    [JsonPropertyName("containers_found")]
+    public int ContainersFound { get; set; }
+
+    [JsonPropertyName("containers_removed")]
+    public int ContainersRemoved { get; set; }
+
+    [JsonPropertyName("workspaces_found")]
+    public int WorkspacesFound { get; set; }
+
+    [JsonPropertyName("workspaces_removed")]
+    public int WorkspacesRemoved { get; set; }
+
+    [JsonPropertyName("quarantined")]
+    public List<string> Quarantined { get; set; } = new();
+
+    [JsonPropertyName("detail")]
+    public string Detail { get; set; } = "startup recovery has not run";
 }
 
 public sealed class AttemptInfo

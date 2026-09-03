@@ -148,7 +148,7 @@ flowchart TD
 
 ```bash
 dotnet build -c Release          # zero warnings expected
-dotnet test                      # 145 tests, <1s
+dotnet test                      # 1,000+ tests; Docker categories skipped until opted in
 dotnet publish src/Tenninety.Cli -c Release -o ./dist   # optional self-contained: -r linux-x64 --self-contained
 ```
 
@@ -291,6 +291,12 @@ are hard acceptance errors since the blueprint upgrade.
     "reviewer_fail_attempts": 0,
     "tester_fail_attempts": 0,
     "reviewer_ignores_advice": false       // true ⇒ exercises the BLOCKED@20 path
+  },
+  "sandbox": {
+    "mode": "docker",                     // or explicit non-isolated "unsafe-host"
+    "model_network": "tenninety-coder-model"
+    // Digest-pinned role images, limits, Reviewer budgets and optional restricted Restore:
+    // see docs/SANDBOX-CONFIG.example.jsonc
   }
 }
 ```
@@ -306,18 +312,20 @@ selected tool's provider/model and authentication for that proxy separately.
 
 Framework secrets are env-var only: `TENNINETY_FRONTIER_API_KEY` (Frontier calls) and optional
 `TENNINETY_LOCAL_API_KEY` (framework Reviewer plus aider, translated to `OPENAI_API_KEY`).
-OpenCode/Pi do not inherit that variable; use each tool's secure provider configuration outside
-the workspace. Never put credentials in project files.
+Docker Coder tools receive only the closed model environment assembled by trusted code. Use a
+narrowly scoped local-model token and never put credentials in project files.
 
 **Live topology** (`provider_mode=aider`): vLLM endpoints per
 `docker-compose.yml` (coder `127.0.0.1:8000`, reviewer `:8001`, served names `coder`/
 `reviewer`) **or** a single llama-swap proxy when `use_llama_swap=true`. The supplied Compose
-network permits egress so vLLM can download models and is not a security boundary. Live coding
-requires the selected coding-agent CLI on the PATH.
+model server has a separate egress network for downloads; the disposable Coder joins only the
+internal `tenninety-coder-model` network. Live coding requires the selected coding-agent CLI in
+the digest-pinned Coder image.
 
-**Alpha sandbox limitation:** coder and tester commands are host processes. Their inherited
-environment is allowlisted and framework git commands disable hooks, but they retain the current
-user's filesystem permissions. Run live mode in a disposable least-privilege workspace.
+**Sandbox posture:** Docker mode runs Coder, Reviewer exploration, optional restricted Restore,
+and Tester commands in disposable containers without the authoritative repository or Docker
+socket. `unsafe-host` is the explicit legacy compatibility mode and is never a fallback. A patched,
+least-privilege Docker deployment remains part of the trusted computing base.
 
 ---
 
@@ -338,7 +346,8 @@ Commit `config.json` changes before `start` – it is tracked, and the tree must
 
 - **Agents**: implement `ICoderAgent` / `IReviewerAgent` / `ITesterAgent`
   (`src/Tenninety.Execution/Abstractions.cs`) and register in `AgentFactory`. Inputs arrive
-  as `WpContext` (WP, attempt, accumulated feedback, frontier advice).
+  through role-specific contexts carrying an exact `CandidateRevision`, WP, attempt, feedback,
+  and advice, never an authoritative host path.
 - **Frontier**: implement `IFrontierClient` (`GeneratePlanAsync`, `GetRepairAdviceAsync`,
   `ProposePivotAsync`, `ProposeRevertAsync`). `HttpFrontierClient` is OpenAI-compatible;
   prompts live in `Prompts/Prompts.cs`; responses go through tolerant `JsonExtractor`.

@@ -93,6 +93,15 @@ public sealed class TenNinetyConfig
     [JsonPropertyName("mock")]
     public MockBehaviorConfig Mock { get; set; } = new();
 
+    /// <summary>
+    /// Container-isolation contract. Missing section deserializes to the defaults, i.e. docker
+    /// mode – missing sandbox configuration can never silently select host execution. Structural
+    /// validation runs on load; live image and endpoint requirements run when Docker execution is
+    /// selected.
+    /// </summary>
+    [JsonPropertyName("sandbox")]
+    public SandboxConfig Sandbox { get; set; } = new();
+
     [JsonIgnore]
     public string NormalizedProviderMode => (ProviderMode ?? "").Trim().ToLowerInvariant() switch
     {
@@ -107,6 +116,9 @@ public sealed class TenNinetyConfig
         _ = NormalizedProviderMode;
         if (LocalModels is null || Aider is null || OpenCode is null || Pi is null || Mock is null)
             throw new InvalidOperationException("config contains a null settings object.");
+        if (Sandbox is null)
+            throw new InvalidOperationException("config contains a null sandbox settings object.");
+        Sandbox.ValidateStructural();
     }
 }
 

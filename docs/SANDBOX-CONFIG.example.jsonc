@@ -1,0 +1,82 @@
+{
+  // Start with Restore disabled. Commit this tracked config, run `tenninety status`, and copy
+  // its Repository scope value into acceptance.repository before enabling Restore.
+  "provider_mode": "aider",
+  "coder_agent": "aider",
+  "local_models": {
+    "coder": "coder",
+    "reviewer": "reviewer",
+    "coder_endpoint": "http://coder-model:8000/v1",
+    "reviewer_endpoint": "http://127.0.0.1:8001/v1"
+  },
+  "sandbox": {
+    "mode": "docker",
+    "runtime": "docker-cli",
+    "workspace_root": null,
+    "max_workspace_mb": 4096,
+    "model_network": "tenninety-coder-model",
+    "roles": {
+      "coder": {
+        // Replace every digest with an installed, role-compatible pinned image.
+        "image": "registry.example/tenninety-coder@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "cpus": 4,
+        "memory_mb": 8192,
+        "pids": 256,
+        "network": "model",
+        "timeout_seconds": 1800,
+        "model_endpoint": "http://coder-model:8000/v1"
+      },
+      "reviewer": {
+        "image": "registry.example/tenninety-reviewer@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "cpus": 4,
+        "memory_mb": 8192,
+        "pids": 256,
+        "network": "none",
+        "timeout_seconds": 1200,
+        "max_actions": 40,
+        "action_timeout_seconds": 60,
+        "max_action_output_kb": 256,
+        "max_transcript_kb": 1024,
+        "max_model_response_kb": 64
+      },
+      "tester": {
+        "image": "registry.example/tenninety-tester@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "cpus": 4,
+        "memory_mb": 12288,
+        "pids": 512,
+        "network": "none",
+        "timeout_seconds": 1800,
+        "restore": {
+          "enabled": false,
+          "network": "restricted",
+          "network_name": "tenninety-restore-restricted",
+          "proxy_url": "http://restore-proxy:8080",
+          "approved_feeds": [
+            "https://api.nuget.org/v3/index.json"
+          ],
+          "timeout_seconds": 600,
+          "max_derived_mb": 2048,
+          "max_derived_files": 200000,
+          "max_derived_file_mb": 512,
+          "max_derived_depth": 128,
+          "acceptance": {
+            "version": "tenninety.restore.v1",
+            "accepted": true,
+            "repository": "COPY-REPOSITORY-SCOPE-FROM-TENNINETY-STATUS",
+            "instance": "tenninety",
+            "expires_utc": "2027-01-01T00:00:00.0000000+00:00",
+            "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
+            "firewall_profile": "operator-managed-nuget-only-v1",
+            // Compute over the exact text (no final newline):
+            // proxy=http://restore-proxy:8080\nhttps://api.nuget.org/v3/index.json
+            "feed_policy_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "storage_quota_id": "operator-managed-restore-quota-v1",
+            "storage_quota_bytes": 4294967296,
+            "hard_quota_enforced": true,
+            "operator_acknowledged": true
+          }
+        }
+      }
+    }
+  }
+}

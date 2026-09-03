@@ -6,8 +6,5 @@ obj/
 *.bkp
 
 # Local-only documents (kept off GitHub by owner request)
-docs/HANDOVER.md
-docs/DESIGN-RATIONALE.md
 docs/JUDGMENT-CALLS.md
-docs/ISSUES-EXPLAINED.md
 docs/ISSUE-2-DEEP-DIVE.md

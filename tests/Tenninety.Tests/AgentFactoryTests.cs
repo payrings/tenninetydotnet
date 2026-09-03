@@ -1,6 +1,10 @@
 using Tenninety.Core.Models;
 using Tenninety.Execution;
 using Tenninety.Execution.Aider;
+using Tenninety.Execution.Candidates;
+using Tenninety.Execution.Mock;
+using Tenninety.Execution.Testing;
+using Tenninety.Git;
 using Xunit;
 
 namespace Tenninety.Tests;
@@ -16,6 +20,7 @@ public class AgentFactoryTests
         LlamaSwapEndpoint = "http://localhost:9999/v1",
         LocalModelsEndpoint = "http://localhost:8000/v1",
         Aider = new AiderConfig(),
+        Sandbox = new SandboxConfig { Mode = "unsafe-host" },
     };
 
     [Fact]
@@ -23,7 +28,8 @@ public class AgentFactoryTests
     {
         // The framework can enforce distinct identifiers; operators verify the actual weights.
         var factory = new AgentFactory(LiveConfig(reviewer: "Qwen3.6-27B"));
-        var ex = Assert.Throws<InvalidOperationException>(factory.CreateReviewer);
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => factory.CreateReviewer(FakeGit()));
         Assert.Contains("identifiers must differ", ex.Message);
     }
 
@@ -31,10 +37,10 @@ public class AgentFactoryTests
     public void Distinct_models_pass_and_route_to_the_llama_swap_endpoint_when_enabled()
     {
         var factory = new AgentFactory(LiveConfig(llamaSwap: true));
-        var coder = Assert.IsType<AiderCoderAgent>(factory.CreateCoder());
+        var coder = Assert.IsType<AiderCoderAgent>(factory.CreateCoder(FakeGit()));
         Assert.Equal("openai/Qwen3.6-27B", coder.ResolveModel()); // provider prefix derived from <coder>
         Assert.Equal("http://localhost:9999/v1/", factory.EndpointFor("coder")); // trailing slash keeps /v1 on relative calls
-        _ = factory.CreateReviewer();
+        _ = factory.CreateReviewer(FakeGit());
     }
 
     [Fact]
@@ -48,7 +54,8 @@ public class AgentFactoryTests
     {
         var config = LiveConfig();
         config.Aider.Model = "openai/custom-coder";
-        var coder = Assert.IsType<AiderCoderAgent>(new AgentFactory(config).CreateCoder());
+        var coder = Assert.IsType<AiderCoderAgent>(
+            new AgentFactory(config).CreateCoder(FakeGit()));
         Assert.Equal("openai/custom-coder", coder.ResolveModel());
     }
 
@@ -59,8 +66,8 @@ public class AgentFactoryTests
         config.LocalModels.Reviewer = config.LocalModels.Coder; // identical is fine in rehearsal mode
         var factory = new AgentFactory(config);
         Assert.True(factory.IsMock);
-        _ = factory.CreateCoder();
-        _ = factory.CreateReviewer();
+        _ = factory.CreateCoder(FakeGit());
+        _ = factory.CreateReviewer(FakeGit());
     }
 
     [Fact]
@@ -87,7 +94,21 @@ public class AgentFactoryTests
         var config = LiveConfig(reviewer: "openai/same");
         config.Aider.Model = "openai/same";
 
-        Assert.Throws<InvalidOperationException>(() => new AgentFactory(config).CreateReviewer());
+        Assert.Throws<InvalidOperationException>(
+            () => new AgentFactory(config).CreateReviewer(FakeGit()));
+    }
+
+    [Fact]
+    public void Mutable_configuration_is_revalidated_after_an_agent_was_created()
+    {
+        var config = LiveConfig();
+        var factory = new AgentFactory(config);
+        _ = factory.CreateReviewer(FakeGit());
+        config.Aider.Model = "openai/Devstral-24B";
+
+        var ex = Assert.Throws<InvalidOperationException>(() => factory.CreateCoder(FakeGit()));
+
+        Assert.Contains("identifiers must differ", ex.Message);
     }
 
     [Theory]
@@ -99,9 +120,126 @@ public class AgentFactoryTests
         config.CoderAgent = coderAgent;
 
         var ex = Assert.Throws<InvalidOperationException>(
-            () => new AgentFactory(config).CreateCoder());
+            () => new AgentFactory(config).CreateCoder(FakeGit()));
 
         Assert.Contains("model must be explicit", ex.Message);
+    }
+
+    // ---- Phase 5A Tester selection -------------------------------------------------------------
+
+    internal static IGitService FakeGit()
+    {
+        var dir = Directory.CreateTempSubdirectory("tenninety-factory-git");
+        try { return new GitService(dir.FullName); }
+        finally { dir.Delete(recursive: true); }
+    }
+
+    [Fact]
+    public void Mock_mode_selects_the_deterministic_mock_tester()
+    {
+        var factory = new AgentFactory(new TenNinetyConfig());
+        Assert.True(factory.IsMock);
+        Assert.IsType<MockTesterAgent>(factory.CreateTester(FakeGit()));
+    }
+
+    [Fact]
+    public void Mock_mode_never_runs_the_configured_shell_text_or_initializes_docker()
+    {
+        const string marker = "/tmp/tenninety-mock-should-never-run-marker";
+        File.Delete(marker);
+        var config = new TenNinetyConfig
+        {
+            BuildCommand = $"touch {marker}",
+            TestCommand = $"touch {marker}",
+            Mock = new MockBehaviorConfig { TesterFailAttempts = 0 },
+            Sandbox = new SandboxConfig
+            {
+                Roles = new SandboxRolesConfig
+                {
+                    Tester = new TesterSandboxRoleConfig
+                    {
+                        Image = "",
+                        Restore = new SandboxRestoreConfig
+                        {
+                            Enabled = false,
+                        },
+                    },
+                },
+            },
+        };
+
+        var tester = new AgentFactory(config).CreateTester(FakeGit());
+        var result = tester.RunTestsAsync(new TesterRunContext
+        {
+            Candidate = new CandidateRevision("main", new string('a', 40), new string('a', 40)),
+            WorkPackageId = "WP-001",
+            Attempt = 1,
+        }).GetAwaiter().GetResult();
+
+        // Deterministic simulated pass, no shell ran, no Docker dependency, restore ignored.
+        Assert.True(result.Passed);
+        Assert.Equal(new string('a', 40), result.CandidateSha);
+        Assert.False(File.Exists(marker), "mock mode must never execute the configured command");
+        File.Delete(marker);
+    }
+
+    [Fact]
+    public void Docker_mode_selects_the_sandbox_tester_gate_lazily()
+    {
+        var config = LiveConfig();
+        config.Sandbox.Mode = "docker";
+        config.Sandbox.Roles.Coder.Image = "sha256:" + new string('a', 64);
+        config.Sandbox.Roles.Reviewer.Image = "sha256:" + new string('b', 64);
+        config.Sandbox.Roles.Tester.Image = "sha256:" + new string('c', 64);
+
+        var factory = new AgentFactory(config);
+        // Selection only: no Docker executable is resolved, no temp directories are created,
+        // and nothing is executed — the gate builds everything lazily at run time.
+        var tester = factory.CreateTester(FakeGit());
+        Assert.IsType<SandboxTesterGate>(tester);
+        Assert.IsNotType<UnsafeHostTesterAgent>(tester);
+    }
+
+    [Fact]
+    public void Docker_mode_requires_live_configuration_for_the_tester_path()
+    {
+        var config = LiveConfig();
+        config.Sandbox.Mode = "docker";
+        config.Sandbox.Roles.Tester.Image = "latest"; // unpinned mutable tag
+        config.Sandbox.Roles.Coder.Image = "sha256:" + new string('a', 64);
+        config.Sandbox.Roles.Reviewer.Image = "sha256:" + new string('b', 64);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => new AgentFactory(config).CreateTester(FakeGit()));
+        Assert.Contains("digest-pinned", ex.Message);
+    }
+
+    [Fact]
+    public void Explicit_unsafe_host_mode_is_the_only_way_to_get_host_execution()
+    {
+        var config = LiveConfig();
+        config.Sandbox.Mode = "unsafe-host";
+        var warnings = new List<string>();
+
+        var tester = new AgentFactory(config).CreateTester(FakeGit(), warnings.Add);
+        var unsafeTester = Assert.IsType<UnsafeHostTesterAgent>(tester);
+
+        // The prominent warning reaches the supplied logging path at construction.
+        Assert.Contains(warnings, w => w.Contains("unsafe-host"));
+        Assert.Contains(warnings, w => w.Contains("WARNING"));
+
+        // Docker failures can never select this class: only the explicit mode can.
+        Assert.IsNotType<SandboxTesterGate>(unsafeTester);
+    }
+
+    [Fact]
+    public void An_unknown_sandbox_mode_fails_closed_for_the_tester()
+    {
+        var config = LiveConfig();
+        config.Sandbox.Mode = "bogus-mode";
+
+        Assert.Throws<InvalidOperationException>(
+            () => new AgentFactory(config).CreateTester(FakeGit()));
     }
 }
 
@@ -112,7 +250,7 @@ public class CoderCliAgentTests
     {
         var config = new TenNinetyConfig { ProviderMode = "aider", CoderAgent = "claude" };
         var ex = Assert.Throws<NotSupportedException>(
-            () => new AgentFactory(config).CreateCoder());
+            () => new AgentFactory(config).CreateCoder(AgentFactoryTests.FakeGit()));
         Assert.Contains("aider, opencode, pi", ex.Message);
     }
 
@@ -123,11 +261,12 @@ public class CoderCliAgentTests
         {
             ProviderMode = "openai-compatible",
             LocalModels = new LocalModelsConfig { Coder = "Qwen3.6-27B", Reviewer = "Devstral-24B" },
+            Sandbox = new SandboxConfig { Mode = "unsafe-host" },
         };
         var factory = new AgentFactory(config);
         Assert.False(factory.IsMock);
-        Assert.IsType<AiderCoderAgent>(factory.CreateCoder());
-        _ = factory.CreateReviewer();
+        Assert.IsType<AiderCoderAgent>(factory.CreateCoder(AgentFactoryTests.FakeGit()));
+        _ = factory.CreateReviewer(AgentFactoryTests.FakeGit());
     }
 
     [Fact]
