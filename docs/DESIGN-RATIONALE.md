@@ -1,6 +1,6 @@
 # Design Rationale & Decision Log
 
-**Project:** 10/90 tenninety – Spec-Driven Autonomous Framework, .NET v3.2
+**Project:** 10/90 tenninety – Spec-Driven Autonomous Framework
 **Platform:** .NET 10 (`net10.0`) · **Language:** C# 14
 
 This document explains *why* the framework is coded the way it is: which choices were
@@ -52,7 +52,7 @@ original spec, and the framework was adjusted to fit it:
 ## 1. Platform and language: .NET 10, C# 14
 
 ### The requirement
-The framework is titled *"10/90 .NET v3.2"*. That is read as: the framework itself is a
+The framework is titled *"10/90 tenninety"*. That is read as: the framework itself is a
 .NET application built on the **latest** .NET release – .NET 10 – compiled with **C# 14**
 (`<LangVersion>14.0</LangVersion>`, pinned explicitly in `Directory.Build.props` so the
 intent cannot silently drift).
@@ -171,7 +171,7 @@ resolved independently:
    loop without generating a real solution. Mock failure windows exist solely for retry tests.
 
 6. **Revert scope.** Part IV.5 wants Frontier analysis → patch application → validation.
-   v3.2 implements the *mechanical* path fully (`hotfix/revert-*` branch, `git revert`,
+   The framework implements the *mechanical* path fully (`hotfix/revert-*` branch, `git revert`,
    mechanical tests, one squash commit on pass). When the Frontier says a mechanical revert is
    insufficient, the service refuses and hands back to the human rather than letting an
    LLM freehand a hotfix onto `main`.
@@ -260,7 +260,7 @@ exercise the same clean-tree discipline the daemon enforces.
 - **Non-mechanical reverts**: require human hands; the framework detects and refuses, it
   does not yet drive a coder through a manual patch.
 - **TUI**: requires a real TTY; redirected sessions fall back to headless logging by design.
-- **Single machine, single remote-less git**: no push/pull orchestration in v3.2.
+- **Single machine, single remote-less git**: no push/pull orchestration.
 - **Docker is part of the trusted computing base**: role containers are isolated from the
   authoritative repository, but daemon compromise and same-user host mutation are outside the
   in-process guarantees. `unsafe-host` remains an explicit non-isolated compatibility mode.

@@ -33,7 +33,7 @@ public sealed class LocalChatClient : IChatClient
         if (!string.IsNullOrEmpty(bearer))
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bearer);
         if (!_http.DefaultRequestHeaders.UserAgent.Any(p => p.Product?.Name == "tenninety-local"))
-            _http.DefaultRequestHeaders.UserAgent.ParseAdd("tenninety-local/3.2");
+            _http.DefaultRequestHeaders.UserAgent.ParseAdd("tenninety-local/1");
     }
 
     public async Task<string> CompleteAsync(

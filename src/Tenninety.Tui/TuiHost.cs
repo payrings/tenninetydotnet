@@ -140,7 +140,7 @@ public static class TuiHost
     private static void Draw(Workspace ws, Plan plan, RuntimeState state)
     {
         Console.Clear();
-        AnsiConsole.Write(new Rule($"[b]10/90 tenninety[/] [grey]v{TenNinety.SchemaVersion} — {Markup.Escape(plan.ProjectName)}[/]")
+        AnsiConsole.Write(new Rule($"[b]10/90 tenninety[/b] — {Markup.Escape(plan.ProjectName)}")
             .RuleStyle("grey"));
 
         var health = new Grid();

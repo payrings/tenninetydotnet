@@ -52,7 +52,7 @@ public sealed class Orchestrator
         _log = log;
 
         if (config.ExecutionMode != "serial")
-            throw new NotSupportedException("v3.2 supports serial execution; parallel mode is planned.");
+            throw new NotSupportedException("serial execution is supported; parallel mode is planned.");
 
         // Restart recovery: state.json is the single source of truth for progress. Hydrate the
         // freshly loaded plan with persisted queue statuses so an interrupted-and-restarted run

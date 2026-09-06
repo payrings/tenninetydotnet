@@ -200,7 +200,7 @@ catches drift cheaply. Details in [`SPEC-AUTHORING.md`](SPEC-AUTHORING.md) §Ind
 | File | Tracked | Role |
 | --- | --- | --- |
 | `spec.md` | yes | source of truth |
-| `.tenninety/plan.json` | yes | execution graph (schema_version `3.2`); never mutated by the engine |
+| `.tenninety/plan.json` | yes | execution graph (schema_version `1`); never mutated by the engine |
 | `.tenninety/config.json` | yes | budgets/models/endpoints; budget fields clamp on deserialize (`field`-backed setters) |
 | `.tenninety/state.json` | **no** | current WP, attempt bookkeeping, `queue_status`, paused/stop flags |
 | `.tenninety/audit-log.jsonl` | **no** | append-only events; feeds pivots, repair requests, `[L]` view |
@@ -261,7 +261,7 @@ are hard acceptance errors since the blueprint upgrade.
 
 ```jsonc
 {
-  "execution_mode": "serial",              // anything else throws (NotSupported in v3.2)
+  "execution_mode": "serial",              // anything else throws (NotSupported)
   "max_concurrent_workers": 1,             // reserved for the future parallel scheduler
   "provider_mode": "mock",                 // "mock" | "aider" ("openai-compatible" = aider)
   "coder_agent": "aider",                  // "aider" | "opencode" | "pi"

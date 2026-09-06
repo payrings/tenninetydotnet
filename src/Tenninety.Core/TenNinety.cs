@@ -2,7 +2,7 @@ namespace Tenninety.Core;
 
 public static class TenNinety
 {
-    public const string SchemaVersion = "3.2";
+    public const string SchemaVersion = "1";
     public const string StateDir = ".tenninety";
     public const string SpecFile = "spec.md";
     public const string PlanFile = "plan.json";

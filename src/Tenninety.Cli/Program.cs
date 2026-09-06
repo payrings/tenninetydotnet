@@ -5,7 +5,7 @@ namespace Tenninety.Cli;
 internal static class Program
 {
     private const string Usage = """
-        10/90 tenninety v3.2 — Spec-Driven Autonomous Framework
+        10/90 tenninety — Spec-Driven Autonomous Framework
 
         Usage:
           tenninety init                          Scaffold .tenninety/, config, git repo, starter spec

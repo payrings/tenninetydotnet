@@ -25,7 +25,7 @@ public sealed class HttpFrontierClient : IFrontierClient
         var key = Environment.GetEnvironmentVariable(config.FrontierApiKeyEnv);
         if (!string.IsNullOrEmpty(key))
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", key);
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("tenninety/3.2");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("tenninety/1");
     }
 
     public Task<Plan> GeneratePlanAsync(string sanitizedSpecMarkdown, CancellationToken ct = default) =>

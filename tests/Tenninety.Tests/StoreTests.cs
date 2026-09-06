@@ -12,7 +12,7 @@ public class StoreRoundTripTests
         var plan = TestPlans.Simple();
         var json = Json.Serialize(plan);
 
-        Assert.Contains("\"schema_version\": \"3.2\"", json);
+        Assert.Contains("\"schema_version\": \"1\"", json);
         Assert.Contains("\"project_name\": \"Demo\"", json);
         Assert.Contains("\"global_context\"", json);
         Assert.Contains("\"work_packages\"", json);

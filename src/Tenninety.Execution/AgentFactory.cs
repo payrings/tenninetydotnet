@@ -65,7 +65,7 @@ public sealed class AgentFactory
             if (!string.IsNullOrEmpty(key2))
                 client.DefaultRequestHeaders.Authorization =
                     new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key2);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("tenninety-local/3.2");
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("tenninety-local/1");
             return client;
         });
     }

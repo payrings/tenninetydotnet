@@ -55,7 +55,7 @@ public static class PlannerPrompt
 
         Respond with ONLY one valid JSON object — no markdown fences, no commentary — exactly:
         {
-          "schema_version": "3.2",
+          "schema_version": "1",
           "project_name": "string",
           "global_context": {
             "tech_stack": "string",
