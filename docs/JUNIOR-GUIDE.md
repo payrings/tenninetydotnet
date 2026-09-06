@@ -419,19 +419,24 @@ starts with `Revert "…"`.
 
 When mocks feel boring:
 
-1. Start local model servers (they imitate the standard OpenAI web-API shape):
-   `docker compose up -d` from the framework root (coder on port 8000, reviewer on 8001).
+1. Start one llama-swap profile switcher on the host (it imitates the standard OpenAI web-API
+   shape and swaps the coder and reviewer models through your single AMD Radeon RX 7900 XTX
+   over Vulkan; keep `docker compose up -d` only for the internal model network and optional
+   sample database — it no longer starts a GPU or vLLM service).
 2. Build or obtain digest-pinned role images. The Coder image must contain
    [aider](https://aider.chat), OpenCode, or Pi according to the `"coder_agent"` knob;
    OpenCode/Pi require an explicit agent `model`. The Reviewer model call stays host-controlled,
    while its repository exploration runs in an offline Reviewer image.
 3. Edit `.tenninety/config.json`:
    `"provider_mode": "aider"`,
-   `"local_models": { "coder": "coder", "reviewer": "reviewer", "coder_endpoint": "http://localhost:8000/v1", "reviewer_endpoint": "http://localhost:8001/v1" }`, and set your real
+   `"use_llama_swap": true`,
+   `"local_models": { "coder": "qwen-coder", "reviewer": "devstral-reviewer" }`,
+   `"llama_swap_endpoint": "http://localhost:8080/v1"`, and set your real
    `"frontier_endpoint"` / `"frontier_model"` if you have one. For Docker mode, also configure
    the pinned role images and internal model network from
    [`SANDBOX-CONFIG.example.jsonc`](SANDBOX-CONFIG.example.jsonc); the Coder's in-container
-   endpoint is `sandbox.roles.coder.model_endpoint`, not host loopback.
+   endpoint is `sandbox.roles.coder.model_endpoint` and must reach llama-swap through the Docker
+   bridge (never host loopback).
 4. Use different coder and reviewer identifiers, and verify that your model server maps them
    to genuinely different weights – different aliases can otherwise point at the same model.
    If both models do not fit your GPU card together, set `"use_llama_swap": true` for the

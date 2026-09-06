@@ -4,11 +4,13 @@
   "provider_mode": "aider",
   "coder_agent": "aider",
   "local_models": {
-    "coder": "coder",
-    "reviewer": "reviewer",
-    "coder_endpoint": "http://coder-model:8000/v1",
-    "reviewer_endpoint": "http://127.0.0.1:8001/v1"
+    "coder": "qwen-coder",
+    "reviewer": "devstral-reviewer",
+    "coder_endpoint": "http://localhost:8080/v1",
+    "reviewer_endpoint": "http://127.0.0.1:8080/v1"
   },
+  "use_llama_swap": true,
+  "llama_swap_endpoint": "http://localhost:8080/v1",
   "sandbox": {
     "mode": "docker",
     "runtime": "docker-cli",
@@ -24,7 +26,10 @@
         "pids": 256,
         "network": "model",
         "timeout_seconds": 1800,
-        "model_endpoint": "http://coder-model:8000/v1"
+        // Host llama-swap as seen from INSIDE the coder container (docker-compose.yml only
+        // provisions the internal network; llama-swap runs on the host). Substitute your
+        // bridge gateway: e.g. "http://172.20.0.1:8080/v1". Never host loopback.
+        "model_endpoint": "http://coder-model:8080/v1"
       },
       "reviewer": {
         "image": "registry.example/tenninety-reviewer@sha256:0000000000000000000000000000000000000000000000000000000000000000",

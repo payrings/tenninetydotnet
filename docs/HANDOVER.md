@@ -291,10 +291,15 @@ Exit codes: `0` ok/paused/stopped · `1` error · `2` usage · `4` deadlock.
 
 ## 7. Live-mode bring-up checklist (never yet exercised – treat as unproven)
 
-1. `docker compose up -d` (vLLM coder :8000, reviewer :8001; adjust image/model env).
-2. `.tenninety/config.json`: `"provider_mode": "aider"`, dedicated coder endpoint `:8000/v1`
-   and reviewer endpoint `:8001/v1`, with model names matching
-   `--served-model-name`; real `frontier_endpoint`/`frontier_model`.
+1. Start llama-swap on the host (`listen: :8080`, profiles `qwen-coder`/`devstral-reviewer`
+   in `~/llama-swap/config.yaml`, one AMD Radeon RX 7900 XTX via Vulkan); ensure it binds
+   0.0.0.0 or the Docker bridge subnet so the sandboxed Coder can reach it; `docker compose up -d`
+   only creates the internal model network (no GPU service, no vLLM).
+2. `.tenninety/config.json`: `"provider_mode": "aider"`, `"use_llama_swap": true`,
+   `"llama_swap_endpoint": "http://localhost:8080/v1"` for the host-side Reviewer, model names
+   `qwen-coder`/`devstral-reviewer`, and the in-container Coder endpoint
+   `sandbox.roles.coder.model_endpoint` pointing at the bridge-reachable llama-swap address
+   (e.g. `http://172.20.0.1:8080/v1`); real `frontier_endpoint`/`frontier_model`.
 3. API key via environment variable (host only; never in files):
    ```bash
    # bash

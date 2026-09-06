@@ -1,70 +1,30 @@
-# 10/90 tenninety - local model serving.
+# 10/90 tenninety - local model serving (single-card llama-swap topology).
 #
-# Two OpenAI-compatible MODEL SERVERS expose different coder and reviewer identifiers. They are
-# not the disposable Coder/Reviewer execution containers. The Coder model server joins the
-# internal `tenninety-coder-model` network so the sandboxed Coder can reach
-# http://coder-model:8000/v1 without receiving general network egress. A separate server-egress
-# network permits model downloads; pre-populate the cache and remove that attachment for a fully
-# offline model server. The defaults require two NVIDIA GPUs; set CODER_GPU_ID/REVIEWER_GPU_ID.
+# Local models are served on the PHYSICAL HOST by llama-swap
+# (https://github.com/mostro/llama-swap), which drives one llama.cpp server per profile and
+# swaps them on demand. Both the coder profile (qwen-coder) and the reviewer profile
+# (devstral-reviewer) share ONE AMD Radeon RX 7900 XTX through llama.cpp's Vulkan backend.
+# This file therefore starts NO GPU container and needs neither NVIDIA GPUs nor vLLM.
 #
-#   docker compose up -d
-#   # then set .tenninety/config.json:
-#   #   "provider_mode": "aider",
-#   #   "local_models": {
-#   #     "coder": "coder",
-#   #     "reviewer": "reviewer",
-#   #     "coder_endpoint": "http://localhost:8000/v1",
-#   #     "reviewer_endpoint": "http://localhost:8001/v1"
-#   #   }
+# What this file still provisions:
+#   - the internal `tenninety-coder-model` bridge network the sandboxed Coder joins, and
+#   - an optional PostgreSQL for the sample spec's technical hints.
+#
+# Host llama-swap reachability (one-time operator steps; the sandbox stays unchanged):
+#   1. Run llama-swap on the host bound to 0.0.0.0:8080 (not 127.0.0.1) so the Docker bridge
+#      can reach it, with your ~/llama-swap/config.yaml profiles. If the host firewall drops
+#      bridge traffic, add a forward/route for the bridge subnet to 0.0.0.0:8080 only.
+#   2. Point sandbox.roles.coder.model_endpoint at the llama-swap URL AS SEEN FROM INSIDE the
+#      coder container, e.g. http://172.20.0.1:8080/v1 (substitute your bridge gateway). The
+#      model network stays internal; never weaken it just to make host loopback work.
+#   3. In .tenninety/config.json (Reviewer and default aider coder run host-side):
+#        "provider_mode": "aider",
+#        "use_llama_swap": true,
+#        "local_models": { "coder": "qwen-coder", "reviewer": "devstral-reviewer" }
+#
+#   docker compose up -d     # creates the network (+ optional DB); llama-swap runs on the host
 #
 services:
-  coder-model:
-    image: vllm/vllm-openai:latest
-    command: >
-      --model ${CODER_MODEL:-Qwen/Qwen3.6-27B}
-      --served-model-name coder
-      --max-model-len 16384
-      --gpu-memory-utilization 0.85
-    ports:
-      - "127.0.0.1:8000:8000"
-    ipc: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["${CODER_GPU_ID:-0}"]
-              capabilities: [gpu]
-    volumes:
-      - hf-cache:/root/.cache/huggingface
-    networks:
-      - coder-model-internal
-      - model-server-egress
-    restart: unless-stopped
-
-  reviewer-model:
-    image: vllm/vllm-openai:latest
-    command: >
-      --model ${REVIEWER_MODEL:-mistralai/Devstral-Small-2507}
-      --served-model-name reviewer
-      --max-model-len 16384
-      --gpu-memory-utilization 0.85
-    ports:
-      - "127.0.0.1:8001:8000"
-    ipc: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["${REVIEWER_GPU_ID:-1}"]
-              capabilities: [gpu]
-    volumes:
-      - hf-cache:/root/.cache/huggingface
-    networks:
-      - model-server-egress
-    restart: unless-stopped
-
   # Optional: PostgreSQL matching the sample spec's technical hints.
   postgres:
     image: postgres:16-alpine
@@ -72,8 +32,6 @@ services:
       POSTGRES_PASSWORD: example
     ports:
       - "127.0.0.1:5432:5432"
-    networks:
-      - model-server-egress
     profiles:
       - sample-db
 
@@ -81,8 +39,3 @@ networks:
   coder-model-internal:
     name: tenninety-coder-model
     internal: true
-  model-server-egress:
-    internal: false # model-server downloads only; sandbox role containers never join it
-
-volumes:
-  hf-cache:

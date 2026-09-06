@@ -268,13 +268,13 @@ are hard acceptance errors since the blueprint upgrade.
   "frontier_endpoint": "https://api.frontier.ai/v1",
   "frontier_model": "frontier-architect",
   "frontier_api_key_env": "TENNINETY_FRONTIER_API_KEY",
-  "local_models_endpoint": "http://localhost:8000/v1",
+  "local_models_endpoint": "http://localhost:8080/v1",
   "local_models": {
-    "coder": "coder", "reviewer": "reviewer", // served names from docker-compose.yml
-    "coder_endpoint": "http://localhost:8000/v1",   // optional dedicated endpoint
-    "reviewer_endpoint": "http://localhost:8001/v1" // empty falls back to local_models_endpoint
+    "coder": "qwen-coder", "reviewer": "devstral-reviewer", // llama-swap profile names
+    "coder_endpoint": "http://localhost:8080/v1",   // optional dedicated endpoint
+    "reviewer_endpoint": "http://localhost:8080/v1" // empty falls back to local_models_endpoint
   },
-  "use_llama_swap": false,                 // route both models through llama-swap
+  "use_llama_swap": true,                  // route both models through llama-swap (one GPU card)
   "llama_swap_endpoint": "http://localhost:8080/v1",
   "attempt_timeout_minutes": 10,           // hung agent calls are killed and counted
   "aider": {
@@ -315,12 +315,16 @@ Framework secrets are env-var only: `TENNINETY_FRONTIER_API_KEY` (Frontier calls
 Docker Coder tools receive only the closed model environment assembled by trusted code. Use a
 narrowly scoped local-model token and never put credentials in project files.
 
-**Live topology** (`provider_mode=aider`): vLLM endpoints per
-`docker-compose.yml` (coder `127.0.0.1:8000`, reviewer `:8001`, served names `coder`/
-`reviewer`) **or** a single llama-swap proxy when `use_llama_swap=true`. The supplied Compose
-model server has a separate egress network for downloads; the disposable Coder joins only the
-internal `tenninety-coder-model` network. Live coding requires the selected coding-agent CLI in
-the digest-pinned Coder image.
+**Live topology** (`provider_mode=aider`): one llama-swap proxy on the physical host
+(`listen: :8080`, profiles `qwen-coder`/`devstral-reviewer` from `~/llama-swap/config.yaml`)
+swaps both models through a single AMD Radeon RX 7900 XTX (llama.cpp Vulkan backend). The
+supplied `docker-compose.yml` starts no GPU service and no vLLM; it only provisions the
+internal `tenninety-coder-model` network (plus an optional sample PostgreSQL). The host-side
+Reviewer and default aider coder use `use_llama_swap=true` + `llama_swap_endpoint`
+(`http://localhost:8080/v1`); the disposable Coder's in-container endpoint
+`sandbox.roles.coder.model_endpoint` must instead point at the bridge-reachable llama-swap
+address (e.g. `http://172.20.0.1:8080/v1` — never host loopback). Live coding requires the
+selected coding-agent CLI in the digest-pinned Coder image.
 
 **Sandbox posture:** Docker mode runs Coder, Reviewer exploration, optional restricted Restore,
 and Tester commands in disposable containers without the authoritative repository or Docker

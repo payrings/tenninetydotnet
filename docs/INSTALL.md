@@ -77,7 +77,7 @@ Never attach these to the agent VM:
 | --- | --- | --- |
 | .NET 10 SDK and ASP.NET targeting pack | framework and generated project | physical host for rehearsal; VM for live mode |
 | Git 2.40 or newer | all framework state and promotion | same OS as tenninety |
-| llama.cpp with working Vulkan or CUDA | local inference | physical host only |
+| llama.cpp with working Vulkan backend | local inference | physical host only |
 | llama-swap | one-GPU model swapping | physical host only |
 | Two genuinely different GGUF models | coder and independent reviewer | physical host only |
 | aider | live coding-agent process | VM only in the isolated path |
@@ -254,10 +254,9 @@ hf --help
 
 GPU notes:
 
-- AMD users normally need `mesa`, `vulkan-radeon`, and a Vulkan-capable llama.cpp build. Verify
-  with `vulkaninfo` if llama.cpp cannot find the card.
-- NVIDIA users need the matching `nvidia` and `nvidia-utils` packages and a CUDA-capable
-  llama.cpp build. The regular Arch package may use Vulkan instead.
+- One AMD Radeon RX 7900 XTX serves both models (swapped by llama-swap). It needs `mesa`,
+  `vulkan-radeon`, and a Vulkan-capable llama.cpp build. Verify with `vulkaninfo` if
+  llama.cpp cannot find the card.
 - Do not pass the GPU into the agent VM. Only llama.cpp on the physical host needs it.
 
 ### 5.2 Install llama-swap
@@ -1607,15 +1606,28 @@ environment allowlist, or Git branch is not a filesystem sandbox.
 
 ---
 
-## 19. Alternative vLLM topology
+## 19. Single-card llama-swap topology (AMD Radeon RX 7900 XTX / Vulkan)
 
-The repository's `docker-compose.yml` serves coder and reviewer models on physical-host loopback
-ports 8000 and 8001. The defaults expect two NVIDIA GPUs and are not suitable for two large models
-on one 24 GB card.
+Model serving no longer uses vLLM and no model container is started. One physical **AMD Radeon
+RX 7900 XTX** runs both models through **llama-swap** on the host, which swaps two llama.cpp
+server profiles (`qwen-coder`, `devstral-reviewer` — see `~/llama-swap/config.yaml`) in and out
+of the single card on demand via the Vulkan backend. The repo's `docker-compose.yml` only
+provisions the internal `tenninety-coder-model` network (and an optional sample PostgreSQL);
+it deliberately contains no GPU service, no NVIDIA reservation, and no vLLM image.
 
-From inside the VM, physical-host `127.0.0.1:8000` and `:8001` are not reachable directly. Create
-separate restricted reverse forwards to guest loopback ports or place model services behind one
-authenticated proxy. Never bind them to `0.0.0.0` merely to make the VM connection work.
+Reachability for the sandboxed Coder (its endpoint must be resolvable from INSIDE the coder
+container, and loopback is rejected):
+
+1. Bind llama-swap to a Docker-bridge-reachable address — `0.0.0.0:8080` or the bridge subnet
+   address — never `127.0.0.1` alone. From inside the coder container that means the host
+   gateway address (e.g. `http://172.20.0.1:8080/v1`); substitute your bridge subnet.
+2. If the host firewall drops bridge traffic, add a host route/forward for the bridge subnet
+   to `0.0.0.0:8080` only.
+3. Never weaken the network (`internal: true`) merely to make loopback work.
+
+Host-side Reviewer (and default aider coder) use
+`"use_llama_swap": true` + `"llama_swap_endpoint": "http://localhost:8080/v1"`, with model
+identifiers `qwen-coder` / `devstral-reviewer`.
 
 ---
 
