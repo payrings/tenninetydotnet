@@ -30,7 +30,7 @@ public static class TenNinety
     }
 
     /// <summary>
-    /// Layer ordering per the v3.2 Enterprise blueprint: L0 INFRA → L1 DOMAIN → L2 DATA →
+    /// Layer ordering per the blueprint: L0 INFRA → L1 DOMAIN → L2 DATA →
     /// L3 APP → L4 API/PRESENTATION (incl. UI) → L5 TEST. A lower layer must never depend
     /// on a higher one; unknown layers are skipped by the rank check.
     /// </summary>

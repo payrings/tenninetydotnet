@@ -11,10 +11,9 @@ explicit revisit trigger – see [JUDGMENT-CALLS.md](JUDGMENT-CALLS.md).
 
 ---
 
-## 0. Adopting the v3.2 Enterprise blueprint prompt
+## 0. Adopting the blueprint prompt
 
-The operator supplied the authoritative **Frontier Model Blueprint Prompt (v3.2
-Enterprise)** after initial implementation. It supersedes the sketch in Part VIII of the
+The operator supplied the authoritative **Frontier Model Blueprint Prompt** after initial implementation. It supersedes the sketch in Part VIII of the
 original spec, and the framework was adjusted to fit it:
 
 | Blueprint element | Framework change |
@@ -25,7 +24,7 @@ original spec, and the framework was adjusted to fit it:
 | `notes` on every WP + AMBIGUOUS/CONFLICT protocol | Marker detection (`WpMarkers`), validator allowances, scheduler exclusions – see below |
 | Layers now include `UI` and `TEST-E2E` | Added to the layer-rank table (both hard-coded ranks) |
 | "A WP in a lower layer cannot depend on a higher layer" | Upgraded from warning to **hard acceptance error** (when both layers have known ranks) |
-| Planner system prompt | Rewritten to carry the enterprise blueprint verbatim-in-spirit: role, rules 1–6, ambiguity protocol, self-correction checklist, full output schema |
+| Planner system prompt | Rewritten to carry the blueprint prompt verbatim-in-spirit: role, rules 1–6, ambiguity protocol, self-correction checklist, full output schema |
 
 **Ambiguity protocol decisions (spec-gap calls of my own):**
 

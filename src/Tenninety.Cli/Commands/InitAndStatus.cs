@@ -173,7 +173,7 @@ public static class StatusCommand
         AnsiConsole.Write(table);
     }
 
-    /// <summary>Blueprint v3.2 Enterprise: visible marker for AMBIGUOUS/CONFLICT packages.</summary>
+    /// <summary>Blueprint: visible marker for AMBIGUOUS/CONFLICT packages.</summary>
     internal static string FlagSuffix(Core.Models.WorkPackage wp)
     {
         if (Core.Validation.WpMarkers.IsConflict(wp)) return " [red]⚠CONFLICT[/]";

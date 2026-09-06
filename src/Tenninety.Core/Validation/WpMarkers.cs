@@ -4,7 +4,7 @@ using Tenninety.Core.Models;
 namespace Tenninety.Core.Validation;
 
 /// <summary>
-/// Blueprint v3.2 Enterprise ambiguity protocol markers, carried in <see cref="WorkPackage.Notes"/>.
+/// Blueprint ambiguity protocol markers, carried in <see cref="WorkPackage.Notes"/>.
 /// <list type="bullet">
 /// <item><c>AMBIGUOUS</c> — a critical detail was missing; the WP still carries directives built on
 /// recorded assumptions and remains executable, but the human should review it.</item>

@@ -20,9 +20,9 @@ public class StoreRoundTripTests
     }
 
     [Fact]
-    public void Plan_round_trips_enterprise_blueprint_fields()
+    public void Plan_round_trips_blueprint_fields()
     {
-        // Blueprint v3.2 Enterprise: architecture_map, directory_structure, module, notes.
+        // Blueprint: architecture_map, directory_structure, module, notes.
         var plan = TestPlans.Simple();
         plan.ArchitectureMap = new ArchitectureMap
         {

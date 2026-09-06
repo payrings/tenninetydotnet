@@ -97,7 +97,7 @@ public class PlanValidatorTests
     [Fact]
     public void Conflict_wps_may_have_no_directives_but_are_flagged()
     {
-        // Blueprint v3.2 Enterprise: contradictory spec rules ⇒ no directives, human resolves later.
+        // Blueprint: contradictory spec rules ⇒ no directives, human resolves later.
         var plan = TestPlans.Simple();
         var wp = plan.WorkPackages[1];
         wp.Directives.Clear();
@@ -134,7 +134,7 @@ public class PlanValidatorTests
     [Fact]
     public void Lower_layer_dependending_on_higher_layer_is_a_hard_error()
     {
-        // Blueprint v3.2 Enterprise rule 4: lower layers must never depend on higher ones.
+        // Blueprint rule 4: lower layers must never depend on higher ones.
         var plan = new Plan
         {
             ProjectName = "Inverted",

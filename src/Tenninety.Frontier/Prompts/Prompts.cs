@@ -3,7 +3,7 @@ using System.Text;
 namespace Tenninety.Frontier.Prompts;
 
 /// <summary>
-/// Builds the v3.2 Enterprise blueprint prompt (Principal Architect &amp; System Decomposer)
+/// Builds the blueprint prompt (Principal Architect &amp; System Decomposer)
 /// sent to the Frontier model. Mirrors the operator-supplied blueprint prompt: constraints,
 /// output schema (architecture_map, directory_structure, module/notes), ambiguity protocol,
 /// decomposition protocol and the self-correction checklist.

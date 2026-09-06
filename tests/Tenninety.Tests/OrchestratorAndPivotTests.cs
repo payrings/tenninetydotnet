@@ -53,7 +53,7 @@ public class OrchestratorSelectionTests
     [Fact]
     public void Conflict_wps_are_never_scheduled()
     {
-        // Blueprint v3.2 Enterprise: CONFLICT packages carry no directives and await human resolution.
+        // Blueprint: CONFLICT packages carry no directives and await human resolution.
         var plan = TestPlans.Simple();
         plan.WorkPackages[0].Notes = "CONFLICT: spec contradicts itself on task ownership.";
         var o = MakeOrchestrator(plan, new RuntimeState());

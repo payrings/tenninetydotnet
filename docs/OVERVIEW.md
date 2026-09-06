@@ -142,9 +142,9 @@ The container boundary is defense in depth, not a substitute for a patched least
 deployment. An explicit `sandbox.mode=unsafe-host` selects the legacy host path and is prominently
 reported; Docker failures never fall back to it.
 
-## Frontier blueprint (v3.2 Enterprise)
+## Frontier blueprint
 
-`tenninety plan` drives the Frontier with the **v3.2 Enterprise blueprint prompt**
+`tenninety plan` drives the Frontier with the **blueprint prompt**
 (Principal Architect & System Decomposer). Plans include the Architect's `architecture_map`
 (bounded contexts, core entities, key dependencies) and `global_context.directory_structure`,
 every WP carries `module` and `notes`, and the ambiguity protocol is enforced end-to-end:
@@ -163,7 +163,7 @@ framework's `plan.json` contract exactly.
 | --- | --- |
 | `src/Tenninety.Core` | Data contracts (`plan.json`, `state.json`, `config.json`), DAG validator, marker detection, secret sanitiser, audit log |
 | `src/Tenninety.Git` | Git-first state engine: branches, squash-only promotions, mechanical reverts |
-| `src/Tenninety.Frontier` | Frontier prompts (v3.2 Enterprise blueprint), OpenAI-compatible HTTP client, deterministic offline mock |
+| `src/Tenninety.Frontier` | Frontier prompts (blueprint prompt), OpenAI-compatible HTTP client, deterministic offline mock |
 | `src/Tenninety.Execution` | Docker Coder, offline agentic Reviewer, restricted Restore, offline mechanical Tester, startup recovery, plus the 10/20-attempt Execution Engine, serial Orchestrator, Pivot & Revert services |
 | `src/Tenninety.Tui` | Supervisor dashboard: queue view, system health, `[P]/[S]/[R]/[L]/[Q]` controls |
 | `src/Tenninety.Cli` | `tenninety` executable: `init`, `plan`, `start`, `status`, `pause/resume/stop`, `revert` |

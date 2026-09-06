@@ -11,7 +11,7 @@ public sealed class ValidationResult
 }
 
 /// <summary>
-/// Enforces the v3.2 Enterprise planning rules on plan.json before it is accepted as the
+/// Enforces the blueprint planning rules on plan.json before it is accepted as the
 /// execution graph, and treats the graph as UNTRUSTED MODEL OUTPUT (Part VI):
 /// strict id format (blocks branch-name and shell injection downstream), closed layer set,
 /// unique ids/dependencies, atomic decomposition, size caps, ambiguity-marker surfacing.
@@ -69,7 +69,7 @@ public static partial class PlanValidator
             else if (wp.Goal.Length > MaxGoalLength)
                 result.Errors.Add($"'{wp.Id}': goal exceeds {MaxGoalLength} characters.");
 
-            // Blueprint v3.2 Enterprise ambiguity protocol: a CONFLICT WP intentionally has no
+            // Blueprint ambiguity protocol: a CONFLICT WP intentionally has no
             // directives ("do not generate directives"); it must never be scheduled. Any other WP
             // without directives violates atomic decomposition.
             var conflict = WpMarkers.IsConflict(wp);
@@ -200,7 +200,7 @@ public static partial class PlanValidator
                 if (!byId.TryGetValue(dep, out var depWp)) continue;
                 if (TenNinety.LayerRanks.TryGetValue(depWp.Layer, out var depRank) && depRank > rank)
                 {
-                    // Blueprint v3.2 Enterprise rule 4: "A WP in a lower layer cannot depend on a
+                    // Blueprint rule 4: "A WP in a lower layer cannot depend on a
                     // WP in a higher layer." This is a hard error, not a style warning.
                     result.Errors.Add(
                         $"'{wp.Id}' ({wp.Layer}) depends on '{dep}' ({byId[dep].Layer}); " +

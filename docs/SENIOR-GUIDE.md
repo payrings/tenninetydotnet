@@ -209,7 +209,7 @@ catches drift cheaply. Details in [`SPEC-AUTHORING.md`](SPEC-AUTHORING.md) §Ind
 `plan.json` is the graph; `state.json` is runtime truth. Do not "fix" stale statuses by
 editing `plan.json`.
 
-**Blueprint v3.2 Enterprise fields.** Plans additionally carry an optional
+**Blueprint fields.** Plans additionally carry an optional
 `architecture_map` (bounded contexts, core entities, key dependencies) and
 `global_context.directory_structure`; every WP has `module` (bounded context) and `notes`
 (free-form). The ambiguity protocol lives in `notes`:

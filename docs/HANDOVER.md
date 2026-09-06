@@ -57,7 +57,7 @@ src/Tenninety.Core          contracts & rules (no I/O beyond files)
 src/Tenninety.Git/GitService.cs    IGitService + GitService (branches, squash promotion, revert)
 
 src/Tenninety.Frontier      everything sent to / parsed from the Architect LLM
-  Prompts/Prompts.cs          PlannerPrompt.System  ← THE v3.2 Enterprise blueprint prompt
+  Prompts/Prompts.cs          PlannerPrompt.System  ← THE blueprint prompt
                               RepairPrompt / PivotPrompt / RevertPrompt
   JsonExtractor.cs            tolerant first-JSON-object extraction from model output
   HttpFrontierClient.cs       OpenAI-compatible client (live frontier)

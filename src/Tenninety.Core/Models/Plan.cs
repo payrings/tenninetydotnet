@@ -13,7 +13,7 @@ public sealed class Plan
     [JsonPropertyName("global_context")]
     public GlobalContext GlobalContext { get; set; } = new();
 
-    /// <summary>Blueprint v3.2 Enterprise: the Architect's structural analysis of the spec.</summary>
+    /// <summary>Blueprint: the Architect's structural analysis of the spec.</summary>
     [JsonPropertyName("architecture_map")]
     public ArchitectureMap? ArchitectureMap { get; set; }
 
@@ -32,7 +32,7 @@ public sealed class GlobalContext
     [JsonPropertyName("assumptions")]
     public List<string> Assumptions { get; set; } = new();
 
-    /// <summary>Blueprint v3.2 Enterprise: intended project layout, e.g. {"/src": [...], "/tests": [...]}.</summary>
+    /// <summary>Blueprint: intended project layout, e.g. {"/src": [...], "/tests": [...]}.</summary>
     [JsonPropertyName("directory_structure")]
     public Dictionary<string, List<string>>? DirectoryStructure { get; set; }
 }
@@ -57,7 +57,7 @@ public sealed class WorkPackage
     [JsonPropertyName("layer")]
     public string Layer { get; set; } = "";
 
-    /// <summary>Blueprint v3.2 Enterprise: bounded context / module this package belongs to.</summary>
+    /// <summary>Blueprint: bounded context / module this package belongs to.</summary>
     [JsonPropertyName("module")]
     public string Module { get; set; } = "";
 
@@ -77,7 +77,7 @@ public sealed class WorkPackage
     public List<string> AcceptanceCriteria { get; set; } = new();
 
     /// <summary>
-    /// Blueprint v3.2 Enterprise: free-form notes. Carries the AMBIGUOUS/CONFLICT markers of the
+    /// Blueprint: free-form notes. Carries the AMBIGUOUS/CONFLICT markers of the
     /// ambiguity protocol (see <see cref="Validation.WpMarkers"/>).
     /// </summary>
     [JsonPropertyName("notes")]

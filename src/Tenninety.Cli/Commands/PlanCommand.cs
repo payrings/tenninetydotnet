@@ -63,7 +63,7 @@ public static class PlanCommand
         foreach (var warning in validation.Warnings)
             AnsiConsole.MarkupLine($"[yellow]warning:[/] {Markup.Escape(warning)}");
 
-        // Blueprint v3.2 Enterprise: CONFLICT WPs will never be executed until a pivot REWORKs them.
+        // Blueprint: CONFLICT WPs will never be executed until a pivot REWORKs them.
         var conflicts = plan.WorkPackages.Where(WpMarkers.IsConflict).ToList();
         var ambiguities = plan.WorkPackages.Where(w => WpMarkers.IsAmbiguous(w) && !WpMarkers.IsConflict(w)).ToList();
         if (conflicts.Count > 0)
@@ -161,7 +161,7 @@ public static class PlanCommand
         foreach (var group in byLayer)
             AnsiConsole.MarkupLine($"[b]{Markup.Escape(group.Key)}[/]: {group.Count()} WP(s)");
 
-        // Blueprint v3.2 Enterprise structural analysis.
+        // Blueprint structural analysis.
         var map = plan.ArchitectureMap;
         if (map is not null)
         {

@@ -151,7 +151,7 @@ public sealed class Orchestrator
 
     /// <summary>
     /// Lowest-id WP whose dependencies are all DONE and which is still PENDING.
-    /// CONFLICT-flagged packages (blueprint v3.2 Enterprise ambiguity protocol) are never
+    /// CONFLICT-flagged packages (blueprint ambiguity protocol) are never
     /// scheduled: they carry no directives and require human resolution via a pivot REWORK.
     /// </summary>
     public WorkPackage? SelectNextReady()
