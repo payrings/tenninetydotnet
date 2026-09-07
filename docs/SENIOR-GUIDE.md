@@ -268,14 +268,15 @@ are hard acceptance errors since the blueprint upgrade.
   "frontier_endpoint": "https://api.frontier.ai/v1",
   "frontier_model": "frontier-architect",
   "frontier_api_key_env": "TENNINETY_FRONTIER_API_KEY",
-  "local_models_endpoint": "http://localhost:8080/v1",
+  "local_models_endpoint": "http://localhost:8000/v1",
   "local_models": {
-    "coder": "qwen-coder", "reviewer": "devstral-reviewer", // llama-swap profile names
-    "coder_endpoint": "http://localhost:8080/v1",   // optional dedicated endpoint
-    "reviewer_endpoint": "http://localhost:8080/v1" // empty falls back to local_models_endpoint
+    "coder": "coder", "reviewer": "reviewer",             // llama-swap profile names
+    "coder_endpoint": "",                           // optional dedicated endpoint
+    "reviewer_endpoint": ""                         // empty falls back to local_models_endpoint
   },
   "use_llama_swap": true,                  // route both models through llama-swap (one GPU card)
-  "llama_swap_endpoint": "http://localhost:8080/v1",
+  "llama_swap_endpoint": "http://127.0.0.1:8080/v1",
+  "llama_swap_coder_endpoint": "http://llama-swap:8080/v1", // as seen INSIDE the coder sandbox
   "attempt_timeout_minutes": 10,           // hung agent calls are killed and counted
   "aider": {
     "model": "",                           // empty → openai/<coder>
@@ -306,25 +307,54 @@ creation. Independent peer review requires genuinely different weights, but alia
 verified mechanically; operators must confirm what each endpoint serves.
 
 **llama-swap flag.** When the two models do not fit one GPU card together, set
-`use_llama_swap=true` and point `llama_swap_endpoint` at your proxy. The Reviewer and default
-aider coder route through it. OpenCode/Pi own their provider transport, so configure the
-selected tool's provider/model and authentication for that proxy separately.
+`use_llama_swap=true`. Host-side roles (Reviewer, aider under unsafe-host) route through
+`llama_swap_endpoint`; the sandboxed Coder routes through `llama_swap_coder_endpoint`. Both are
+validated on use – malformed, credential-bearing or (container-side) loopback values fail
+closed. With llama-swap disabled, the coder keeps `sandbox.roles.coder.model_endpoint` and host
+roles keep the shared/per-role fallback. OpenCode/Pi own their provider transport, so configure
+the selected tool's provider/model and authentication for that proxy separately.
 
 Framework secrets are env-var only: `TENNINETY_FRONTIER_API_KEY` (Frontier calls) and optional
 `TENNINETY_LOCAL_API_KEY` (framework Reviewer plus aider, translated to `OPENAI_API_KEY`).
 Docker Coder tools receive only the closed model environment assembled by trusted code. Use a
 narrowly scoped local-model token and never put credentials in project files.
 
-**Live topology** (`provider_mode=aider`): one llama-swap proxy on the physical host
-(`listen: :8080`, profiles `qwen-coder`/`devstral-reviewer` from `~/llama-swap/config.yaml`)
-swaps both models through a single AMD Radeon RX 7900 XTX (llama.cpp Vulkan backend). The
-supplied `docker-compose.yml` starts no GPU service and no vLLM; it only provisions the
-internal `tenninety-coder-model` network (plus an optional sample PostgreSQL). The host-side
-Reviewer and default aider coder use `use_llama_swap=true` + `llama_swap_endpoint`
-(`http://localhost:8080/v1`); the disposable Coder's in-container endpoint
-`sandbox.roles.coder.model_endpoint` must instead point at the bridge-reachable llama-swap
-address (e.g. `http://172.20.0.1:8080/v1` — never host loopback). Live coding requires the
-selected coding-agent CLI in the digest-pinned Coder image.
+**Live topology** (`provider_mode=aider`): the supplied `docker-compose.yml` runs **one
+llama-swap container** (pinned `ghcr.io/mostlygeek/llama-swap:unified-vulkan-…` image with the
+bundled llama.cpp) on a single AMD Radeon RX 7900 XTX through `/dev/dri` (Vulkan; no NVIDIA
+runtime, no vLLM, no `/dev/kfd`). The repository-owned `docker/llama-swap.yaml` defines the
+`coder` and `reviewer` profiles against user-supplied GGUF files (`models/coder.gguf`,
+`models/reviewer.gguf`; never committed, never downloaded at startup) and one llama-swap
+exclusive group keeps only the requested model resident. `docker compose up -d` publishes the
+model API on host loopback (`127.0.0.1:8080`) and creates the internal `tenninety-coder-model`
+network. Host-side Reviewer (and aider under unsafe-host) use `use_llama_swap=true` +
+`llama_swap_endpoint` (`http://127.0.0.1:8080/v1`); the disposable Coder's container-side
+endpoint is `llama_swap_coder_endpoint` (`http://llama-swap:8080/v1` – the container DNS name on
+the internal network; host loopback is rejected there). With llama-swap disabled, the coder's
+`sandbox.roles.coder.model_endpoint` (e.g. a dedicated model-server container on the model
+network) applies instead. Live coding requires the selected coding-agent CLI in the
+digest-pinned Coder image.
+
+**NVIDIA alternative:** the same compose works for a single NVIDIA card. Override
+`TENNINETY_LLAMA_SWAP_IMAGE` (upstream also publishes `unified-cuda`/`unified-cuda13`) and add a
+small override file that clears the AMD device block (Compose ≥ 2.24 `!override` tag — verified
+to render without `devices`/`group_add`) and adds the standard Compose GPU reservation:
+
+```yaml
+# docker-compose.nvidia.override.yml — run with:
+#   docker compose -f docker-compose.yml -f docker-compose.nvidia.override.yml up -d
+services:
+  llama-swap:
+    devices: !override []          # drop /dev/dri from the AMD default
+    group_add: !override []        # and the video group
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
 
 **Sandbox posture:** Docker mode runs Coder, Reviewer exploration, optional restricted Restore,
 and Tester commands in disposable containers without the authoritative repository or Docker
@@ -379,7 +409,8 @@ Commit `config.json` changes before `start` – it is tracked, and the tree must
 | Queue drains, exits 4, names `CONFLICT WPs awaiting human resolution` | blueprint ambiguity protocol: those WPs have no directives | resolve via pivot `[S]` REWORK (retires the marker) or hand-edit plan + re-validate |
 | Plan accepted with ⚠AMBIGUOUS rows | Architect recorded assumptions instead of failing | read `notes` for each; pivot-REWORK if an assumption is wrong |
 | Startup error: coder and reviewer identifiers must differ | identifier guard for independent peer review | configure different names and verify the endpoints serve different weights |
-| Both local models exceed one GPU card | single-card capacity | set `use_llama_swap=true` + `llama_swap_endpoint`; llama-swap loads them on demand |
+| Both local models exceed one GPU card | single-card capacity | `docker compose up -d` (llama-swap container) + `use_llama_swap=true`; llama-swap swaps the resident GGUF on demand |
+| Startup error: coder endpoint `refers to the container itself` | container-side model endpoint uses host loopback | set `llama_swap_coder_endpoint` to the Docker-network address (e.g. `http://llama-swap:8080/v1`), never `127.0.0.1`/`localhost` |
 | `aider exited N` on every attempt | aider CLI missing/misconfigured | check `aider --version`, `aider.model`/`aider.extra_args`, endpoint reachability |
 | Startup error: unknown coder_agent '…' | typo in the `coder_agent` knob | use one of: aider, opencode, pi |
 | Startup error: `opencode.model` / `pi.model` must be explicit | live model identity cannot otherwise be verified | set the selected agent's `model` to its `provider/model` id |

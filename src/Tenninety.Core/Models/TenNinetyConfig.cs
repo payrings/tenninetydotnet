@@ -32,11 +32,7 @@ public sealed class TenNinetyConfig
     [JsonPropertyName("local_models_endpoint")]
     public string LocalModelsEndpoint { get; set; } = "http://localhost:8000/v1";
 
-    /// <summary>
-    /// Human-settable switch: route both local models through a llama-swap proxy so the coder
-    /// and reviewer can share one GPU card (models are swapped on demand by name).
-    /// When true, <see cref="LlamaSwapEndpoint"/> is used instead of <see cref="LocalModelsEndpoint"/>.
-    /// </summary>
+    /// <summary>Per-attempt wall-clock budget for one live agent call, in minutes (clamped >= 1).</summary>
     [JsonPropertyName("attempt_timeout_minutes")]
     public int AttemptTimeoutMinutes
     {
@@ -44,11 +40,28 @@ public sealed class TenNinetyConfig
         set => field = Math.Max(1, value);
     } = 10;
 
+    /// <summary>Human-settable switch: route both local models through one llama-swap proxy so
+    /// the coder and reviewer can share one GPU card (models are swapped on demand by name).
+    /// When true, host roles use <see cref="LlamaSwapEndpoint"/> instead of
+    /// <see cref="LocalModelsEndpoint"/>, and the sandboxed Coder uses
+    /// <see cref="LlamaSwapCoderEndpoint"/> instead of <c>sandbox.roles.coder.model_endpoint</c>.</summary>
     [JsonPropertyName("use_llama_swap")]
     public bool UseLlamaSwap { get; set; }
 
+    /// <summary>Base URL of the OpenAI-compatible endpoint serving the local coder/reviewer
+    /// models as reached from HOST processes (Reviewer, aider under unsafe-host).</summary>
     [JsonPropertyName("llama_swap_endpoint")]
     public string LlamaSwapEndpoint { get; set; } = "http://localhost:8080/v1";
+
+    /// <summary>
+    /// llama-swap endpoint as reached FROM INSIDE the disposable Coder container (Docker
+    /// network DNS, never host loopback). Used only while <see cref="UseLlamaSwap"/> is set
+    /// and only in Docker mode; with llama-swap disabled the sandbox keeps its explicit
+    /// <c>sandbox.roles.coder.model_endpoint</c>. Resolution and validation are centralized
+    /// in <see cref="ModelEndpointResolver"/>.
+    /// </summary>
+    [JsonPropertyName("llama_swap_coder_endpoint")]
+    public string LlamaSwapCoderEndpoint { get; set; } = "http://llama-swap:8080/v1";
 
     /// <summary>
     /// Which terminal coding agent plays the Coder role in live mode:
@@ -124,11 +137,15 @@ public sealed class TenNinetyConfig
 
 public sealed class LocalModelsConfig
 {
+    /// <summary>Coder model identifier. Must match the llama-swap profile name (or the model
+    /// served by the direct endpoint) and must differ from <see cref="Reviewer"/>.</summary>
     [JsonPropertyName("coder")]
-    public string Coder { get; set; } = "Qwen3.6-27B";
+    public string Coder { get; set; } = "coder";
 
+    /// <summary>Reviewer model identifier. Must match the llama-swap profile name (or the
+    /// model served by the direct endpoint) and must differ from <see cref="Coder"/>.</summary>
     [JsonPropertyName("reviewer")]
-    public string Reviewer { get; set; } = "Devstral-24B";
+    public string Reviewer { get; set; } = "reviewer";
 
     /// <summary>Optional dedicated endpoint for the coder. Empty falls back to local_models_endpoint.</summary>
     [JsonPropertyName("coder_endpoint")]

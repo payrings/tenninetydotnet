@@ -38,26 +38,17 @@ public sealed class AgentFactory
 
     public bool IsMock => _providerMode == "mock";
 
-    /// <summary>Endpoint for a given role: llama-swap overrides everything; otherwise a
-    /// per-role endpoint wins over the shared one. Trailing slash guaranteed so HttpClient
-    /// relative calls keep the /v1 prefix.</summary>
-    public string EndpointFor(string role)
-    {
-        if (_config.UseLlamaSwap) return WithTrailingSlash(_config.LlamaSwapEndpoint);
-        var perRole = role.Equals("coder", StringComparison.OrdinalIgnoreCase)
-            ? _config.LocalModels.CoderEndpoint
-            : _config.LocalModels.ReviewerEndpoint;
-        return WithTrailingSlash(
-            string.IsNullOrWhiteSpace(perRole) ? _config.LocalModelsEndpoint : perRole);
-    }
-
-    private static string WithTrailingSlash(string url) =>
-        url.EndsWith('/') ? url : url + "/";
+    /// <summary>Endpoint for a given role as reached from HOST processes: llama-swap overrides
+    /// everything; otherwise a per-role endpoint wins over the shared one. Selection and
+    /// validation live in <see cref="ModelEndpointResolver"/>. Trailing slash guaranteed so
+    /// HttpClient relative calls keep the /v1 prefix.</summary>
+    public string EndpointFor(string role) =>
+        ModelEndpointResolver.ResolveHostEndpoint(_config, role);
 
     /// <summary>Shared, cached HTTP client per base address (one per process, not per WP).</summary>
     public HttpClient HttpClientFor(string baseUrl)
     {
-        var key = WithTrailingSlash(baseUrl);
+        var key = baseUrl.EndsWith('/') ? baseUrl : baseUrl + "/";
         return SharedClients.GetOrAdd(key, url =>
         {
             var client = new HttpClient { BaseAddress = new Uri(url) };
@@ -82,6 +73,13 @@ public sealed class AgentFactory
             throw new InvalidOperationException(
                 $"{CoderAgent}.model must be explicit in live mode so distinct coder/reviewer " +
                 "identifiers can be enforced.");
+
+        // With llama-swap enabled, live agent construction fails fast on a malformed host
+        // endpoint instead of surfacing only at the first HTTP call. The sandbox-side endpoint
+        // is validated where the sandbox is involved (CreateCoder, CoderToolPlan).
+        if (_config.UseLlamaSwap)
+            _ = ModelEndpointResolver.ValidateHttpEndpoint(
+                _config.LlamaSwapEndpoint, "llama_swap_endpoint", containerPerspective: false);
 
         // Effective coder identity honours per-agent model overrides (aider/opencode/pi),
         // so an override that happens to equal the reviewer is caught just like the default.
@@ -130,6 +128,9 @@ public sealed class AgentFactory
         if (_config.Sandbox.NormalizedMode == "docker")
         {
             _config.Sandbox.ValidateLiveDocker();
+            // Fail fast on the effective container-side endpoint (llama-swap or direct model)
+            // before any Docker resource exists; CoderToolPlan re-checks per attempt.
+            _ = ModelEndpointResolver.ResolveCoderContainerEndpoint(_config);
             return new SandboxCoderGate(
                 authoritativeGit,
                 _config,

@@ -50,6 +50,75 @@ public class AgentFactoryTests
     }
 
     [Fact]
+    public void Both_host_roles_route_to_the_llama_swap_endpoint_when_enabled()
+    {
+        var factory = new AgentFactory(LiveConfig(llamaSwap: true));
+        Assert.Equal("http://localhost:9999/v1/", factory.EndpointFor("coder"));
+        Assert.Equal("http://localhost:9999/v1/", factory.EndpointFor("reviewer"));
+    }
+
+    [Fact]
+    public void Malformed_llama_swap_endpoint_fails_live_agent_construction()
+    {
+        var config = LiveConfig(llamaSwap: true);
+        config.LlamaSwapEndpoint = "not-a-url";
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => new AgentFactory(config).CreateReviewer(FakeGit()));
+        Assert.Contains("llama_swap_endpoint", ex.Message);
+    }
+
+    [Fact]
+    public void Llama_swap_does_not_relax_the_distinct_model_rule()
+    {
+        var config = LiveConfig(reviewer: "Qwen3.6-27B", llamaSwap: true);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => new AgentFactory(config).CreateReviewer(FakeGit()));
+        Assert.Contains("identifiers must differ", ex.Message);
+    }
+
+    [Fact]
+    public void Docker_coder_construction_rejects_a_container_loopback_llama_swap_endpoint()
+    {
+        var config = LiveConfig(llamaSwap: true);
+        config.Sandbox.Mode = "docker";
+        config.Sandbox.Roles.Coder = new CoderSandboxRoleConfig
+        {
+            Image = "sha256:" + new string('a', 64),
+            ModelEndpoint = "http://coder-model:8000/v1",
+        };
+        config.Sandbox.Roles.Reviewer.Image = "sha256:" + new string('b', 64);
+        config.Sandbox.Roles.Tester.Image = "sha256:" + new string('c', 64);
+        // Host loopback inside the container would refer to the container itself.
+        config.LlamaSwapCoderEndpoint = "http://127.0.0.1:8080/v1";
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => new AgentFactory(config).CreateCoder(FakeGit()));
+        Assert.Contains("llama_swap_coder_endpoint", ex.Message);
+        Assert.Contains("refers to the container itself", ex.Message);
+    }
+
+    [Fact]
+    public void Docker_coder_construction_accepts_the_default_llama_swap_container_endpoint()
+    {
+        var config = LiveConfig(llamaSwap: true);
+        config.Sandbox.Mode = "docker";
+        config.Sandbox.Roles.Coder = new CoderSandboxRoleConfig
+        {
+            Image = "sha256:" + new string('a', 64),
+        };
+        config.Sandbox.Roles.Reviewer.Image = "sha256:" + new string('b', 64);
+        config.Sandbox.Roles.Tester.Image = "sha256:" + new string('c', 64);
+
+        // No lease is supplied: the endpoint check runs BEFORE the lease requirement, so a
+        // clean throw about the lease proves the endpoint itself validated fine.
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => new AgentFactory(config).CreateCoder(FakeGit()));
+        Assert.Contains("lease", ex.Message);
+    }
+
+    [Fact]
     public void Aider_model_override_is_used_verbatim()
     {
         var config = LiveConfig();

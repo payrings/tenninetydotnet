@@ -67,6 +67,61 @@ public sealed class CoderToolPlanTests
         Assert.Contains("$(touch /tmp/nope); --model reviewer", ValueAfter(plan.Arguments, "--message"));
     }
 
+    // ---- llama-swap container endpoint routing -----------------------------------------------
+
+    private static TenNinetyConfig LlamaSwapConfig(string tool)
+    {
+        var config = Config(tool);
+        config.UseLlamaSwap = true;
+        // The host endpoint and the disabled-mode sandbox endpoint must never leak into the
+        // container plan while llama-swap owns the routing.
+        config.LlamaSwapEndpoint = "http://127.0.0.1:8080/v1";
+        config.LlamaSwapCoderEndpoint = "http://llama-swap:8080/v1/";
+        return config;
+    }
+
+    [Fact]
+    public void Aider_plan_routes_the_container_to_llama_swap_when_enabled()
+    {
+        var plan = CoderToolPlan.Create(LlamaSwapConfig("aider"), Context());
+
+        Assert.Equal("http://llama-swap:8080/v1", ValueAfter(plan.Arguments, "--openai-api-base"));
+        Assert.Equal("http://llama-swap:8080/v1", plan.Environment["OPENAI_BASE_URL"]);
+        Assert.Equal("http://llama-swap:8080/v1", plan.Environment["OPENAI_API_BASE"]);
+        Assert.DoesNotContain(plan.Arguments, value => value.Contains("coder-model"));
+        Assert.DoesNotContain(plan.Environment.Values, value => value.Contains("coder-model"));
+        Assert.DoesNotContain(plan.Arguments, value => value.Contains("127.0.0.1"));
+        Assert.DoesNotContain(plan.Environment.Values, value => value.Contains("127.0.0.1"));
+    }
+
+    [Fact]
+    public void Aider_container_loopback_llama_swap_endpoint_fails_closed()
+    {
+        var config = LlamaSwapConfig("aider");
+        config.LlamaSwapCoderEndpoint = "http://127.0.0.1:8080/v1";
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => CoderToolPlan.Create(config, Context()));
+        Assert.Contains("llama_swap_coder_endpoint", ex.Message);
+        Assert.Contains("refers to the container itself", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("opencode", "/usr/local/bin/opencode", "openai/opencode-coder")]
+    [InlineData("pi", "/usr/local/bin/pi", "openai/pi-coder")]
+    public void Cli_tool_plans_receive_the_llama_swap_endpoint_without_ownership_change(
+        string tool, string executable, string model)
+    {
+        var plan = CoderToolPlan.Create(LlamaSwapConfig(tool), Context());
+
+        // OpenCode and Pi keep owning their provider/model configuration: the plan changes
+        // only the container environment, never the tool's own model arguments.
+        Assert.Equal(executable, plan.Executable);
+        Assert.Equal(model, ValueAfter(plan.Arguments, "--model"));
+        Assert.Equal("http://llama-swap:8080/v1", plan.Environment["OPENAI_BASE_URL"]);
+        Assert.Equal("http://llama-swap:8080/v1", plan.Environment["OPENAI_API_BASE"]);
+    }
+
     [Theory]
     [InlineData("opencode", "/usr/local/bin/opencode", "openai/opencode-coder")]
     [InlineData("pi", "/usr/local/bin/pi", "openai/pi-coder")]

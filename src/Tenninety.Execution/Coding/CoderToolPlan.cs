@@ -30,7 +30,10 @@ public sealed record CoderToolPlan(
             throw new InvalidOperationException(
                 "the coder instruction exceeds the bounded container invocation limit.");
 
-        var endpoint = config.Sandbox.Roles.Coder.ModelEndpoint.TrimEnd('/');
+        // Container-perspective endpoint: llama-swap when enabled, otherwise the explicit
+        // sandbox role endpoint. Selection and fail-closed validation are centralized in
+        // ModelEndpointResolver; loopback can never reach the model from inside the container.
+        var endpoint = ModelEndpointResolver.ResolveCoderContainerEndpoint(config);
         IReadOnlyDictionary<string, string> environment = new ReadOnlyDictionary<string, string>(
             new Dictionary<string, string>(StringComparer.Ordinal)
             {

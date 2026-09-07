@@ -3,14 +3,20 @@
   // its Repository scope value into acceptance.repository before enabling Restore.
   "provider_mode": "aider",
   "coder_agent": "aider",
+  // These identifiers must match the llama-swap profile names in docker/llama-swap.yaml
+  // and must resolve to genuinely different weights.
   "local_models": {
-    "coder": "qwen-coder",
-    "reviewer": "devstral-reviewer",
-    "coder_endpoint": "http://localhost:8080/v1",
-    "reviewer_endpoint": "http://127.0.0.1:8080/v1"
+    "coder": "coder",
+    "reviewer": "reviewer",
+    "coder_endpoint": "",
+    "reviewer_endpoint": ""
   },
   "use_llama_swap": true,
-  "llama_swap_endpoint": "http://localhost:8080/v1",
+  "llama_swap_endpoint": "http://127.0.0.1:8080/v1",
+  // Host llama-swap AS SEEN FROM INSIDE the coder container (the llama-swap container's DNS
+  // name on the internal model network). Never host loopback: loopback inside a container
+  // refers to the container itself and fails validation.
+  "llama_swap_coder_endpoint": "http://llama-swap:8080/v1",
   "sandbox": {
     "mode": "docker",
     "runtime": "docker-cli",
@@ -26,9 +32,10 @@
         "pids": 256,
         "network": "model",
         "timeout_seconds": 1800,
-        // Host llama-swap as seen from INSIDE the coder container (docker-compose.yml only
-        // provisions the internal network; llama-swap runs on the host). Substitute your
-        // bridge gateway: e.g. "http://172.20.0.1:8080/v1". Never host loopback.
+        // Used only when "use_llama_swap" is false: the address of a dedicated model server
+        // container (e.g. a raw llama-server) joined to the model network, as seen from
+        // INSIDE the coder container. While llama-swap is enabled, llama_swap_coder_endpoint
+        // wins instead.
         "model_endpoint": "http://coder-model:8080/v1"
       },
       "reviewer": {

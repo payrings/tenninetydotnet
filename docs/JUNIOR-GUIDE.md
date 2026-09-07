@@ -151,7 +151,7 @@ $ dotnet build -c Release
   ... Build succeeded.        ← the compiler translated all C# to runnable form; 0 warnings
 
 $ dotnet test
-  Passed! - Failed: 0, Passed: 1,063, Skipped: 10, Total: 1,073
+  Passed! - Failed: 0, Passed: 1,100, Skipped: 10, Total: 1,110
 ```
 
 The 10 skips are the Docker integration categories (they stay skipped until you opt in with
@@ -419,10 +419,21 @@ starts with `Revert "…"`.
 
 When mocks feel boring:
 
-1. Start one llama-swap profile switcher on the host (it imitates the standard OpenAI web-API
-   shape and swaps the coder and reviewer models through your single AMD Radeon RX 7900 XTX
-   over Vulkan; keep `docker compose up -d` only for the internal model network and optional
-   sample database — it no longer starts a GPU or vLLM service).
+1. Serve the two models with the repository's llama-swap container. You need Docker with the
+   Compose plugin and a working AMD Vulkan driver stack (`mesa` + `vulkan-radeon` on
+   Arch/CachyOS; the GPU appears as `/dev/dri` – llama.cpp itself comes inside the container).
+   Put your two GGUF files in the right place first (see `models/README.md` – they are
+   downloaded separately and never committed): copy them to `models/coder.gguf` and
+   `models/reviewer.gguf`, or point `TENNINETY_MODELS_DIR` in `.env` at the folder that
+   already holds them. Then copy `.env.example` to `.env` and start the model server:
+   ```bash
+   $ docker compose up -d
+   $ curl http://127.0.0.1:8080/v1/models    # lists both: coder, reviewer
+   ```
+   One llama-swap container serves both models on one AMD Radeon RX 7900 XTX over Vulkan and
+   swaps the resident GGUF whenever a request names the other model – only one is in VRAM at a
+   time. If you previously ran llama-swap directly on the host, stop that service first (both
+   bind `127.0.0.1:8080`).
 2. Build or obtain digest-pinned role images. The Coder image must contain
    [aider](https://aider.chat), OpenCode, or Pi according to the `"coder_agent"` knob;
    OpenCode/Pi require an explicit agent `model`. The Reviewer model call stays host-controlled,
@@ -430,18 +441,19 @@ When mocks feel boring:
 3. Edit `.tenninety/config.json`:
    `"provider_mode": "aider"`,
    `"use_llama_swap": true`,
-   `"local_models": { "coder": "qwen-coder", "reviewer": "devstral-reviewer" }`,
-   `"llama_swap_endpoint": "http://localhost:8080/v1"`, and set your real
-   `"frontier_endpoint"` / `"frontier_model"` if you have one. For Docker mode, also configure
-   the pinned role images and internal model network from
-   [`SANDBOX-CONFIG.example.jsonc`](SANDBOX-CONFIG.example.jsonc); the Coder's in-container
-   endpoint is `sandbox.roles.coder.model_endpoint` and must reach llama-swap through the Docker
-   bridge (never host loopback).
+   `"local_models": { "coder": "coder", "reviewer": "reviewer" }` (these must match the
+   llama-swap profile names), and set your real `"frontier_endpoint"` / `"frontier_model"` if
+   you have one. The two llama-swap addresses default correctly for the Compose deployment:
+   `"llama_swap_endpoint": "http://127.0.0.1:8080/v1"` for host-side processes and
+   `"llama_swap_coder_endpoint": "http://llama-swap:8080/v1"` for the Coder container (that
+   name only resolves inside Docker networking – never host loopback). For Docker mode, also
+   configure the pinned role images and internal model network from
+   [`SANDBOX-CONFIG.example.jsonc`](SANDBOX-CONFIG.example.jsonc).
 4. Use different coder and reviewer identifiers, and verify that your model server maps them
    to genuinely different weights – different aliases can otherwise point at the same model.
-   If both models do not fit your GPU card together, set `"use_llama_swap": true` for the
-   default aider setup. OpenCode/Pi also need their own provider configured for that proxy
-   (see [`OVERVIEW.md`](OVERVIEW.md)).
+   If both models do not fit your GPU card together, `"use_llama_swap": true` (default Compose
+   setup) is exactly the one-card path. OpenCode/Pi also need their own provider configured for
+   that proxy (see [`OVERVIEW.md`](OVERVIEW.md)).
 5. Give secrets via environment variables (never in files – that is a security rule):
    ```bash
    # bash

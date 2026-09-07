@@ -108,6 +108,49 @@ public class StoreRoundTripTests
     }
 
     [Fact]
+    public void Config_defaults_carry_the_llama_swap_endpoints_and_model_identifiers()
+    {
+        var json = Json.Serialize(new TenNinetyConfig());
+        Assert.Contains("\"llama_swap_endpoint\": \"http://localhost:8080/v1\"", json);
+        Assert.Contains("\"llama_swap_coder_endpoint\": \"http://llama-swap:8080/v1\"", json);
+        Assert.Contains("\"use_llama_swap\": false", json);
+        Assert.Contains("\"coder\": \"coder\"", json);
+        Assert.Contains("\"reviewer\": \"reviewer\"", json);
+    }
+
+    [Fact]
+    public void Legacy_config_without_llama_swap_coder_endpoint_loads_with_the_default()
+    {
+        // Backward compatibility: configs written before llama_swap_coder_endpoint existed
+        // must deserialize to the Docker Compose default instead of an empty endpoint.
+        using var tmp = new TempDir();
+        File.WriteAllText(tmp.Path("config.json"),
+            """{"provider_mode":"aider","use_llama_swap":true}""");
+
+        var config = new ConfigStore(tmp.Path("config.json")).Load();
+
+        Assert.True(config.UseLlamaSwap);
+        Assert.Equal("http://llama-swap:8080/v1", config.LlamaSwapCoderEndpoint);
+    }
+
+    [Fact]
+    public void Llama_swap_endpoints_round_trip()
+    {
+        using var tmp = new TempDir();
+        var path = tmp.Path("config.json");
+        var store = new ConfigStore(path);
+        var config = store.Exists() ? store.Load() : new TenNinetyConfig();
+        config.LlamaSwapEndpoint = "http://127.0.0.1:18080/v1";
+        config.LlamaSwapCoderEndpoint = "http://model-proxy.internal:8080/v1";
+        store.Save(config);
+
+        var loaded = new ConfigStore(path).Load();
+
+        Assert.Equal("http://127.0.0.1:18080/v1", loaded.LlamaSwapEndpoint);
+        Assert.Equal("http://model-proxy.internal:8080/v1", loaded.LlamaSwapCoderEndpoint);
+    }
+
+    [Fact]
     public void Config_load_rejects_unknown_provider_modes()
     {
         using var tmp = new TempDir();

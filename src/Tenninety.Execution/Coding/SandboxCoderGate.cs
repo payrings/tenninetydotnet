@@ -82,6 +82,9 @@ public sealed class SandboxCoderGate : ICoderAgent
         {
             ctx.Validate();
             _config.Sandbox.ValidateLiveDocker();
+            // Same fail-closed rules as CoderToolPlan, enforced before any Docker resource
+            // exists: the effective container-side model endpoint must be well-formed.
+            _ = ModelEndpointResolver.ResolveCoderContainerEndpoint(_config);
             _lease.ThrowIfNotLiveFor(_git.RepoPath);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

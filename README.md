@@ -62,8 +62,9 @@ tenninety status                        # inspect queue & health
 Out of the box `provider_mode` is `"mock"`: everything is simulated deterministically so the
 whole pipeline runs offline. Live mode (`provider_mode = "aider"`) needs a coding agent – aider
 by default, or OpenCode or Pi via the `coder_agent` knob – plus two different local models,
-Docker, three digest-pinned role images, and a pre-existing internal model network. llama-swap
-remains optional when the models share one GPU card. Details in
+Docker, and three digest-pinned role images. The default local model deployment is **one
+llama-swap container** (`docker compose up -d`) that serves both models from a single AMD GPU
+(RX 7900 XTX, Vulkan) and swaps the resident GGUF on demand. Details in
 [`docs/OVERVIEW.md`](docs/OVERVIEW.md).
 
 ## Documentation

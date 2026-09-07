@@ -1606,28 +1606,44 @@ environment allowlist, or Git branch is not a filesystem sandbox.
 
 ---
 
-## 19. Single-card llama-swap topology (AMD Radeon RX 7900 XTX / Vulkan)
+## 19. Model serving topology (AMD Radeon RX 7900 XTX / Vulkan)
 
-Model serving no longer uses vLLM and no model container is started. One physical **AMD Radeon
-RX 7900 XTX** runs both models through **llama-swap** on the host, which swaps two llama.cpp
-server profiles (`qwen-coder`, `devstral-reviewer` — see `~/llama-swap/config.yaml`) in and out
-of the single card on demand via the Vulkan backend. The repo's `docker-compose.yml` only
-provisions the internal `tenninety-coder-model` network (and an optional sample PostgreSQL);
-it deliberately contains no GPU service, no NVIDIA reservation, and no vLLM image.
+Model serving never uses vLLM and never needs a second GPU. One physical **AMD Radeon
+RX 7900 XTX** serves both models (coder and reviewer) through **llama-swap**, which swaps two
+llama.cpp Vulkan profiles in and out of the single card on demand – only one GGUF is resident
+in VRAM at a time.
 
-Reachability for the sandboxed Coder (its endpoint must be resolvable from INSIDE the coder
-container, and loopback is rejected):
+Prerequisites for the default container path on CachyOS/Arch: Docker with the Compose plugin,
+a working AMD Mesa Vulkan stack (`mesa`, `vulkan-radeon`; verify with `vulkaninfo`), and the
+GPU's DRM render nodes under `/dev/dri`. The llama.cpp build itself comes inside the container,
+so nothing GPU-related needs to be installed on the host beyond the drivers.
 
-1. Bind llama-swap to a Docker-bridge-reachable address — `0.0.0.0:8080` or the bridge subnet
-   address — never `127.0.0.1` alone. From inside the coder container that means the host
-   gateway address (e.g. `http://172.20.0.1:8080/v1`); substitute your bridge subnet.
-2. If the host firewall drops bridge traffic, add a host route/forward for the bridge subnet
-   to `0.0.0.0:8080` only.
-3. Never weaken the network (`internal: true`) merely to make loopback work.
+**Default (Sections 1-2, Docker sandbox on the host): the repository's llama-swap container.**
+`docker compose up -d` starts one llama-swap container (pinned upstream `unified-vulkan` image
+with bundled llama.cpp) with `docker/llama-swap.yaml` as its profile file, publishes the model
+API on host loopback only (`127.0.0.1:8080`), and creates the internal
+`tenninety-coder-model` network. Supply the weights as `models/coder.gguf` and
+`models/reviewer.gguf` (or set `TENNINETY_MODELS_DIR` in `.env`); see `models/README.md`.
+Verify with `curl http://127.0.0.1:8080/v1/models` – it must list both identifiers.
+The sandboxed Coder reaches the same container by its Docker DNS name through
+`"llama_swap_coder_endpoint": "http://llama-swap:8080/v1"` (that name resolves only inside
+Docker networking; host loopback is rejected in the container context), while host-side
+processes use `"llama_swap_endpoint": "http://127.0.0.1:8080/v1"`. If you previously followed
+Sections 5-6 and run llama-swap directly on the host, stop that user service first – both
+bind `127.0.0.1:8080`.
 
-Host-side Reviewer (and default aider coder) use
-`"use_llama_swap": true` + `"llama_swap_endpoint": "http://localhost:8080/v1"`, with model
-identifiers `qwen-coder` / `devstral-reviewer`.
+**Alternative (Outcome C, tenninety inside the KVM guest): host-side llama-swap.** Sections
+5-6 and 12 keep llama-swap on the physical host with `listen: 127.0.0.1:8080` and reach the
+guest through the SSH reverse tunnel (`127.0.0.1:18080` inside the guest); keep `docker
+compose up -d` on the guest only to provision its internal model network. The container
+endpoints above do not apply to that path – inside the guest, `sandbox.mode=unsafe-host` is
+the documented configuration precisely because the guest-loopback tunnel endpoint cannot pass
+the Docker sandbox's container-endpoint validation.
+
+In both topologies the model identifiers (`local_models.coder` / `local_models.reviewer`)
+must match the llama-swap profile names, and the framework only enforces that the two
+identifiers differ – you remain responsible for ensuring they resolve to genuinely different
+weights.
 
 ---
 

@@ -291,15 +291,15 @@ Exit codes: `0` ok/paused/stopped · `1` error · `2` usage · `4` deadlock.
 
 ## 7. Live-mode bring-up checklist (never yet exercised – treat as unproven)
 
-1. Start llama-swap on the host (`listen: :8080`, profiles `qwen-coder`/`devstral-reviewer`
-   in `~/llama-swap/config.yaml`, one AMD Radeon RX 7900 XTX via Vulkan); ensure it binds
-   0.0.0.0 or the Docker bridge subnet so the sandboxed Coder can reach it; `docker compose up -d`
-   only creates the internal model network (no GPU service, no vLLM).
+1. Serve both models through the repository's llama-swap container: place `coder.gguf` and
+   `reviewer.gguf` per `models/README.md`, copy `.env.example` to `.env`, then
+   `docker compose up -d` and `curl http://127.0.0.1:8080/v1/models` (must list `coder` and
+   `reviewer`; one AMD Radeon RX 7900 XTX via Vulkan, one model resident at a time).
 2. `.tenninety/config.json`: `"provider_mode": "aider"`, `"use_llama_swap": true`,
-   `"llama_swap_endpoint": "http://localhost:8080/v1"` for the host-side Reviewer, model names
-   `qwen-coder`/`devstral-reviewer`, and the in-container Coder endpoint
-   `sandbox.roles.coder.model_endpoint` pointing at the bridge-reachable llama-swap address
-   (e.g. `http://172.20.0.1:8080/v1`); real `frontier_endpoint`/`frontier_model`.
+   `"local_models": { "coder": "coder", "reviewer": "reviewer" }`,
+   `"llama_swap_endpoint": "http://127.0.0.1:8080/v1"` for the host-side Reviewer, and
+   `"llama_swap_coder_endpoint": "http://llama-swap:8080/v1"` for the sandboxed Coder (the
+   container's DNS name on the internal network); real `frontier_endpoint`/`frontier_model`.
 3. API key via environment variable (host only; never in files):
    ```bash
    # bash

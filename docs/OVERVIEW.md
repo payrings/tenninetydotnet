@@ -98,18 +98,54 @@ untrusted tool input, so provider credentials should be narrowly scoped and neve
 
 ## llama-swap – two models on one card
 
-The coder and reviewer models are deliberately different, which means both must be served.
-If they do not fit on one GPU card simultaneously, set the human flag:
+The coder and reviewer models are deliberately different, which means both must be served. The
+default local deployment serves both from **one physical GPU** through
+[llama-swap](https://github.com/mostlygeek/llama-swap): a single container (upstream unified
+Vulkan image with bundled llama.cpp) hosts both model profiles and swaps the resident GGUF on
+demand – when a request names the other model, the loaded one is unloaded first. Only one model
+occupies VRAM at a time, so a single 24 GB card (AMD Radeon RX 7900 XTX) is enough. The
+repository owns the profiles in `docker/llama-swap.yaml` (`coder`, `reviewer` – pointed at your
+own `models/coder.gguf` and `models/reviewer.gguf`, never downloaded at startup and never
+committed):
 
-```jsonc
-{ "use_llama_swap": true, "llama_swap_endpoint": "http://localhost:8080/v1" }
+```
+              RX 7900 XTX (Vulkan, /dev/dri)
+                            ^
+       llama-swap container (docker compose up -d)
+         /models: coder.gguf | reviewer.gguf   (one resident at a time)
+              ^                        ^
+   host:  http://127.0.0.1:8080/v1    coder sandbox: http://llama-swap:8080/v1
 ```
 
-With the default aider coder, both agents then route through a
-[llama-swap](https://github.com/mostlygeek/llama-swap) proxy, which loads each model on demand
-and unloads the other. OpenCode and Pi own their provider transport, so configure their
-provider/model and authentication to use the same proxy; the flag directly routes the Reviewer
-but does not rewrite those tools' provider configuration.
+Enable it with the human flag and route each context to its own address:
+
+```jsonc
+{
+  "use_llama_swap": true,
+  "llama_swap_endpoint": "http://127.0.0.1:8080/v1",        // host-side processes
+  "llama_swap_coder_endpoint": "http://llama-swap:8080/v1"  // inside the Docker network
+}
+```
+
+Both addresses exist on purpose and reach the same proxy:
+
+- **`http://127.0.0.1:8080/v1`** is the published host port (loopback only). The host-side
+  Reviewer – and an aider Coder under the explicit `unsafe-host` mode – use it.
+- **`http://llama-swap:8080/v1`** is the container's DNS name on the internal
+  `tenninety-coder-model` network. It exists *only* inside Docker networking; from inside the
+  disposable Coder container, `127.0.0.1` would refer to the container itself, which is why the
+  second form is a distinct configured endpoint (`llama_swap_coder_endpoint`) and why loopback
+  values fail validation in the container context.
+
+Endpoint selection and fail-closed validation are centralized in `ModelEndpointResolver`:
+with llama-swap disabled, the sandboxed Coder keeps using `sandbox.roles.coder.model_endpoint`
+and host roles keep the shared/per-role endpoint fallback – nothing else changes.
+
+With the default aider coder, both agents route through the proxy by model identifier (aider's
+`openai/coder` request carries model `coder`, which matches the profile name). OpenCode and Pi
+own their provider transport, so configure their provider/model and authentication to use the
+same proxy; the flag directly routes the Reviewer but does not rewrite those tools' provider
+configuration.
 
 ---
 
@@ -130,9 +166,10 @@ Every gate in the pipeline is mechanically enforced rather than requested:
   instead of the queue inventing a way forward. In live mode the mechanical gate fails
    closed: no discovered tests or empty commands mean failure, never silent success.
 - Live Docker roles receive only an exact disposable candidate workspace. Coder joins the
-  pre-existing model network; Reviewer and Tester are `network=none`. Optional Restore runs first
-  in a separate operator-accepted restricted network, then a fresh offline Tester validates the
-  derived tree.
+  pre-existing internal model network – whose only non-role member is the operator-run
+  llama-swap container – and carries no general egress; Reviewer and Tester are `network=none`.
+  Optional Restore runs first in a separate operator-accepted restricted network, then a fresh
+  offline Tester validates the derived tree.
 - Every attempt is recorded in `.tenninety/sandbox-resources.json` before container creation.
   Startup recovery runs under the daemon lock, inventories only this instance/repository label
   scope, deletes only journal-proven direct-child workspaces, and refuses execution if cleanup

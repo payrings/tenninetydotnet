@@ -1,0 +1,50 @@
+# llama-swap model profiles for the 10/90 single-GPU deployment
+# (AMD Radeon RX 7900 XTX, llama.cpp Vulkan backend inside the
+# ghcr.io/mostlygeek/llama-swap unified-vulkan container).
+#
+# Mounted read-only at /etc/llama-swap/config/config.yaml by docker-compose.yml;
+# llama-swap watches the file, so edits apply without restarting the container.
+#
+# Routing: the model ID is the key under `models`. Tenninety's
+# .tenninety/config.json must use the same identifiers:
+#   "local_models": { "coder": "coder", "reviewer": "reviewer" }
+# (aider's `openai/coder` request arrives here as model "coder" - the provider
+# prefix is the coding agent's notation, not part of the model ID.)
+#
+# Swapping: with no explicit `groups` block, llama-swap puts both models into
+# one implicit swap/exclusive group, so only the most recently requested model
+# stays resident in VRAM. A request for the other identifier unloads the first
+# and loads the second. `ttl` unloads an idle model after ten minutes.
+#
+# Weights: point the `*_model` macros at your own GGUF files in the directory
+# mounted at /models (see .env.example and models/README.md). Weights are never
+# downloaded by this deployment at startup.
+
+macros:
+  coder_model: "/models/coder.gguf"
+  reviewer_model: "/models/reviewer.gguf"
+
+globalTTL: 600
+
+models:
+  coder:
+    cmd: |
+      llama-server
+      --host 127.0.0.1 --port ${PORT}
+      --model ${coder_model}
+      -ngl 999
+      -c 16384
+      --jinja
+    ttl: 600
+    concurrencyLimit: 1
+
+  reviewer:
+    cmd: |
+      llama-server
+      --host 127.0.0.1 --port ${PORT}
+      --model ${reviewer_model}
+      -ngl 999
+      -c 16384
+      --jinja
+    ttl: 600
+    concurrencyLimit: 1

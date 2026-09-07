@@ -211,28 +211,13 @@ public sealed class SandboxConfig
     /// Validates an http(s) endpoint as reached FROM INSIDE a container: absolute http(s) URL,
     /// no embedded user-information credentials, and a host that is not the container itself.
     /// All loopback IPv4/IPv6 forms (127.0.0.0/8, ::1, …), the unspecified addresses, and
-    /// localhost in any case or trailing-dot form are rejected.
+    /// localhost in any case or trailing-dot form are rejected. Delegates to
+    /// <see cref="ModelEndpointResolver.ValidateHttpEndpoint"/> so sandbox and llama-swap
+    /// endpoints share one fail-closed implementation.
     /// </summary>
-    private static void ValidateHttpEndpoint(string? endpoint, string field)
-    {
-        if (string.IsNullOrWhiteSpace(endpoint) ||
-            !Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ||
-            uri.Scheme is not ("http" or "https"))
-            throw new InvalidOperationException(
-                $"{field} must be an absolute http(s) URL that the container can reach, " +
-                "e.g. http://coder-model:8000/v1, but the configured value has a missing or " +
-                "unsupported scheme (value withheld to avoid echoing untrusted input).");
-        if (uri.UserInfo.Length > 0)
-            throw new InvalidOperationException(
-                $"{field} must not embed user-information credentials " +
-                "(user:password@…) in the URL. Pass any token out-of-band, never in the URL.");
-        if (IsSelfReferencingHost(uri.Host))
-            throw new InvalidOperationException(
-                $"{field} '{endpoint}' refers to the container itself: loopback addresses " +
-                "(127.0.0.0/8, ::1, …) and localhost inside a container never reach the host " +
-                "or the model. Serve the model on the model network (e.g. " +
-                "http://coder-model:8000/v1) or behind an explicitly Docker-reachable proxy.");
-    }
+    private static void ValidateHttpEndpoint(string? endpoint, string field) =>
+        _ = ModelEndpointResolver.ValidateHttpEndpoint(
+            endpoint, field, containerPerspective: true);
 
     /// <summary>True for loopback/unspecified IPv4+IPv6 addresses (parsed, not string-matched)
     /// and for localhost in any case, with or without trailing dot, including *.localhost
@@ -393,7 +378,10 @@ public sealed class CoderSandboxRoleConfig : SandboxRoleConfig
         TimeoutSeconds = 1800;
     }
 
-    /// <summary>OpenAI-compatible endpoint as seen FROM INSIDE the coder container.</summary>
+    /// <summary>OpenAI-compatible endpoint as seen FROM INSIDE the coder container. Used when
+    /// llama-swap is disabled; while <c>use_llama_swap</c> is set, the coder resolves
+    /// <c>llama_swap_coder_endpoint</c> instead (see ModelEndpointResolver). Never host
+    /// loopback: validation rejects self-referencing hosts.</summary>
     [JsonPropertyName("model_endpoint")]
     public string ModelEndpoint { get; set; } = "http://coder-model:8000/v1";
 }

@@ -1,30 +1,80 @@
-# 10/90 tenninety - local model serving (single-card llama-swap topology).
+# 10/90 tenninety - local model serving (single-GPU llama-swap topology).
 #
-# Local models are served on the PHYSICAL HOST by llama-swap
-# (https://github.com/mostro/llama-swap), which drives one llama.cpp server per profile and
-# swaps them on demand. Both the coder profile (qwen-coder) and the reviewer profile
-# (devstral-reviewer) share ONE AMD Radeon RX 7900 XTX through llama.cpp's Vulkan backend.
-# This file therefore starts NO GPU container and needs neither NVIDIA GPUs nor vLLM.
+# ONE llama-swap container serves BOTH logical models (coder + reviewer) on one
+# OpenAI-compatible endpoint and swaps the resident GGUF on demand:
 #
-# What this file still provisions:
-#   - the internal `tenninety-coder-model` bridge network the sandboxed Coder joins, and
-#   - an optional PostgreSQL for the sample spec's technical hints.
+#                     RX 7900 XTX (24 GB, Vulkan)
+#                               ^
+#        llama-swap container (unified-vulkan image, bundled llama.cpp)
+#          /models: coder.gguf        reviewer.gguf
+#          (only ONE is resident in VRAM at a time; llama-swap swaps on demand)
 #
-# Host llama-swap reachability (one-time operator steps; the sandbox stays unchanged):
-#   1. Run llama-swap on the host bound to 0.0.0.0:8080 (not 127.0.0.1) so the Docker bridge
-#      can reach it, with your ~/llama-swap/config.yaml profiles. If the host firewall drops
-#      bridge traffic, add a forward/route for the bridge subnet to 0.0.0.0:8080 only.
-#   2. Point sandbox.roles.coder.model_endpoint at the llama-swap URL AS SEEN FROM INSIDE the
-#      coder container, e.g. http://172.20.0.1:8080/v1 (substitute your bridge gateway). The
-#      model network stays internal; never weaken it just to make host loopback work.
-#   3. In .tenninety/config.json (Reviewer and default aider coder run host-side):
-#        "provider_mode": "aider",
-#        "use_llama_swap": true,
-#        "local_models": { "coder": "qwen-coder", "reviewer": "devstral-reviewer" }
+# Target hardware: one AMD Radeon RX 7900 XTX through /dev/dri (Vulkan, Mesa).
+# No NVIDIA runtime, no vLLM, no /dev/kfd and no second GPU are involved.
 #
-#   docker compose up -d     # creates the network (+ optional DB); llama-swap runs on the host
+# Networks (the security model - do not weaken):
+#   coder-model-internal  name: tenninety-coder-model, internal: true
+#       The ONLY network the disposable Coder sandbox joins. It carries no
+#       general egress; the Coder reaches the model server as
+#       http://llama-swap:8080/v1 (container DNS on that network).
+#   model-server-egress   name: tenninety-model-egress
+#       Only the trusted llama-swap container joins it, for optional upstream
+#       access (e.g. an occasional `-hf` model pull). Role sandboxes never do.
 #
+# Endpoints (both exist on purpose, see docs/OVERVIEW.md):
+#   host:    http://127.0.0.1:8080/v1        (host-side Reviewer, aider in
+#                                             unsafe-host mode; loopback only)
+#   coder:   http://llama-swap:8080/v1       (inside the Docker network only)
+#
+# Setup: copy .env.example to .env, place coder.gguf and reviewer.gguf in
+# $TENNINETY_MODELS_DIR (default ./models), then:
+#   docker compose up -d
+#   curl http://127.0.0.1:8080/v1/models     # -> coder, reviewer
+#
+# Note: if you previously ran llama-swap directly on the host, stop that
+# service first (`systemctl --user disable --now llama-swap`) - both bind
+# 127.0.0.1:8080.
+
+name: tenninety
+
 services:
+  llama-swap:
+    # Pinned nightly unified image (llama-swap + llama.cpp built for Vulkan by
+    # upstream CI). The date tag is immutable once published and the digest
+    # pins the exact manifest; both were verified against ghcr.io. Override
+    # TENNINETY_LLAMA_SWAP_IMAGE in .env to move it - and record why.
+    image: ${TENNINETY_LLAMA_SWAP_IMAGE:-ghcr.io/mostlygeek/llama-swap:unified-vulkan-2026-09-06@sha256:0eda3af705c41c9f32113a95e3fb4c59f77158c84c3b7f1a5d8cb5cfaff1e4c2}
+    # llama-swap must bind 0.0.0.0 INSIDE the container (its own default) for
+    # the published loopback port and the Docker network to reach it. Host
+    # exposure stays loopback-only through the 127.0.0.1 binding below.
+    environment:
+      LLAMA_SWAP_CONFIG: /etc/llama-swap/config/config.yaml
+      LLAMA_SWAP_LISTEN: 0.0.0.0:8080
+    # Vulkan needs only the DRM render nodes; /dev/kfd is a ROCm concern and
+    # is deliberately NOT passed through. group_add covers hosts where the
+    # render node is restricted to the video group.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # User-supplied GGUF weights (coder.gguf, reviewer.gguf) - never committed.
+      - ${TENNINETY_MODELS_DIR:-./models}:/models:ro
+      # Repository-owned model profiles; llama-swap watches it for changes.
+      - ./docker/llama-swap.yaml:/etc/llama-swap/config/config.yaml:ro
+    networks:
+      - coder-model-internal
+      - model-server-egress
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # Optional: PostgreSQL matching the sample spec's technical hints.
   postgres:
     image: postgres:16-alpine
@@ -39,3 +89,5 @@ networks:
   coder-model-internal:
     name: tenninety-coder-model
     internal: true
+  model-server-egress:
+    name: tenninety-model-egress

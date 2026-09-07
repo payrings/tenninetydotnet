@@ -8,3 +8,11 @@ obj/
 # Local-only documents (kept off GitHub by owner request)
 docs/JUDGMENT-CALLS.md
 docs/ISSUE-2-DEEP-DIVE.md
+
+# Model weights are local-only and must never be committed (GGUF or otherwise)
+*.gguf
+models/*
+!models/README.md
+
+# Local compose environment (never commit the real one; .env.example is tracked)
+.env
