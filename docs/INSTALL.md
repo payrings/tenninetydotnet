@@ -1581,7 +1581,9 @@ printf '{}\n' > ~/.config/tenninety/aider.conf.yml
 chmod 0600 ~/.config/tenninety/aider.conf.yml
 ```
 
-Use host port 8080 instead of the VM tunnel:
+Use host port 8080 instead of the VM tunnel. Host port 8080 is also bound by the default
+llama-swap compose container (Section 19), so stop that stack first (`docker compose down`)
+or move one of the two listeners to a different port before using this configuration:
 
 ```jsonc
 {
