@@ -11,6 +11,7 @@ docs/ISSUE-2-DEEP-DIVE.md
 docs/HANDOVER.md
 docs/DESIGN-RATIONALE.md
 docs/ISSUES-EXPLAINED.md
+docs/assets/architecture.drawio
 
 # Model weights are local-only and must never be committed (GGUF or otherwise)
 *.gguf
