@@ -72,8 +72,7 @@ llama-swap container** (`docker compose up -d`) that serves both models from a s
 | Document | Audience |
 | --- | --- |
 | [`docs/OVERVIEW.md`](docs/OVERVIEW.md) | Everyone: how the framework works – execution model, distinct coder/reviewer requirement, aider, llama-swap, guarantees, repository layout |
-| [`docs/INSTALL.md`](docs/INSTALL.md) | Installation: offline rehearsal and the default llama-swap container model service on CachyOS |
-| [`docs/INSTALL-KVM.md`](docs/INSTALL-KVM.md) | Installation: maximally isolated live execution in a disposable KVM guest (host-side llama-swap + SSH tunnel) |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Installation on CachyOS: offline rehearsal, the default llama-swap container model service, and the isolated KVM path |
 | [`docs/SPEC-AUTHORING.md`](docs/SPEC-AUTHORING.md) | Business analyst + developer: the recommended pipeline for producing `spec.md` (business need → analysis → OpenSpec → spec) |
 | [`docs/JUNIOR-GUIDE.md`](docs/JUNIOR-GUIDE.md) | New to .NET/C#: every step explained, glossary, guided first run, exercises |
 | [`docs/SENIOR-GUIDE.md`](docs/SENIOR-GUIDE.md) | Practitioners: command reference, state model, engine semantics, config, extension points, troubleshooting matrix |
