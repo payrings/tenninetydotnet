@@ -191,7 +191,7 @@ paste `plan.json` (+ the original spec) into a *different* frontier model and as
 critique the plan against the blueprint rules (invented requirements, missing coverage,
 untestable acceptance criteria, layer violations). Treat findings as spec edits or pivot
 input. Rationale: the planner is a single point of interpretation; a decorrelated reviewer
-catches drift cheaply. Details in [`SPEC-AUTHORING.md`](SPEC-AUTHORING.md) §Independent plan review.
+catches drift cheaply.
 
 ---
 
