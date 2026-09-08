@@ -147,10 +147,10 @@ dotnet build -c Release
 dotnet test -c Release
 ```
 
-The current validated baseline is 1,000+ passing tests, zero failures, and a Release build with
-zero warnings and zero errors (the Docker integration categories are discovered but skipped
+A release-ready checkout requires the full test suite to pass and the Release build to finish
+with zero warnings and zero errors. Docker integration categories are discovered but skipped
 until their documented opt-in environment variables are provided; see
-`docs/TESTER-SANDBOX.md`).
+`docs/TESTER-SANDBOX.md`.
 
 The executable is created at:
 
@@ -1797,4 +1797,3 @@ tenninety status
 - [ArchWiki virt-manager](https://wiki.archlinux.org/title/Virt-manager)
 - [libvirt network XML](https://libvirt.org/formatnetwork.html)
 - [OpenSSH port forwarding](https://man.openbsd.org/ssh)
-

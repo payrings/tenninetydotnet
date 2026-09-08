@@ -66,6 +66,7 @@ public class TrustedFileReaderTests : IDisposable
     [Fact]
     public void Trusted_reader_rejects_mode_change_after_open()
     {
+        if (OperatingSystem.IsWindows()) return;
         var path = Path.Combine(Workspace.SourcePath, "src/existing.txt");
         using var opened = TrustedFileReader.OpenRegularFileNoFollow(path);
 

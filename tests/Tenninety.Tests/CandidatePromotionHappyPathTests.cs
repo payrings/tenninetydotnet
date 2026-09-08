@@ -144,6 +144,7 @@ public class CandidatePromotionHappyPathTests : IDisposable
     [Fact]
     public void Executable_mode_change_promotes_with_exact_git_mode()
     {
+        if (OperatingSystem.IsWindows()) return;
         var path = Path.Combine(_workspace.SourcePath, "src/existing.txt");
         File.SetUnixFileMode(path,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |

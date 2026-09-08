@@ -94,6 +94,7 @@ public class ValidatedSandboxWorkspacePathTests : IDisposable
     [Fact]
     public void Group_or_world_writable_managed_root_is_rejected()
     {
+        if (OperatingSystem.IsWindows()) return;
         var root = Directory.CreateDirectory(
             Path.Combine(_asciiParent.Root, "writable-root")).FullName;
         var originalMode = File.GetUnixFileMode(root);
@@ -127,6 +128,7 @@ public class GitServiceDisposableEnvironmentTests
     [Fact]
     public void Disposable_support_directories_are_owner_only_real_and_empty()
     {
+        if (OperatingSystem.IsWindows()) return;
         foreach (var directory in new[]
                  {
                      GitService.DisposableHomeDirectory,

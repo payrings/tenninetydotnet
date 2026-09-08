@@ -1122,7 +1122,8 @@ public class DockerSandboxPreflightNegativeProbeTests : IDisposable
         // The indeterminate probe must fail the report — never silently prove read-only. The
         // error carries the controlled probe category (no arbitrary text is copied).
         Assert.False(report.Passed);
-        Assert.Contains(report.Errors, e => e.Contains("probe failed"));
+        Assert.True(report.Errors.Any(e => e.Contains("probe failed")),
+            $"{scenario}: expected a controlled probe failure");
         // Cleanup must still have been attempted and proven for every created probe.
         Assert.Equal(2, transport.CreatedProbes);
         Assert.Equal(2, transport.ProbesRemovedAndProven);

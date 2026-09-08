@@ -581,15 +581,16 @@ public class RevertServiceTests
             // The tested candidate is the EXACT post-revert hotfix commit, recorded before
             // any test ran: not the reverted promotion and not the new main tip.
             Assert.True(TesterRunContext.IsFullCommitSha(spec.CandidateSha));
-            Assert.NotEqual(target, spec.CandidateSha);
-            Assert.NotEqual(git.FindCommit(TenNinety.MainBranch)!.Sha, spec.CandidateSha);
-            var hotfixCommit = git.FindCommit(spec.CandidateSha!);
+            var candidateSha = Assert.IsType<string>(spec.CandidateSha);
+            Assert.NotEqual(target, candidateSha);
+            Assert.NotEqual(git.FindCommit(TenNinety.MainBranch)!.Sha, candidateSha);
+            var hotfixCommit = git.FindCommit(candidateSha);
             Assert.NotNull(hotfixCommit);
             Assert.StartsWith("Revert", hotfixCommit!.Subject);
             // The promoted main content equals the tested revert content.
             Assert.Equal(
                 git.ResolveTreeOfCommit(git.FindCommit(TenNinety.MainBranch)!.Sha),
-                git.ResolveTreeOfCommit(spec.CandidateSha));
+                git.ResolveTreeOfCommit(candidateSha));
             // Offline workspace execution: no network, a disposable workspace path, never
             // the authoritative checkout.
             Assert.Equal(SandboxNetworkPolicy.None, spec.Network);

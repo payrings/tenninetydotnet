@@ -3,13 +3,13 @@
 #
 # `git log --check` walks OLD commits and fails on whitespace errors that already exist in
 # merged history (and cannot be fixed without rewriting history). This script instead checks
-# exactly the commits/diff belonging to the current push or pull request, plus the index and
-# working tree:
+# exactly the commits/diff identified by optional push or pull-request environment values,
+# plus the index and working tree:
 #
-#   - pull_request events: the workflow provides GITHUB_BASE_REF; the script fetches that
+#   - pull_request events: the caller provides GITHUB_BASE_REF; the script fetches that
 #     base branch, computes the merge base, and checks `git diff --check <merge-base> HEAD`
 #     (every commit the PR introduces);
-#   - push events: the workflow provides GITHUB_PUSH_BEFORE (github.event.before). When that
+#   - push events: the caller provides GITHUB_PUSH_BEFORE. When that
 #     commit exists in the checked-out history, the pushed diff `before..HEAD` is checked.
 #     For a NEW branch (event.before is the all-zero SHA) there is no defined base on the
 #     remote, so only the tip commit (`git show --check HEAD`) is checked in addition to the

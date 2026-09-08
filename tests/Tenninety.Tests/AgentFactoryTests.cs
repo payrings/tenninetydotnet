@@ -212,7 +212,7 @@ public class AgentFactoryTests
     }
 
     [Fact]
-    public void Mock_mode_never_runs_the_configured_shell_text_or_initializes_docker()
+    public async Task Mock_mode_never_runs_the_configured_shell_text_or_initializes_docker()
     {
         const string marker = "/tmp/tenninety-mock-should-never-run-marker";
         File.Delete(marker);
@@ -238,12 +238,12 @@ public class AgentFactoryTests
         };
 
         var tester = new AgentFactory(config).CreateTester(FakeGit());
-        var result = tester.RunTestsAsync(new TesterRunContext
+        var result = await tester.RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", new string('a', 40), new string('a', 40)),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         // Deterministic simulated pass, no shell ran, no Docker dependency, restore ignored.
         Assert.True(result.Passed);

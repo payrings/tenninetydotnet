@@ -94,7 +94,7 @@ public class CandidateScannerTests : IDisposable
     }
 
     [Fact]
-    public void Fifos_fail_closed_without_blocking()
+    public async Task Fifos_fail_closed_without_blocking()
     {
         var fifo = Path.Combine(Workspace.SourcePath, "src/pipe");
         using (var mkfifo = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
@@ -116,20 +116,16 @@ public class CandidateScannerTests : IDisposable
         var scanTask = Task.Run(() =>
             new CandidateScanner(_repo.Git).Scan(Workspace, Proof));
         // Bounded by a short timeout: a blocking open would fail the test here.
-        try
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            scanTask.Wait(TimeSpan.FromSeconds(30));
-            Assert.Fail("the scan should have rejected the FIFO");
-        }
-        catch (AggregateException ex)
-        {
-            Assert.Contains("not a regular file", ex.InnerExceptions[0].Message);
-        }
+            await scanTask.WaitAsync(TimeSpan.FromSeconds(30));
+        });
+        Assert.Contains("not a regular file", ex.Message);
         Assert.Equal(CandidateSha, _repo.Git.HeadSha());
     }
 
     [Fact]
-    public void Unix_sockets_fail_closed_without_blocking()
+    public async Task Unix_sockets_fail_closed_without_blocking()
     {
         var socketPath = Path.Combine(Workspace.SourcePath, "src/daemon.sock");
         using var socket = new Socket(
@@ -140,15 +136,11 @@ public class CandidateScannerTests : IDisposable
 
         var scanTask = Task.Run(() =>
             new CandidateScanner(_repo.Git).Scan(Workspace, Proof));
-        try
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            scanTask.Wait(TimeSpan.FromSeconds(30));
-            Assert.Fail("the scan should have rejected the socket");
-        }
-        catch (AggregateException ex)
-        {
-            Assert.Contains("not a regular file", ex.InnerExceptions[0].Message);
-        }
+            await scanTask.WaitAsync(TimeSpan.FromSeconds(30));
+        });
+        Assert.Contains("not a regular file", ex.Message);
         Assert.Equal(CandidateSha, _repo.Git.HeadSha());
         socket.Close();
         if (File.Exists(socketPath)) File.Delete(socketPath);

@@ -39,6 +39,8 @@ internal sealed class TestGitRepo : IDisposable
 
     public void MakeExecutable(string relativePath)
     {
+        if (OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Unix file modes are required by this fixture.");
         var path = Path.Combine(Root, relativePath);
         File.SetUnixFileMode(path,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
@@ -240,6 +242,7 @@ public class CandidateWorkspaceTests : IDisposable
     [Fact]
     public void Executable_mode_survives()
     {
+        if (OperatingSystem.IsWindows()) return;
         _repo.WriteFile("run.sh", "#!/bin/sh\necho hi\n");
         _repo.MakeExecutable("run.sh");
         var sha = _repo.Commit("executable candidate");
@@ -876,6 +879,7 @@ public class CandidateWorkspaceTests : IDisposable
     [Fact]
     public void Group_or_world_writable_managed_root_is_rejected_before_attempt_creation()
     {
+        if (OperatingSystem.IsWindows()) return;
         _repo.WriteFile("a.txt", "content");
         var sha = _repo.Commit("writable root fixture");
         var sharedRoot = Directory.CreateDirectory(

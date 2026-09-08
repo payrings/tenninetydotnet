@@ -37,7 +37,7 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
         => "No test is available in this workspace.\n" + new string('x', trailingChars);
 
     [Fact]
-    public void A_zero_test_message_early_in_huge_output_still_fails_closed()
+    public async Task A_zero_test_message_early_in_huge_output_still_fails_closed()
     {
         // The fixture emits ~12 KB: the zero-test line sits at the very beginning, so any
         // tail-only classifier (last 4,000 chars) would MISS it and wrongly pass.
@@ -50,12 +50,12 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
             "<PackageReference Include=\"xunit\" Version=\"2.9.3\" /></ItemGroup></Project>");
         var sha = CandidateSha();
 
-        var result = Agent().RunTestsAsync(new TesterRunContext
+        var result = await Agent().RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.False(result.Passed);
         Assert.Equal(-1, result.ExitCode);
@@ -65,7 +65,7 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
     }
 
     [Fact]
-    public void Output_beyond_the_decision_input_cap_fails_closed()
+    public async Task Output_beyond_the_decision_input_cap_fails_closed()
     {
         // 2 MiB of output: 1 MiB over the classification cap. Truncated decision input can
         // never pass, regardless of the exit code.
@@ -73,19 +73,19 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
         WriteTestProjectFixture();
         var sha = CandidateSha();
 
-        var result = Agent().RunTestsAsync(new TesterRunContext
+        var result = await Agent().RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.False(result.Passed);
         Assert.Contains("not evidence of success", result.OutputTail);
     }
 
     [Fact]
-    public void Stdout_only_overflow_fails_closed_under_the_shared_budget()
+    public async Task Stdout_only_overflow_fails_closed_under_the_shared_budget()
     {
         // stdout alone exceeds the aggregate cap (stderr silent).
         WriteTestProjectFixture();
@@ -97,19 +97,19 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
             attemptTimeout: TimeSpan.FromMinutes(2),
             failWhenNoProject: true);
 
-        var result = agent.RunTestsAsync(new TesterRunContext
+        var result = await agent.RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.False(result.Passed);
         Assert.Contains("not evidence of success", result.OutputTail);
     }
 
     [Fact]
-    public void Stderr_only_overflow_fails_closed_under_the_shared_budget()
+    public async Task Stderr_only_overflow_fails_closed_under_the_shared_budget()
     {
         // stderr alone exceeds the aggregate cap (stdout silent).
         WriteTestProjectFixture();
@@ -121,19 +121,19 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
             attemptTimeout: TimeSpan.FromMinutes(2),
             failWhenNoProject: true);
 
-        var result = agent.RunTestsAsync(new TesterRunContext
+        var result = await agent.RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.False(result.Passed);
         Assert.Contains("not evidence of success", result.OutputTail);
     }
 
     [Fact]
-    public void Combined_stream_overflow_fails_closed_even_when_neither_stream_reaches_the_limit()
+    public async Task Combined_stream_overflow_fails_closed_even_when_neither_stream_reaches_the_limit()
     {
         // 700 KiB on stdout and 700 KiB on stderr: each stream stays under the 1 MiB
         // aggregate cap alone, but the SHARED budget (1 MiB total) is exhausted — the old
@@ -149,12 +149,12 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
             attemptTimeout: TimeSpan.FromMinutes(2),
             failWhenNoProject: true);
 
-        var result = agent.RunTestsAsync(new TesterRunContext
+        var result = await agent.RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.False(result.Passed);
         Assert.Contains("not evidence of success", result.OutputTail);
@@ -190,7 +190,7 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
     }
 
     [Fact]
-    public void A_passing_command_without_zero_test_phrases_is_reported_passed()
+    public async Task A_passing_command_without_zero_test_phrases_is_reported_passed()
     {
         File.WriteAllText(_repo.Path("fixture.txt"), "all 3 tests passed\nPassed: 3\n");
         File.WriteAllText(_repo.Path("README.md"), "demo\n");
@@ -199,12 +199,12 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
             "<PackageReference Include=\"xunit\" Version=\"2.9.3\" /></ItemGroup></Project>");
         var sha = CandidateSha();
 
-        var result = Agent().RunTestsAsync(new TesterRunContext
+        var result = await Agent().RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.True(result.Passed);
         Assert.Equal(sha, result.CandidateSha);
@@ -213,7 +213,7 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
     }
 
     [Fact]
-    public void A_zero_test_phrase_in_a_failed_command_is_classified_as_an_ordinary_failure()
+    public async Task A_zero_test_phrase_in_a_failed_command_is_classified_as_an_ordinary_failure()
     {
         File.WriteAllText(_repo.Path("README.md"), "demo\n");
         File.WriteAllText(_repo.Path("sample.csproj"),
@@ -228,12 +228,12 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
             attemptTimeout: TimeSpan.FromMinutes(1),
             failWhenNoProject: true);
 
-        var result = agent.RunTestsAsync(new TesterRunContext
+        var result = await agent.RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.False(result.Passed);
         Assert.Equal(3, result.ExitCode);
@@ -241,7 +241,7 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
     }
 
     [Fact]
-    public void A_failing_build_stops_before_tests_and_never_fails_on_zero_test_phrases()
+    public async Task A_failing_build_stops_before_tests_and_never_fails_on_zero_test_phrases()
     {
         File.WriteAllText(_repo.Path("README.md"), "demo\n");
         File.WriteAllText(_repo.Path("sample.csproj"),
@@ -256,12 +256,12 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
             attemptTimeout: TimeSpan.FromMinutes(1),
             failWhenNoProject: true);
 
-        var result = agent.RunTestsAsync(new TesterRunContext
+        var result = await agent.RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.False(result.Passed);
         Assert.Contains("the build failed; tests were never started", result.OutputTail);
@@ -269,7 +269,7 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
     }
 
     [Fact]
-    public void A_timed_out_command_can_never_pass()
+    public async Task A_timed_out_command_can_never_pass()
     {
         File.WriteAllText(_repo.Path("README.md"), "demo\n");
         File.WriteAllText(_repo.Path("sample.csproj"),
@@ -284,12 +284,12 @@ public sealed class UnsafeHostTesterCaptureTests : IDisposable
             attemptTimeout: TimeSpan.FromSeconds(2),
             failWhenNoProject: true);
 
-        var result = agent.RunTestsAsync(new TesterRunContext
+        var result = await agent.RunTestsAsync(new TesterRunContext
         {
             Candidate = new CandidateRevision("main", sha, sha),
             WorkPackageId = "WP-001",
             Attempt = 1,
-        }).GetAwaiter().GetResult();
+        });
 
         Assert.False(result.Passed);
         Assert.Contains("timed out", result.OutputTail);

@@ -148,7 +148,7 @@ flowchart TD
 
 ```bash
 dotnet build -c Release          # zero warnings expected
-dotnet test                      # 1,000+ tests; Docker categories skipped until opted in
+dotnet test                      # full suite; Docker categories skipped until opted in
 dotnet publish src/Tenninety.Cli -c Release -o ./dist   # optional self-contained: -r linux-x64 --self-contained
 ```
 

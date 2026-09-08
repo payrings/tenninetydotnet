@@ -373,10 +373,10 @@ Docker opt-in integration tests are skipped unless `TENNINETY_RUN_DOCKER_TESTS=1
 exact `TENNINETY_TEST_IMAGE` (sha256:<64 hex> local image ID) are provided. Images are never
 pulled or built by tests.
 
-### Stable-release command matrix (continuous verification)
+### Stable-release command matrix
 
-The GitHub Actions workflow (`.github/workflows/ci.yml`) runs this exact non-Docker matrix on
-every push/PR, with warnings-as-errors for the framework projects:
+Run this non-Docker matrix locally before a release, with warnings-as-errors for the framework
+projects:
 
 ```bash
 dotnet restore tenninety.slnx --locked-mode          # packages.lock.json files are committed;
@@ -384,22 +384,21 @@ dotnet restore tenninety.slnx --locked-mode          # packages.lock.json files 
 dotnet build tenninety.slnx -c Release --no-restore  # full solution, warnings visible
 dotnet build src/Tenninety.Cli/Tenninety.Cli.csproj -c Release \
   --no-restore -p:TreatWarningsAsErrors=true         # framework projects: warnings are errors
-dotnet test tests/Tenninety.Tests/Tenninety.Tests.csproj -c Release --no-build  # non-Docker suite
+dotnet test tests/Tenninety.Tests/Tenninety.Tests.csproj -c Release \
+  --no-build --no-restore                              # non-Docker suite
 docker compose config -q                             # compose topology validation
 bash scripts/ci/static-checks.sh                     # JSON/JSONC/YAML/XML syntax + Markdown links
 bash scripts/ci/whitespace-check.sh                  # whitespace hygiene for the tip + working tree
 ```
 
-CI (`.github/workflows/ci.yml`) additionally checks the whitespace of exactly the commits the
-push or pull request introduces (`scripts/ci/whitespace-check.sh` with
-`GITHUB_EVENT_NAME`/`GITHUB_BASE_REF`/`GITHUB_PUSH_BEFORE` set), never a rolling history scan —
-historical whitespace warnings in merged commits are not fixable without rewriting history.
-The static checks declare their Python dependencies at pinned versions in
-`scripts/ci/requirements.txt` (CI installs them into a fresh virtualenv); the check script
-never performs an implicit `pip install`.
+When a caller supplies `GITHUB_EVENT_NAME` with `GITHUB_BASE_REF` or `GITHUB_PUSH_BEFORE`,
+`scripts/ci/whitespace-check.sh` checks exactly the commits in that pull request or push,
+never a rolling history scan. Historical whitespace warnings in merged commits are not fixable
+without rewriting history. The static checks declare their Python dependencies at pinned
+versions in `scripts/ci/requirements.txt`; install them explicitly in the Python environment
+selected by `PYTHON`. The check script never performs an implicit `pip install`.
 
-Operators reproduce the identical matrix locally before a release; only the Docker categories
-below remain opt-in and outside CI.
+The Docker categories below remain opt-in and outside the default matrix.
 
 ### Role and end-to-end Docker categories
 

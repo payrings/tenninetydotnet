@@ -83,8 +83,7 @@ def parse_yaml(text: str) -> None:
         raise RuntimeError(
             "PyYAML is required for the YAML checks but is not installed; "
             "install the pinned dependency with "
-            "'pip install -r scripts/ci/requirements.txt' (CI does this "
-            "automatically from scripts/ci/requirements.txt).")
+            "'pip install -r scripts/ci/requirements.txt'.")
     list(yaml.safe_load_all(text))
 
 

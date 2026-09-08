@@ -483,7 +483,7 @@ public class DockerCliProcessTransportTests : IDisposable
     }
 
     [Fact]
-    public void Isolated_client_directories_are_distinct_per_transport()
+    public async Task Isolated_client_directories_are_distinct_per_transport()
     {
         var starter = new FakeDockerProcessStarter();
         starter.Enqueue(_ => new FakeDockerProcess(new FakeProcessOptions()));
@@ -494,7 +494,7 @@ public class DockerCliProcessTransportTests : IDisposable
             string homeA, configA, homeB, configB;
             using (var first = MakeTransport(starter))
             {
-                first.RunAsync(new DockerCliInvocation(["version"])).GetAwaiter().GetResult();
+                await first.RunAsync(new DockerCliInvocation(["version"]));
                 var config = starter.StartedConfigs[^1];
                 homeA = config.Environment["HOME"];
                 configA = config.Environment["DOCKER_CONFIG"];
@@ -502,7 +502,7 @@ public class DockerCliProcessTransportTests : IDisposable
             using (var second = new DockerCliProcessTransport(
                        starter, secondWorking, FakeDockerPath))
             {
-                second.RunAsync(new DockerCliInvocation(["version"])).GetAwaiter().GetResult();
+                await second.RunAsync(new DockerCliInvocation(["version"]));
                 var config = starter.StartedConfigs[^1];
                 homeB = config.Environment["HOME"];
                 configB = config.Environment["DOCKER_CONFIG"];
@@ -517,7 +517,7 @@ public class DockerCliProcessTransportTests : IDisposable
     }
 
     [Fact]
-    public void Disposing_one_transport_does_not_affect_another_transports_directories()
+    public async Task Disposing_one_transport_does_not_affect_another_transports_directories()
     {
         var starter = new FakeDockerProcessStarter();
         starter.DefaultFactory = _ => new FakeDockerProcess(new FakeProcessOptions());
@@ -530,8 +530,8 @@ public class DockerCliProcessTransportTests : IDisposable
         var secondHome = "";
         try
         {
-            first.RunAsync(new DockerCliInvocation(["version"])).GetAwaiter().GetResult();
-            second.RunAsync(new DockerCliInvocation(["version"])).GetAwaiter().GetResult();
+            await first.RunAsync(new DockerCliInvocation(["version"]));
+            await second.RunAsync(new DockerCliInvocation(["version"]));
             firstHome = starter.StartedConfigs[^2].Environment["HOME"];
             secondHome = starter.StartedConfigs[^1].Environment["HOME"];
 

@@ -448,7 +448,7 @@ public class Phase3RepairTests : IDisposable
     }
 
     [Fact]
-    public void Promotion_keeps_OS_lock_held_when_outer_lease_is_disposed_concurrently()
+    public async Task Promotion_keeps_OS_lock_held_when_outer_lease_is_disposed_concurrently()
     {
         var paused = new ManualResetEventSlim(false);
         var release = new ManualResetEventSlim(false);
@@ -472,9 +472,7 @@ public class Phase3RepairTests : IDisposable
         Assert.Throws<InvalidOperationException>(() => DaemonLock.Acquire(_repo.Root));
 
         release.Set();
-        var result = promoteTask.Wait(TimeSpan.FromSeconds(60));
-        Assert.True(result, "promotion did not finish after being released");
-        var promoted = promoteTask.Result;
+        var promoted = await promoteTask.WaitAsync(TimeSpan.FromSeconds(60));
         Assert.False(promoted.NoChanges);
         Assert.Equal("modified by the agent\n",
             File.ReadAllText(Path.Combine(_repo.Root, "src/existing.txt")));

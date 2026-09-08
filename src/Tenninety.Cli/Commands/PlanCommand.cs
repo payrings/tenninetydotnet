@@ -191,6 +191,7 @@ public static class PlanCommand
                      .OrderBy(w => PlanValidator.IdOrder(w.Id))
                      .Select((w, i) => (w, i)))
         {
+            var dependencies = wp.Dependencies ?? [];
             var notes = "";
             if (WpMarkers.IsConflict(wp)) notes = "[red]CONFLICT[/]";
             else if (WpMarkers.IsAmbiguous(wp)) notes = "[yellow]AMBIGUOUS[/]";
@@ -200,7 +201,7 @@ public static class PlanCommand
                 Markup.Escape(wp.Layer ?? ""),
                 Markup.Escape(wp.Module ?? ""),
                 Markup.Escape(wp.Title ?? ""),
-                (wp.Dependencies ?? []).Count == 0 ? "-" : Markup.Escape(string.Join(",", wp.Dependencies)),
+                dependencies.Count == 0 ? "-" : Markup.Escape(string.Join(",", dependencies)),
                 (wp.Directives ?? []).Count.ToString(),
                 (wp.AcceptanceCriteria ?? []).Count.ToString(),
                 notes);
