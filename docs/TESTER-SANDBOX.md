@@ -4,6 +4,65 @@ This document describes the implemented live Docker boundary for Coder, Reviewer
 restricted Restore, and the mechanical Tester. The local Reviewer model call remains host-side,
 but repository exploration occurs only through bounded commands in a fresh offline guest.
 
+## Role images
+
+The repository ships pinned Dockerfiles and a fish script for all role images:
+
+| Image | Directory | Contract |
+|---|---|---|
+| Coder (aider) | `docker/coder-aider` | `aider` at `/usr/local/bin/aider` (Python base) |
+| Coder (OpenCode) | `docker/coder-opencode` | `opencode` at `/usr/local/bin/opencode` (Node base) |
+| Coder (Pi) | `docker/coder-pi` | `pi` at `/usr/local/bin/pi` (Node base) |
+| Reviewer | `docker/reviewer` | offline exploration toolbox: bash, coreutils, grep, sed, gawk, find, diff, git, jq, ripgrep |
+| Tester | `docker/tester` | .NET 10 SDK, `/bin/bash`, `/usr/bin/dotnet` (exact path the trusted Restore command invokes) |
+
+All five satisfy the sandbox contract by construction and the build script verifies each one
+before printing its ID:
+
+- explicit numeric non-root `USER` (10001);
+- no `ENTRYPOINT` — the runtime appends the fixed `sleep infinity` waiting command;
+- `/workspace` working directory; no credentials, keys, host paths or host configuration baked
+  in (no feed credentials, no NuGet.config — Restore generates its own trusted config).
+
+Build and copy the exact IDs into `.tenninety/config.json`:
+
+```bash
+./docker/build-role-images.fish              # all five; or name them: aider tester …
+```
+
+The script prints `ID: sha256:<64 hex>` per image — paste them into
+`sandbox.roles.coder.image` (the image matching your `"coder_agent"`), `roles.reviewer.image`
+and `roles.tester.image`. Digest-pinned registry references are equally valid; mutable tags are
+rejected. Base images are pinned by digest and top-level tool versions by exact pin. This is
+NOT bit-for-bit reproducibility: the live apt repositories and the unlocked transitive
+npm/Python dependency closure mean image content is not guaranteed identical across builds —
+rebuild deliberately and record the resulting local image ID. Nothing is pulled or built at
+runtime.
+
+## Pi coder configuration (pinned container)
+
+The pinned Pi container has an EMPTY tmpfs home and no provider configuration, and Pi does not
+honor the generic OpenAI environment variables. Pi's supported custom-provider mechanism is
+`~/.pi/agent/models.json`, so for `"coder_agent": "pi"` trusted code generates that file inside
+the bounded tmpfs HOME (a stdin-fed exec writes `$HOME/.pi/agent/models.json` before the tool
+runs) with:
+
+- the EFFECTIVE container-side model endpoint as the provider `baseUrl` (llama-swap when
+  enabled, otherwise `sandbox.roles.coder.model_endpoint` — the same resolution every other
+  consumer uses);
+- the configured `pi.model` as a `provider/id` entry (an OpenAI-compatible `openai-completions`
+  provider);
+- `apiKey` set to Pi's documented `$OPENAI_API_KEY` environment interpolation, so the
+  credential never enters the generated file or the image — it travels only through the closed
+  container environment allowlist.
+
+The Pi invocation runs `--offline` (no update checks, package updates or install/update
+telemetry at startup) and `--no-approve` (project-local extensions/skills from the untrusted
+candidate workspace are ignored). No credential and no host configuration is baked into the
+image, and Aider/OpenCode plans are unchanged. The live
+`DockerPiStub` category (see the Docker categories table) proves this end to end against a
+local stub OpenAI-compatible server.
+
 ## Mode selection
 
 `AgentFactory.CreateTester(IGitService authoritativeGit, Action<string>? log = null)` selects
@@ -16,9 +75,14 @@ the Tester implementation (fail closed):
 | `sandbox.mode=unsafe-host` (explicit) | `Testing/UnsafeHostTesterAgent` — legacy host-shell compatibility. Emits a prominent WARNING through the log/audit path at construction and on every run. It is never a fallback for Docker failures, failed preflight, invalid images, failed workspace creation, timeouts, enabled restore or container startup failures — those fail closed. |
 | anything else | error (fail closed). |
 
-Live Docker selection validates the live configuration up front (digest-pinned images, coder
-model endpoint). Merely selecting a mock Tester resolves no Docker executable, reads no
-Docker settings and creates no temporary directories.
+Live Docker selection validates the live configuration up front, ROLE-SPECIFIC: normal
+orchestration requires the digest-pinned Coder, Reviewer and Tester images plus the effective
+Coder model endpoint (llama-swap when enabled, otherwise `sandbox.roles.coder.model_endpoint`);
+Tester-only paths (`tenninety revert`) require only the Tester image, and their Docker preflight
+probes only the Tester (plus the Restore phase when enabled) — unrelated Coder/Reviewer images
+and the Coder endpoint are deliberately not demanded, while Tester hardening is never reduced.
+Merely selecting a mock Tester resolves no Docker executable, reads no Docker settings and
+creates no temporary directories.
 
 ## Exact candidate identity
 
@@ -87,14 +151,41 @@ Docker settings and creates no temporary directories.
 - The Tester itself always runs fully offline: no network attachment or host caches. Dependencies
   must be pre-baked, vendored, or produced by the accepted Restore phase.
 - When Restore is disabled (the default), a build/test command that needs network access fails.
-- When Restore is enabled, Tenninety first captures a no-follow baseline, generates a trusted
-  `NuGet.Config` containing only `approved_feeds`, and runs the fixed `dotnet restore --locked-mode`
-  command in a separate `SandboxRole.Restore` container. The configured proxy environment is
-  fixed by trusted code. Candidate NuGet configuration and arbitrary restore arguments are ignored.
+- When Restore is enabled, Tenninety FIRST verifies the structural Restore prerequisites on
+  the materialized candidate — every discovered project (`*.csproj`/`*.fsproj`/`*.vbproj`)
+  must carry a committed `packages.lock.json` that is a bounded, duplicate-free,
+  structurally sound lock document (bounded, no-follow scan BEFORE any Restore/Tester Docker
+  inspection, probe, session or container creation; depth, entry-count, project-count and
+  byte-limit exhaustion are reported, never silently skipped). The structural check accepts
+  supported NuGet lock formats and validates fields by dependency type: `requested` belongs
+  to `Direct`/`CentralTransitive` entries, while `Transitive` and `Project` entries normally
+  omit it. Missing or structurally unusable lock files fail with a controlled explanation
+  naming the owning project.
+- These structural prerequisites deliberately answer a DIFFERENT question than lock
+  currency: only the locked restore itself can establish that a lock file is CURRENT for its
+  project. A structurally perfect but stale lock fails there — `dotnet restore --locked-mode`
+  refuses the mismatch — which surfaces as the controlled "Restore exited N" ordinary gate
+  failure.
+- The restore command selects bounded targets EXPLICITLY (the single discovered solution file;
+  otherwise every discovered project, or every solution when no projects were discovered;
+  container-relative and ordinal-sorted). It never relies on the container working directory's
+  implicit solution inference.
+- Restore always runs the FIXED `dotnet restore --locked-mode` command. Locked mode requires a
+  lock file for every restored project and can never introduce a newly selected package: the
+  lock closure is produced and reviewed by an operator-controlled process, never by Restore.
+- After the prerequisites hold, Tenninety captures a no-follow baseline, generates a trusted
+  `NuGet.Config` containing only `approved_feeds`, and runs the fixed restore command in a
+  separate `SandboxRole.Restore` container. The configured proxy environment is fixed by
+  trusted code. Candidate NuGet configuration and arbitrary restore arguments are ignored.
 - The Restore container is removed before post-Restore integrity validation. Only bounded derived
   regular files/directories may appear; source mutations, redirects, special files, excessive
   depth/count/size, quota overflow, or incomplete capture fail closed. A fresh `network=none`
-  Tester then consumes the accepted tree.
+  Tester then consumes the accepted tree: its container environment resolves packages from the
+  SAME fixed store Restore populated (`NUGET_PACKAGES=/workspace/.tenninety/restore-packages`),
+  so build/test consume the accepted restored assets WITHOUT an uncontrolled implicit network
+  restore. Build/test commands should use `--no-restore` after an accepted Restore phase
+  (e.g. `dotnet build --no-restore --no-dependencies`-style invocations as appropriate); with
+  no Restore the `NUGET_PACKAGES` key is absent and dependencies must be pre-baked or vendored.
 
 ## Restore operator acceptance
 
@@ -259,6 +350,13 @@ The gate distinguishes failures by CONTROL FLOW, using a typed
   never strip a secret's identifying prefix while keeping its value), and the final
   presentation bound is applied after operational reasons, zero-test explanations and
   build-failure suffixes.
+- The unsafe-host Tester shares this contract: every command's COMPLETE output is captured
+  under the 1 MiB decision-input cap SHARED across stdout and stderr (one concurrency-safe
+  aggregate byte budget — a command can never claim two full caps; beyond the cap the typed
+  truncation flag fails the run closed), zero-test classification runs against the complete
+  capture via the shared `TestOutputClassifier`, and only the final presentation tail is
+  shortened afterwards. A zero-test summary that occurs early followed by thousands of
+  characters of later output can never disappear from the decision.
 - After the run, the authoritative branch/HEAD/main/clean state is rechecked; any change
   fails the gate without repair.
 
@@ -275,6 +373,34 @@ Docker opt-in integration tests are skipped unless `TENNINETY_RUN_DOCKER_TESTS=1
 exact `TENNINETY_TEST_IMAGE` (sha256:<64 hex> local image ID) are provided. Images are never
 pulled or built by tests.
 
+### Stable-release command matrix (continuous verification)
+
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs this exact non-Docker matrix on
+every push/PR, with warnings-as-errors for the framework projects:
+
+```bash
+dotnet restore tenninety.slnx --locked-mode          # packages.lock.json files are committed;
+                                                     # dependency drift fails here (NU1004)
+dotnet build tenninety.slnx -c Release --no-restore  # full solution, warnings visible
+dotnet build src/Tenninety.Cli/Tenninety.Cli.csproj -c Release \
+  --no-restore -p:TreatWarningsAsErrors=true         # framework projects: warnings are errors
+dotnet test tests/Tenninety.Tests/Tenninety.Tests.csproj -c Release --no-build  # non-Docker suite
+docker compose config -q                             # compose topology validation
+bash scripts/ci/static-checks.sh                     # JSON/JSONC/YAML/XML syntax + Markdown links
+bash scripts/ci/whitespace-check.sh                  # whitespace hygiene for the tip + working tree
+```
+
+CI (`.github/workflows/ci.yml`) additionally checks the whitespace of exactly the commits the
+push or pull request introduces (`scripts/ci/whitespace-check.sh` with
+`GITHUB_EVENT_NAME`/`GITHUB_BASE_REF`/`GITHUB_PUSH_BEFORE` set), never a rolling history scan —
+historical whitespace warnings in merged commits are not fixable without rewriting history.
+The static checks declare their Python dependencies at pinned versions in
+`scripts/ci/requirements.txt` (CI installs them into a fresh virtualenv); the check script
+never performs an implicit `pip install`.
+
+Operators reproduce the identical matrix locally before a release; only the Docker categories
+below remain opt-in and outside CI.
+
 ### Role and end-to-end Docker categories
 
 Five additional categories are DISCOVERED always and reported skipped with a precise
@@ -283,6 +409,7 @@ prerequisite message until their own opt-in is set:
 | Category trait | Opt-in | Prerequisites |
 |---|---|---|
 | `Category=DockerCoder` | `TENNINETY_RUN_DOCKER_CODER_TESTS=1` | `TENNINETY_CODER_TEST_IMAGE`, `TENNINETY_REVIEWER_TEST_IMAGE`, `TENNINETY_TESTER_TEST_IMAGE` (exact local sha256 IDs, numeric non-root USER, no ENTRYPOINT), `TENNINETY_TEST_MODEL_NETWORK` (pre-existing), `TENNINETY_CODER_TEST_MODEL_ENDPOINT` |
+| `Category=DockerPiStub` | `TENNINETY_RUN_DOCKER_PI_STUB_TESTS=1` | `TENNINETY_PI_TEST_IMAGE` (the local pinned Pi coder image), the three role images above, `TENNINETY_TEST_MODEL_NETWORK` (a pre-existing local bridge network whose gateway address carries the test-hosted stub OpenAI server). No GPU and no real model: the stub answers Pi's tool calls deterministically and proves the configured endpoint, provider/model and a minimal workspace edit. |
 | `Category=DockerReviewer` | `TENNINETY_RUN_DOCKER_REVIEWER_TESTS=1` | same role images + model network + endpoint |
 | `Category=DockerTester` | `TENNINETY_RUN_DOCKER_TESTER_TESTS=1` | same role images + model network + endpoint; tester image must contain the .NET SDK |
 | `Category=DockerRestore` | `TENNINETY_RUN_DOCKER_RESTORE_TESTS=1` | same role images + the complete operator contract: `TENNINETY_RESTORE_TEST_NETWORK`, `TENNINETY_RESTORE_TEST_NETWORK_ID`, `TENNINETY_RESTORE_TEST_PROXY_URL`, `TENNINETY_RESTORE_TEST_FEEDS`, `TENNINETY_RESTORE_TEST_QUOTA_BYTES`, `TENNINETY_RESTORE_TEST_QUOTA_ID`, `TENNINETY_RESTORE_TEST_FIREWALL_PROFILE`, `TENNINETY_RESTORE_TEST_EXPIRES_UTC`, `TENNINETY_RESTORE_TEST_OPERATOR_ACK=1` |
@@ -314,13 +441,14 @@ fresh Reviewer → fresh Tester with exact candidate SHA propagation.
   real Docker 29.7.2 daemon with a local image (explicit numeric non-root USER, no
   ENTRYPOINT, .NET SDK for the Tester) and the pre-existing `tenninety-coder-model` network,
   the deterministic DockerCoder, scripted DockerReviewer, offline DockerTester (offline
-  build/test plus implicit-restore rejection) and deterministic DockerEndToEnd categories, and
-  the generic Docker transport/runtime/session/preflight category, all pass with hardening
-  inspection, quiescence/removal/absence proofs and workspace cleanup. Real Aider/OpenCode/Pi
-  behavior stays separately opted in (`TENNINETY_RUN_DOCKER_CODER_REAL_TOOL_TESTS=1`) and is
-  not required for those gates. `Category=DockerRestore` remains default-disabled and its
-  positive live gate is NOT validated: no real operator contract (restricted network id,
-  proxy, feeds, quota, firewall profile, expiry, acknowledgement) exists in this environment.
+  build/test plus implicit-restore rejection), deterministic DockerEndToEnd, the generic
+  Docker transport/runtime/session/preflight category, and the Pi stub-endpoint category
+  (real Pi against a containerized stub OpenAI server) all pass with hardening inspection,
+  quiescence/removal/absence proofs and workspace cleanup. The DockerRestore positive live
+  gate has been exercised with a locally fabricated versioned operator contract (a disposable
+  restricted network, placeholder proxy/feeds and quota records): the zero-package fixture
+  never contacts them, and the firewall/proxy/quota enforcement itself remains
+  operator-provided and is not proven by the test.
 - Cleanup failure handling under real daemon failure modes (busy daemon, zombie containers)
   is unit-tested through fakes only.
 - The path revalidation performed before destructive cleanup closes redirect and containment

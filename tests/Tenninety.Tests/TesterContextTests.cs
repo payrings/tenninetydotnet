@@ -17,11 +17,11 @@ public class TesterContextTests
 
     private static TesterRunContext MakeContext(
         string? sha = ValidSha, string? wpId = "WP-001", int attempt = 1) => new()
-    {
-        Candidate = new CandidateRevision("work/WP-001", sha!, "main-base-sha-value"),
-        WorkPackageId = wpId!,
-        Attempt = attempt,
-    };
+        {
+            Candidate = new CandidateRevision("work/WP-001", sha!, "main-base-sha-value"),
+            WorkPackageId = wpId!,
+            Attempt = attempt,
+        };
 
     // ---- identity validation -----------------------------------------------------------
 
@@ -182,7 +182,7 @@ public class TesterContextTests
     public void Result_identity_compares_exact_candidate_strings()
     {
         // Ordinal comparison: no normalization, no casing escape hatch.
-        Assert.True(string.Equals(ValidSha, ValidSha, StringComparison.Ordinal));
+        Assert.Equal(ValidSha, ValidSha);
         Assert.False(string.Equals(ValidSha, ValidSha.ToUpperInvariant(), StringComparison.Ordinal));
         Assert.False(string.Equals(ValidSha, null, StringComparison.Ordinal));
         Assert.False(string.Equals(ValidSha, "", StringComparison.Ordinal));

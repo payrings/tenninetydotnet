@@ -9,7 +9,12 @@ using Tenninety.Core.Stores;
 namespace Tenninety.Frontier;
 
 public sealed class FrontierCallException(string message, Exception? inner = null)
-    : Exception(message, inner);
+    : Exception(message, inner)
+{
+    /// <summary>Bounded diagnostic: at most this many characters of a remote body or
+    /// parser message ever appear in a FrontierCallException message.</summary>
+    public const int MaxDiagnosticChars = 300;
+}
 
 /// <summary>OpenAI-compatible chat-completions client used to reach the Frontier Model (host-side only, Part VI.2).</summary>
 public sealed class HttpFrontierClient : IFrontierClient
@@ -47,7 +52,7 @@ public sealed class HttpFrontierClient : IFrontierClient
             ct);
 
     public Task<PivotProposal> ProposePivotAsync(PivotRequest request, CancellationToken ct = default) =>
-        CompleteAsync<PivotProposal>(            Prompts.PivotPrompt.System,
+        CompleteAsync<PivotProposal>(Prompts.PivotPrompt.System,
             Prompts.PivotPrompt.BuildUserMessage(
                 Sanitizer.SanitizeText(request.SpecSnapshot),
                 Sanitizer.SanitizeText(request.PlanJson),
@@ -89,7 +94,7 @@ public sealed class HttpFrontierClient : IFrontierClient
         if (!response.IsSuccessStatusCode)
             throw new FrontierCallException(
                 $"frontier call failed ({(int)response.StatusCode}): " +
-                Truncate(Sanitizer.SanitizeText(responseBody)));
+                FrontierDiagnostics.Build(responseBody));
 
         ChatCompletionResponse? completion;
         try
@@ -98,7 +103,12 @@ public sealed class HttpFrontierClient : IFrontierClient
         }
         catch (System.Text.Json.JsonException ex)
         {
-            throw new FrontierCallException($"frontier returned non-JSON body: {Truncate(responseBody)}", ex);
+            // Remote-body diagnostics are centralized: sanitized AND bounded BEFORE they can
+            // reach logs or the terminal — redaction first (so bounding cannot strip a
+            // secret's identifying prefix while keeping its value), then control-character
+            // stripping, then the bound.
+            throw new FrontierCallException(
+                "frontier returned non-JSON body: " + FrontierDiagnostics.Build(responseBody), ex);
         }
         if (completion is null)
             throw new FrontierCallException("frontier returned an empty completion.");
@@ -111,17 +121,29 @@ public sealed class HttpFrontierClient : IFrontierClient
         }
         catch (Exception ex) when (ex is not FrontierCallException)
         {
-            throw new FrontierCallException($"failed to parse frontier JSON response: {ex.Message}", ex);
+            throw new FrontierCallException(
+                "failed to parse frontier JSON response: " +
+                FrontierDiagnostics.Build(ex.Message), ex);
         }
     }
 
+    /// <summary>Plan parsing at the untrusted Frontier boundary: STRICT ingestion (unknown and
+    /// duplicate fields, depth and size bounds) followed by full blueprint validation. Every
+    /// failure surfaces as a controlled <see cref="FrontierCallException"/> whose
+    /// model-controlled text went through the shared <see cref="FrontierDiagnostics"/>
+    /// construction — validation errors are sanitized and bounded exactly like HTTP bodies,
+    /// non-JSON responses, parser messages and JSON extraction errors, regardless of which
+    /// exception path produced them.</summary>
     private static Plan ParseAndValidatePlan(string json)
     {
-        var plan = Json.Deserialize<Plan>(json);
+        var bytes = Encoding.UTF8.GetBytes(json);
+        StrictJsonIngestion.EnsureStrictShape(bytes, StrictJsonIngestion.MaxPlanBytes, "frontier plan");
+        var plan = StrictJsonIngestion.Deserialize<Plan>(bytes, "frontier plan");
         var validation = Tenninety.Core.Validation.PlanValidator.Validate(plan);
         if (!validation.IsValid)
             throw new FrontierCallException(
-                "frontier produced an invalid plan: " + string.Join("; ", validation.Errors));
+                "frontier produced an invalid plan: " +
+                FrontierDiagnostics.BuildJoined("; ", validation.Errors));
 
         // Untrusted output: whatever statuses a model invents (DONE, BLOCKED…), every package
         // enters the queue as PENDING. The validator's warnings above still document what the
@@ -132,9 +154,7 @@ public sealed class HttpFrontierClient : IFrontierClient
     }
 
     private static string JoinUrl(string baseUrl, string path) =>
-        baseUrl.TrimEnd('/') + "/" + path.TrimStart('/');
-
-    private static async Task<string> ReadBoundedAsync(HttpContent content, CancellationToken ct)
+        baseUrl.TrimEnd('/') + "/" + path.TrimStart('/'); private static async Task<string> ReadBoundedAsync(HttpContent content, CancellationToken ct)
     {
         if (content.Headers.ContentLength is > MaxResponseBytes)
             throw new FrontierCallException(
@@ -154,8 +174,6 @@ public sealed class HttpFrontierClient : IFrontierClient
         }
         return Encoding.UTF8.GetString(output.GetBuffer(), 0, checked((int)output.Length));
     }
-
-    private static string Truncate(string s) => s.Length <= 300 ? s : s[..300] + "…";
 
     internal sealed record ChatCompletionRequest(
         [property: JsonPropertyName("model")] string Model,

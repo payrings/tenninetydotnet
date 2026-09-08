@@ -294,14 +294,19 @@ public class DockerCliTests : IDisposable
         Assert.Throws<InvalidOperationException>(() =>
             DockerContainerScope.FromManagementIdentity(new Dictionary<string, string>
             {
-                ["tenninety.instance"] = "i", ["tenninety.repository"] = "r", ["tenninety.run"] = "run",
+                ["tenninety.instance"] = "i",
+                ["tenninety.repository"] = "r",
+                ["tenninety.run"] = "run",
             }));
         Assert.Throws<InvalidOperationException>(() =>
             DockerContainerScope.FromManagementIdentity(new Dictionary<string, string>
             {
-                ["tenninety.instance"] = "i", ["tenninety.repository"] = "r",
-                ["tenninety.run"] = "run", ["tenninety.wp"] = "w",
-                ["tenninety.attempt"] = "1", ["tenninety.role"] = "coder",
+                ["tenninety.instance"] = "i",
+                ["tenninety.repository"] = "r",
+                ["tenninety.run"] = "run",
+                ["tenninety.wp"] = "w",
+                ["tenninety.attempt"] = "1",
+                ["tenninety.role"] = "coder",
                 ["evil.label"] = "x",
             }));
     }

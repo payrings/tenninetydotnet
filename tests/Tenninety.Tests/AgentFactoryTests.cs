@@ -13,15 +13,15 @@ public class AgentFactoryTests
 {
     private static TenNinetyConfig LiveConfig(
         string coder = "Qwen3.6-27B", string reviewer = "Devstral-24B", bool llamaSwap = false) => new()
-    {
-        ProviderMode = "aider",
-        LocalModels = new LocalModelsConfig { Coder = coder, Reviewer = reviewer },
-        UseLlamaSwap = llamaSwap,
-        LlamaSwapEndpoint = "http://localhost:9999/v1",
-        LocalModelsEndpoint = "http://localhost:8000/v1",
-        Aider = new AiderConfig(),
-        Sandbox = new SandboxConfig { Mode = "unsafe-host" },
-    };
+        {
+            ProviderMode = "aider",
+            LocalModels = new LocalModelsConfig { Coder = coder, Reviewer = reviewer },
+            UseLlamaSwap = llamaSwap,
+            LlamaSwapEndpoint = "http://localhost:9999/v1",
+            LocalModelsEndpoint = "http://localhost:8000/v1",
+            Aider = new AiderConfig(),
+            Sandbox = new SandboxConfig { Mode = "unsafe-host" },
+        };
 
     [Fact]
     public void Identical_coder_and_reviewer_models_are_rejected()

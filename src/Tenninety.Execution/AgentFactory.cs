@@ -127,9 +127,11 @@ public sealed class AgentFactory
                 $"unknown coder_agent '{CoderAgent}' - supported: aider, opencode, pi.");
         if (_config.Sandbox.NormalizedMode == "docker")
         {
-            _config.Sandbox.ValidateLiveDocker();
-            // Fail fast on the effective container-side endpoint (llama-swap or direct model)
-            // before any Docker resource exists; CoderToolPlan re-checks per attempt.
+            // Role-specific live validation: only the Coder image and the EFFECTIVE
+            // container-side endpoint (llama-swap when enabled, otherwise the direct role
+            // endpoint). CoderToolPlan re-checks the effective endpoint per attempt.
+            _config.Sandbox.ValidateLiveDocker(
+                SandboxLiveRoles.Coder, _config.UseLlamaSwap, _config.LlamaSwapCoderEndpoint);
             _ = ModelEndpointResolver.ResolveCoderContainerEndpoint(_config);
             return new SandboxCoderGate(
                 authoritativeGit,
@@ -169,7 +171,7 @@ public sealed class AgentFactory
             : _config.LocalModels.Reviewer;
         if (_config.Sandbox.NormalizedMode == "docker")
         {
-            _config.Sandbox.ValidateLiveDocker();
+            _config.Sandbox.ValidateLiveDocker(SandboxLiveRoles.Reviewer);
             return new SandboxReviewerGate(authoritativeGit, _config, chat, model, log);
         }
         log?.Invoke(
@@ -217,10 +219,12 @@ public sealed class AgentFactory
 
     /// <summary>Live Docker configuration validation for the Tester path, then the offline
     /// gate. Construction is lazy: no Docker executable is resolved, no settings read and no
-    /// temporary directory created until the gate actually runs.</summary>
+    /// temporary directory created until the gate actually runs. Tester-only role validation:
+    /// revert constructs only a Tester, so unrelated Coder/Reviewer images and the Coder
+    /// model endpoint are deliberately not required here (and never weaken Tester hardening).</summary>
     private ITesterAgent CreateDockerTester(IGitService authoritativeGit, Action<string>? log)
     {
-        _config.Sandbox.ValidateLiveDocker();
+        _config.Sandbox.ValidateLiveDocker(SandboxLiveRoles.Tester);
         return new SandboxTesterGate(authoritativeGit, _config, log);
     }
 }

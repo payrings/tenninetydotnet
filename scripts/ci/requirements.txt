@@ -1,0 +1,5 @@
+# Pinned Python dependencies for scripts/ci/static_checks.py.
+#
+# CI installs exactly this file into a fresh virtualenv (see .github/workflows/ci.yml);
+# the check script itself never performs an implicit `pip install`.
+pyyaml==6.0.3

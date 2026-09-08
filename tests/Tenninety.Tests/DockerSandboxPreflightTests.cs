@@ -183,7 +183,7 @@ public class DockerSandboxPreflightTests : IDisposable
         Assert.Equal(3, transport.CreatedProbes); // coder, reviewer, tester — all cleaned up
         Assert.Equal(3, transport.ProbesRemovedAndProven);
         Assert.Empty(new SandboxResourceJournal(_repo.Root).ReadAll());
-        }
+    }
 
     [Fact]
     public async Task Coder_probe_uses_the_model_network_and_offline_probes_use_none()
@@ -420,7 +420,7 @@ public class DockerSandboxPreflightTests : IDisposable
 
         Assert.False(report.Passed);
         Assert.Contains(report.Errors, e => e.Contains("not a permitted Docker network"));
-        Assert.Equal(0, transport.NetworkInspects.Count); // network inspect never ran
+        Assert.Empty(transport.NetworkInspects); // network inspect never ran
     }
 
     [Fact]
@@ -768,7 +768,7 @@ public class DockerSandboxPreflightTests : IDisposable
         Assert.Contains(report.Errors, e => e.Contains("CapDrop ALL"));
         // The failed probe still went through proven stop/remove/absence cleanup.
         Assert.True(transport.ProbesRemovedAndProven >= 1, "probe cleanup must be proven");
-        Assert.Empty(report.Errors.Where(e => e.Contains("cleanup did not fully succeed")));
+        Assert.DoesNotContain(report.Errors, e => e.Contains("cleanup did not fully succeed"));
     }
 
     [Fact]
@@ -786,7 +786,7 @@ public class DockerSandboxPreflightTests : IDisposable
         Assert.False(report.Passed);
         Assert.Contains(report.Errors, e => e.Contains("no-new-privileges"));
         Assert.True(transport.ProbesRemovedAndProven >= 1, "probe cleanup must be proven");
-        Assert.Empty(report.Errors.Where(e => e.Contains("cleanup did not fully succeed")));
+        Assert.DoesNotContain(report.Errors, e => e.Contains("cleanup did not fully succeed"));
     }
 
     [Fact]
@@ -948,8 +948,8 @@ public class DockerSandboxPreflightTests : IDisposable
         Assert.All(retained, dir => Assert.True(
             Directory.Exists(dir),
             "the probe workspace must remain while removal is unproven"));
-        Assert.Single(retained.Where(dir =>
-            File.Exists(System.IO.Path.Combine(dir, ".tenninety-preflight-write"))));
+        Assert.Single(retained, dir =>
+            File.Exists(System.IO.Path.Combine(dir, ".tenninety-preflight-write")));
         var journaled = new SandboxResourceJournal(_repo.Root).ReadAll();
         Assert.Equal(2, journaled.Count);
         Assert.All(journaled, record =>

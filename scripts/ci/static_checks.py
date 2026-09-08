@@ -2,9 +2,15 @@
 """Static configuration checks for continuous verification.
 
 1. JSON / JSONC / YAML / XML configuration syntax for every tracked configuration file
-   (build output, .git internals and vendored folders are skipped);
+   (build output, .git internals and vendored folders are skipped). XML-based project files
+   (.csproj, .props, .targets, .slnx) are parsed exactly like .xml files;
 2. broken local Markdown links across README.md, docs/, models/ and samples/ (relative
    targets only; absolute URLs, anchors and mailto links are ignored).
+
+The script never performs a hidden `pip install`: the YAML dependency is declared in
+scripts/ci/requirements.txt at a pinned version and installed by the CI workflow (or by the
+operator) before this script runs. A missing dependency is a controlled error, never a
+silent degradation of the check.
 
 Exits nonzero and reports every finding when a check fails.
 """
@@ -18,6 +24,10 @@ import sys
 failures = 0
 
 SKIP_DIRECTORY_PARTS = {"bin", "obj", "node_modules", ".git"}
+
+JSON_LIKE_SUFFIXES = (".json", ".jsonc")
+YAML_LIKE_SUFFIXES = (".yml", ".yaml")
+XML_LIKE_SUFFIXES = (".xml", ".csproj", ".props", ".targets", ".slnx")
 
 
 def bad(message: str) -> None:
@@ -68,10 +78,13 @@ def parse_yaml(text: str) -> None:
     try:
         import yaml
     except ImportError:
-        import subprocess
-
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "pyyaml"])
-        import yaml
+        # No hidden pip install: the dependency is declared and pinned in
+        # scripts/ci/requirements.txt; failing here names the exact remedy.
+        raise RuntimeError(
+            "PyYAML is required for the YAML checks but is not installed; "
+            "install the pinned dependency with "
+            "'pip install -r scripts/ci/requirements.txt' (CI does this "
+            "automatically from scripts/ci/requirements.txt).")
     list(yaml.safe_load_all(text))
 
 
@@ -83,7 +96,8 @@ def parse_xml(text: str) -> None:
 
 def configuration_files() -> list[str]:
     found: list[str] = []
-    for pattern in ("*.json", "*.jsonc", "*.yml", "*.yaml", "*.xml"):
+    for pattern in ("*.json", "*.jsonc", "*.yml", "*.yaml",
+                    "*.xml", "*.csproj", "*.props", "*.targets", "*.slnx"):
         for path in glob.glob(os.path.join("**", pattern), recursive=True):
             if any(part in SKIP_DIRECTORY_PARTS for part in path.split(os.sep)):
                 continue
@@ -96,11 +110,12 @@ def check_configurations() -> None:
         try:
             with open(path, encoding="utf-8") as handle:
                 text = handle.read()
-            if path.endswith(".jsonc"):
-                parse_jsonc(text)
-            elif path.endswith(".json"):
-                json.loads(text)
-            elif path.endswith((".yml", ".yaml")):
+            if path.endswith(JSON_LIKE_SUFFIXES):
+                if path.endswith(".jsonc"):
+                    parse_jsonc(text)
+                else:
+                    json.loads(text)
+            elif path.endswith(YAML_LIKE_SUFFIXES):
                 parse_yaml(text)
             else:
                 parse_xml(text)

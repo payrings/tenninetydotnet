@@ -40,7 +40,20 @@ public sealed class PlanStore
     public PlanStore(string? path = null) => Path = path ?? TenNinety.Resolve(TenNinety.PlanFile);
 
     public bool Exists() => File.Exists(Path);
-    public Plan Load() => Json.Deserialize<Plan>(File.ReadAllText(Path));
+
+    /// <summary>Strict bounded load: plans are UNTRUSTED (they arrive from the Frontier and
+    /// are partially rewritten by pivot proposals), so unknown members, duplicate fields and
+    /// excessive size/depth fail with a clear validation error instead of silent defaults.
+    /// The file is read through a race-conscious bounded stream (at most the size bound plus
+    /// one byte is ever read) — never a full <c>ReadAllBytes</c> ahead of the bound.</summary>
+    public Plan Load()
+    {
+        var bytes = StrictJsonIngestion.ReadBounded(
+            Path, StrictJsonIngestion.MaxPlanBytes, "plan.json");
+        StrictJsonIngestion.EnsureStrictShape(bytes, StrictJsonIngestion.MaxPlanBytes, "plan.json");
+        return StrictJsonIngestion.Deserialize<Plan>(bytes, "plan.json");
+    }
+
     public void Save(Plan plan) => File.WriteAllText(Path, Json.Serialize(plan));
 }
 
@@ -191,11 +204,29 @@ public sealed class ConfigStore
     public ConfigStore(string? path = null) => Path = path ?? TenNinety.Resolve(TenNinety.ConfigFile);
 
     public bool Exists() => File.Exists(Path);
+
+    /// <summary>Strict bounded load for the operator-edited configuration: unknown members
+    /// (e.g. a "provider_mod" typo), duplicate fields at any depth, explicit nulls and
+    /// excessive size/depth are rejected with a clear error naming the owning field — a typo
+    /// must never silently select a default such as mock mode. Omitted fields legitimately
+    /// keep their defaults (backward compatible with older valid configs). The file is read
+    /// through a race-conscious bounded stream (at most the size bound plus one byte is ever
+    /// read) — never a full <c>ReadAllBytes</c> ahead of the bound. The shared
+    /// <see cref="Json.Options"/> and state.json migration are deliberately untouched.</summary>
     public TenNinetyConfig Load()
     {
-        var config = File.Exists(Path)
-            ? Json.Deserialize<TenNinetyConfig>(File.ReadAllText(Path))
-            : new TenNinetyConfig();
+        if (!File.Exists(Path)) return DefaultValidated();
+        var bytes = StrictJsonIngestion.ReadBounded(
+            Path, StrictJsonIngestion.MaxConfigBytes, "config.json");
+        StrictJsonIngestion.EnsureStrictShape(bytes, StrictJsonIngestion.MaxConfigBytes, "config.json");
+        var config = StrictJsonIngestion.Deserialize<TenNinetyConfig>(bytes, "config.json");
+        config.Validate();
+        return config;
+    }
+
+    private static TenNinetyConfig DefaultValidated()
+    {
+        var config = new TenNinetyConfig();
         config.Validate();
         return config;
     }

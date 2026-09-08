@@ -90,7 +90,8 @@ public sealed class DockerCliSandboxSession : ISandboxSession
                 try
                 {
                     state = await _cli.InspectContainerAsync(_containerId, ct: CancellationToken.None);
-                }                catch (Exception ex)
+                }
+                catch (Exception ex)
                 {
                     throw new InvalidOperationException(
                         "could not verify OOM state after a nonzero exit: " + ex.Message, ex);

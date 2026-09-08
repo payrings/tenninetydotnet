@@ -12,10 +12,21 @@ public interface IGitService
 {
     string RepoPath { get; }
     bool IsRepository();
+    /// <summary>Top-level working-tree directory of the repository CONTAINING RepoPath, or
+    /// null when not inside a work tree (linked worktrees and subdirectories included).</summary>
+    string? RepositoryTopLevel();
+    /// <summary>True when RepoPath refers to a bare repository.</summary>
+    bool IsBareRepository();
+    /// <summary>Establishes the repository-LOCAL Tenninety commit identity when no identity is
+    /// resolvable; never touches global or system configuration.</summary>
+    void EnsureLocalIdentity();
     void Init();
     bool IsClean();
     bool IsPathClean(string relativePath);
     string CurrentBranch();
+    /// <summary>Branch HEAD symbolically points at, or null when detached; also valid on an
+    /// unborn branch (no commit yet).</summary>
+    string? SymbolicHeadBranch();
     bool BranchExists(string branch);
     void CreateAndCheckoutBranch(string branch);
     void CheckoutBranch(string branch);
@@ -261,6 +272,32 @@ public sealed class GitService : IGitService
         return Directory.Exists(dir) || File.Exists(dir);
     }
 
+    /// <summary>Absolute top-level working-tree directory of the repository that CONTAINS
+    /// RepoPath, or null when RepoPath is not inside a work tree. Uses
+    /// `git rev-parse --show-toplevel` so linked worktrees and subdirectories are detected
+    /// exactly like Git sees them.</summary>
+    public string? RepositoryTopLevel()
+    {
+        var result = TryRun("rev-parse", "--show-toplevel");
+        return result.ExitCode == 0 && result.Output.Trim().Length > 0
+            ? result.Output.Trim()
+            : null;
+    }
+
+    /// <summary>True when RepoPath refers to a bare repository (no work tree).</summary>
+    public bool IsBareRepository() =>
+        TryRun("rev-parse", "--is-bare-repository").Output.Trim() == "true";
+
+    /// <summary>Ensures a commit identity is resolvable in this repository by establishing the
+    /// repository-LOCAL Tenninety identity when none exists — exactly like <see cref="Init"/>.
+    /// Never touches global or system configuration.</summary>
+    public void EnsureLocalIdentity()
+    {
+        if (HasIdentity()) return;
+        Run("config", "user.name", "tenninety");
+        Run("config", "user.email", "tenninety@localhost");
+    }
+
     public void Init()
     {
         if (_isolated)
@@ -275,15 +312,22 @@ public sealed class GitService : IGitService
         // Ensure commits are possible even on machines without global git identity. In the
         // isolated profile global/system config is /dev/null, so the probe only sees local
         // config and a fresh local identity is always established.
-        if (!HasIdentity())
-        {
-            Run("config", "user.name", "tenninety");
-            Run("config", "user.email", "tenninety@localhost");
-        }
+        EnsureLocalIdentity();
     }
 
     private bool HasIdentity() =>
         TryRun("config", "user.name").ExitCode == 0 && TryRun("config", "user.email").ExitCode == 0;
+
+    /// <summary>Test seam (InternalsVisibleTo): runs an arbitrary git command verbatim.</summary>
+    internal void RunForTest(params string[] args) => Run(args);
+
+    /// <summary>Test seam (InternalsVisibleTo): reads a repository-LOCAL config value, or
+    /// null when unset. Global/system configuration is never consulted.</summary>
+    internal string? ShowLocalConfigForTest(string key)
+    {
+        var result = TryRun("config", "--local", "--get", key);
+        return result.ExitCode == 0 ? result.Output.Trim() : null;
+    }
 
     public bool IsClean() => Run("status", "--porcelain").Output.Trim().Length == 0;
 
@@ -291,6 +335,15 @@ public sealed class GitService : IGitService
         Run("status", "--porcelain", "--", relativePath).Output.Trim().Length == 0;
 
     public string CurrentBranch() => Run("rev-parse", "--abbrev-ref", "HEAD").Output.Trim();
+
+    /// <summary>Branch name HEAD symbolically points at, or null when HEAD is detached. Unlike
+    /// <see cref="CurrentBranch"/> this also works on an unborn branch (a repository without
+    /// any commit yet).</summary>
+    public string? SymbolicHeadBranch()
+    {
+        var result = TryRun("symbolic-ref", "--short", "--quiet", "HEAD");
+        return result.ExitCode == 0 ? result.Output.Trim() : null;
+    }
 
     public bool BranchExists(string branch) =>
         TryRun("rev-parse", "--verify", "--quiet", $"refs/heads/{branch}").ExitCode == 0;

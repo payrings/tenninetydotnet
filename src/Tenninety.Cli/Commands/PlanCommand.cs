@@ -157,32 +157,39 @@ public static class PlanCommand
     private static void RenderPlanSummary(Plan plan, Core.Validation.ValidationResult validation)
     {
         AnsiConsole.Write(new Rule($"[b]{Markup.Escape(plan.ProjectName)}[/]").RuleStyle("grey"));
-        var byLayer = plan.WorkPackages.GroupBy(w => w.Layer).OrderBy(g => g.Key);
+        var byLayer = (plan.WorkPackages ?? [])
+            .Where(w => w is not null)
+            .GroupBy(w => w.Layer)
+            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
         foreach (var group in byLayer)
-            AnsiConsole.MarkupLine($"[b]{Markup.Escape(group.Key)}[/]: {group.Count()} WP(s)");
+            AnsiConsole.MarkupLine($"[b]{Markup.Escape(group.Key ?? "<null>")}[/]: {group.Count()} WP(s)");
 
-        // Blueprint structural analysis.
+        // Blueprint structural analysis. Null-safe: the plan is untrusted output and may fail
+        // validation; the summary must still render to show the operator WHY it was rejected.
         var map = plan.ArchitectureMap;
         if (map is not null)
         {
-            if (map.BoundedContexts.Count > 0)
+            if (map.BoundedContexts is { Count: > 0 })
                 AnsiConsole.MarkupLine($"[b]Bounded contexts[/]: {Markup.Escape(string.Join(", ", map.BoundedContexts))}");
-            if (map.CoreEntities.Count > 0)
+            if (map.CoreEntities is { Count: > 0 })
                 AnsiConsole.MarkupLine($"[b]Core entities[/]: {Markup.Escape(string.Join(", ", map.CoreEntities))}");
-            foreach (var dep in map.KeyDependencies)
+            foreach (var dep in map.KeyDependencies ?? [])
                 AnsiConsole.MarkupLine($"[b]Key dependency[/]: {Markup.Escape(dep)}");
         }
-        if (plan.GlobalContext.DirectoryStructure is { } dirs && dirs.Count > 0)
+        if (plan.GlobalContext?.DirectoryStructure is { } dirs && dirs.Count > 0)
             foreach (var (root, projects) in dirs)
                 AnsiConsole.MarkupLine(
-                    $"[b]{Markup.Escape(root)}[/]: {Markup.Escape(string.Join(", ", projects))}");
-        if (plan.GlobalContext.Assumptions.Count > 0)
+                    $"[b]{Markup.Escape(root ?? "<null>")}[/]: {Markup.Escape(string.Join(", ", projects ?? []))}");
+        if (plan.GlobalContext?.Assumptions is { Count: > 0 } assumptions)
             AnsiConsole.MarkupLine(
-                $"[b]Assumptions[/]: {plan.GlobalContext.Assumptions.Count} recorded");
+                $"[b]Assumptions[/]: {assumptions.Count} recorded");
 
         var table = new Table().Border(TableBorder.Rounded);
         table.AddColumns("#", "ID", "Layer", "Module", "Title", "Deps", "Directives", "Criteria", "Notes");
-        foreach (var (wp, i) in plan.WorkPackages.OrderBy(w => PlanValidator.IdOrder(w.Id)).Select((w, i) => (w, i)))
+        foreach (var (wp, i) in (plan.WorkPackages ?? [])
+                     .Where(w => w is not null)
+                     .OrderBy(w => PlanValidator.IdOrder(w.Id))
+                     .Select((w, i) => (w, i)))
         {
             var notes = "";
             if (WpMarkers.IsConflict(wp)) notes = "[red]CONFLICT[/]";
@@ -190,12 +197,12 @@ public static class PlanCommand
             table.AddRow(
                 (i + 1).ToString(),
                 Markup.Escape(wp.Id),
-                Markup.Escape(wp.Layer),
-                Markup.Escape(wp.Module),
-                Markup.Escape(wp.Title),
-                wp.Dependencies.Count == 0 ? "-" : Markup.Escape(string.Join(",", wp.Dependencies)),
-                wp.Directives.Count.ToString(),
-                wp.AcceptanceCriteria.Count.ToString(),
+                Markup.Escape(wp.Layer ?? ""),
+                Markup.Escape(wp.Module ?? ""),
+                Markup.Escape(wp.Title ?? ""),
+                (wp.Dependencies ?? []).Count == 0 ? "-" : Markup.Escape(string.Join(",", wp.Dependencies)),
+                (wp.Directives ?? []).Count.ToString(),
+                (wp.AcceptanceCriteria ?? []).Count.ToString(),
                 notes);
         }
         AnsiConsole.Write(table);

@@ -234,8 +234,8 @@ public class TrustedWorkspaceDeletionTests : IDisposable
         {
             Assert.Equal(TrustedWorkspaceDeletion.ManagedEntryKind.RealDirectory,
                 TrustedWorkspaceDeletion.InspectEntryNoFollow(dir));
-        Assert.Equal(TrustedWorkspaceDeletion.ManagedEntryKind.RealFile,
-            TrustedWorkspaceDeletion.InspectEntryNoFollow(file));
+            Assert.Equal(TrustedWorkspaceDeletion.ManagedEntryKind.RealFile,
+                TrustedWorkspaceDeletion.InspectEntryNoFollow(file));
             // A symlink is classified by the LINK ITSELF (no-follow), never its target.
             Assert.Equal(TrustedWorkspaceDeletion.ManagedEntryKind.UnexpectedEntry,
                 TrustedWorkspaceDeletion.InspectEntryNoFollow(link));

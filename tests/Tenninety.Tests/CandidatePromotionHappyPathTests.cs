@@ -205,9 +205,13 @@ public class CandidatePromotionHappyPathTests : IDisposable
         var reviewer = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = _candidateSha, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = _mainSha,
-                Role = SandboxRole.Reviewer, RunId = "run-1", AttemptId = "attempt-r",
+                CommitSha = _candidateSha,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = _mainSha,
+                Role = SandboxRole.Reviewer,
+                RunId = "run-1",
+                AttemptId = "attempt-r",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-r", SandboxRole.Reviewer, reviewer.AttemptRoot, "test");
@@ -226,9 +230,13 @@ public class CandidatePromotionHappyPathTests : IDisposable
         var tester = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = _candidateSha, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = _mainSha,
-                Role = SandboxRole.Tester, RunId = "run-1", AttemptId = "attempt-t",
+                CommitSha = _candidateSha,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = _mainSha,
+                Role = SandboxRole.Tester,
+                RunId = "run-1",
+                AttemptId = "attempt-t",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-t", SandboxRole.Tester, tester.AttemptRoot, "test");

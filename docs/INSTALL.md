@@ -1645,13 +1645,38 @@ Docker networking; host loopback is rejected in the container context), while ho
 processes use `"llama_swap_endpoint": "http://127.0.0.1:8080/v1"`. If you follow the host-llama-swap path (Sections 5-6) instead and run llama-swap directly
 on the host, stop that user service first – both bind `127.0.0.1:8080`.
 
-**Alternative (Outcome C, tenninety inside the KVM guest): host-side llama-swap.**
+**Role images for the Docker sandbox.** Live Docker mode also needs three digest-pinned role
+images (Coder with the selected tool at its exact path, Reviewer exploration guest, Tester with
+the .NET 10 SDK). The repository ships pinned Dockerfiles and a fish script that builds
+and verifies all of them and prints the exact local image IDs:
+
+```fish
+cd ~/10-90new
+./docker/build-role-images.fish        # builds aider, opencode, pi, reviewer, tester
+```
+
+Copy the printed `sha256:…` IDs into `.tenninety/config.json`
+(`sandbox.roles.coder.image` — the image matching your `"coder_agent"` — plus
+`roles.reviewer.image` and `roles.tester.image`), or take the values from the annotated
+[`SANDBOX-CONFIG.example.jsonc`](SANDBOX-CONFIG.example.jsonc). The images satisfy every
+preflight requirement by construction: explicit numeric non-root `USER`, no `ENTRYPOINT`,
+and compatibility with the fixed `sleep infinity` lifecycle. Nothing is pulled or built at
+runtime; credentials and host configuration are never baked in.
+
+**Alternative (Outcome C, tenninety inside the KVM guest): host-side llama-swap, no Compose in
+the guest.**
 Sections 5-6 install llama-swap on the physical host with `listen: 127.0.0.1:8080` and Section
-12 reaches the guest through the SSH reverse tunnel (`127.0.0.1:18080` inside the guest); the
-guest keeps `docker compose up -d` only to provision its internal model network. The container
-endpoints above do not apply to that path – inside the guest, `sandbox.mode=unsafe-host` is
-the documented configuration precisely because the guest-loopback tunnel endpoint cannot pass
-the Docker sandbox's container-endpoint validation.
+12 reaches the guest through the SSH reverse tunnel (`127.0.0.1:18080` inside the guest). The
+guest runs **no Docker and none of the repository Compose stack**: `sandbox.mode=unsafe-host`
+needs no Docker at all, and starting the repository Compose in the guest would only try to
+launch llama-swap — which requires `/dev/dri`, the GPU driver stack and the model files that
+deliberately do not exist in the guest — and would create a `tenninety-coder-model` network
+that the unsafe-host path never uses. There is nothing to create: keep the guest Docker-free.
+The container endpoints above do not apply to that path – inside the guest, `sandbox.mode=unsafe-host`
+is the documented configuration precisely because the guest-loopback tunnel endpoint cannot pass
+the Docker sandbox's container-endpoint validation, and the guest's model endpoint stays
+`"llama_swap_endpoint": "http://127.0.0.1:18080/v1"` behind the physical-host reverse tunnel
+(Section 12).
 
 In both topologies the model identifiers (`local_models.coder` / `local_models.reviewer`)
 must match the llama-swap profile names, and the framework only enforces that the two

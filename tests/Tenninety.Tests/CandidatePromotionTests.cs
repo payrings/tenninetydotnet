@@ -289,8 +289,8 @@ public class CandidatePromotionTests : IDisposable
         // No public constructor and no public factory returning a confirmed proof.
         Assert.Empty(typeof(QuiescenceProof).GetConstructors(
             BindingFlags.Public | BindingFlags.Instance));
-        Assert.Empty(typeof(QuiescenceProof).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Where(m => m.ReturnType == typeof(QuiescenceProof)));
+        Assert.DoesNotContain(typeof(QuiescenceProof).GetMethods(BindingFlags.Public | BindingFlags.Static)
+, m => m.ReturnType == typeof(QuiescenceProof));
 
         // Replay/mismatch: a proof bound to another run, attempt, role or workspace must
         // reject before anything is scanned.
@@ -599,8 +599,8 @@ public class CandidatePromotionTests : IDisposable
         // Quiescence proof: no public constructor, no public confirmed factory.
         Assert.Empty(typeof(QuiescenceProof).GetConstructors(
             BindingFlags.Public | BindingFlags.Instance));
-        Assert.Empty(typeof(QuiescenceProof).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Where(m => m.ReturnType == typeof(QuiescenceProof)));
+        Assert.DoesNotContain(typeof(QuiescenceProof).GetMethods(BindingFlags.Public | BindingFlags.Static)
+, m => m.ReturnType == typeof(QuiescenceProof));
 
         // Candidate workspace: no public constructor; get-only typed role.
         Assert.Empty(typeof(CandidateWorkspace).GetConstructors(

@@ -434,10 +434,18 @@ When mocks feel boring:
    swaps the resident GGUF whenever a request names the other model – only one is in VRAM at a
    time. If you previously ran llama-swap directly on the host, stop that service first (both
    bind `127.0.0.1:8080`).
-2. Build or obtain digest-pinned role images. The Coder image must contain
+2. Build the digest-pinned role images. The repository ships pinned Dockerfiles and a
+   fish script that builds them, checks the sandbox contract (numeric non-root user, no
+   ENTRYPOINT, tool present at the exact path, no credential files) and prints the exact
+   local image IDs:
+   ```fish
+   ./docker/build-role-images.fish          # aider, opencode, pi, reviewer, tester
+   ```
+   Copy the printed `sha256:…` IDs into `.tenninety/config.json`. The Coder image must contain
    [aider](https://aider.chat), OpenCode, or Pi according to the `"coder_agent"` knob;
    OpenCode/Pi require an explicit agent `model`. The Reviewer model call stays host-controlled,
-   while its repository exploration runs in an offline Reviewer image.
+   while its repository exploration runs in an offline Reviewer image. Nothing is pulled or
+   built at runtime.
 3. Edit `.tenninety/config.json`:
    `"provider_mode": "aider"`,
    `"use_llama_swap": true`,

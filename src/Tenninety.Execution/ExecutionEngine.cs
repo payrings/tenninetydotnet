@@ -426,25 +426,25 @@ public sealed class ExecutionEngine
 
     private CoderRunContext MakeCoderContext(
         WorkPackage wp, AttemptInfo info, CandidateRevision candidate) => new()
-    {
-        Candidate = candidate,
-        WorkPackage = wp,
-        Global = _global,
-        Attempt = Math.Max(1, info.Count),
-        Feedback = info.Feedback,
-        Advice = info.Advice,
-    };
+        {
+            Candidate = candidate,
+            WorkPackage = wp,
+            Global = _global,
+            Attempt = Math.Max(1, info.Count),
+            Feedback = info.Feedback,
+            Advice = info.Advice,
+        };
 
     private ReviewerRunContext MakeReviewerContext(
         WorkPackage wp, AttemptInfo info, CandidateRevision candidate) => new()
-    {
-        Candidate = candidate,
-        WorkPackage = wp,
-        Global = _global,
-        Attempt = Math.Max(1, info.Count),
-        Feedback = info.Feedback,
-        Advice = info.Advice,
-    };
+        {
+            Candidate = candidate,
+            WorkPackage = wp,
+            Global = _global,
+            Attempt = Math.Max(1, info.Count),
+            Feedback = info.Feedback,
+            Advice = info.Advice,
+        };
 
     private static AttemptInfo GetAttemptInfo(RuntimeState state, string wpId)
     {

@@ -18,20 +18,25 @@ namespace Tenninety.Execution.Testing;
 ///   3. verify the authoritative branch/HEAD/recorded main SHA/clean state against the
 ///      trusted candidate context (fail closed, no reset, no repair);
 ///   4. prepare the private managed root and production Docker dependencies;
-///   5. run the REAL Docker preflight before any candidate code executes;
-///   6. refuse failed or indeterminate preflight and surface its bounded warnings;
-///   7. materialize the exact requested SHA with <see cref="CandidateWorkspaceFactory"/>;
-///   8. apply MaxWorkspaceMb to the materialization limits with checked arithmetic;
-///   9. optionally Restore in the accepted restricted network, remove that container, and
-///      validate bounded derived output without following redirects;
-///  10. discover a test project in the MATERIALIZED source (never the authoritative checkout);
-///  11. construct a validated offline Tester <see cref="SandboxSpec"/>;
-///  12. create the hardened Tester session;
-///  13. execute build and test through the container-only <see cref="ShellTesterAgent"/>;
-///  14. stop and dispose the session, proving container removal;
-///  15. delete the owned attempt workspace safely;
-///  16. recheck the authoritative host state;
-///  17. return the final result only after cleanup and host-state verification succeed.
+///   5. materialize the exact requested SHA with <see cref="CandidateWorkspaceFactory"/>
+///      (a LOCAL, Docker-free operation);
+///   6. when Restore is enabled, run the cheap bounded structural Restore prerequisite scan
+///      on the materialized source BEFORE any Docker inspection, probe, session or container
+///      creation (locked restore remains the authoritative lock-currency check);
+///   7. run the REAL Docker preflight before any candidate code executes;
+///   8. refuse failed or indeterminate preflight and surface its bounded warnings;
+///   9. apply MaxWorkspaceMb to the materialization limits with checked arithmetic;
+///  10. optionally Restore (explicit targets, fixed <c>dotnet restore --locked-mode</c>) in
+///      the accepted restricted network, remove that container, and validate bounded derived
+///      output without following redirects;
+///  11. discover a test project in the MATERIALIZED source (never the authoritative checkout);
+///  12. construct a validated offline Tester <see cref="SandboxSpec"/>;
+///  13. create the hardened Tester session;
+///  14. execute build and test through the container-only <see cref="ShellTesterAgent"/>;
+///  15. stop and dispose the session, proving container removal;
+///  16. delete the owned attempt workspace safely;
+///  17. recheck the authoritative host state;
+///  18. return the final result only after cleanup and host-state verification succeed.
 ///
 /// Failure classification (control flow, never message text): ordinary candidate build/test
 /// failures — definitive nonzero exits, operational indeterminacies (timeout, OOM, output
@@ -170,6 +175,10 @@ public sealed class SandboxTesterGate : ITesterAgent
         {
             ctx.Validate();
             _config.Sandbox.ValidateStructural();
+            // Tester-role live requirements only: the Tester gate (including Tester-only
+            // revert) never demands unrelated Coder/Reviewer images or the Coder model
+            // endpoint, while its own digest-pinned image stays mandatory.
+            _config.Sandbox.ValidateLiveDocker(SandboxLiveRoles.Tester);
         }
         catch (Exception ex)
         {
@@ -263,8 +272,13 @@ public sealed class SandboxTesterGate : ITesterAgent
         return outcome!;
     }
 
-    /// <summary>Steps 4–12: production dependencies, preflight, materialization, discovery,
-    /// spec, session, and the container-only build/test run.</summary>
+    /// <summary>Steps 4–13: production dependencies, exact materialization, the cheap
+    /// Restore structural prerequisites (BEFORE any Docker inspection/probe/session),
+    /// preflight, discovery, spec, session, and the container-only build/test run.
+    /// Materialization and the prerequisite scan are LOCAL, Docker-free operations, so
+    /// invalid prerequisites fail before the Docker transport is ever used: preflight probe
+    /// containers and Restore/Tester sessions can never be created for a candidate whose
+    /// committed lock files are missing or structurally unusable.</summary>
     private async Task<TestRunResult> RunCoreAsync(
         TesterRunContext ctx, SandboxConfig sandbox, RunState state, CancellationToken ct)
     {
@@ -284,27 +298,10 @@ public sealed class SandboxTesterGate : ITesterAgent
         var preflight = _preflightFactory?.Invoke(cli, state.ManagedRoot)
             ?? new DockerSandboxPreflight(
                 cli, sandbox, state.ManagedRoot, _authoritativeGit.RepoPath,
-                ownedManagedRoot: state.OwnedRoot is not null);
+                ownedManagedRoot: state.OwnedRoot is not null,
+                requiredRoles: SandboxLiveRoles.Tester);
 
-        // ---- 5/6. real preflight before any candidate code runs --------------------------
-        state.Stage = "preflight";
-        var report = await preflight.RunAsync(ct);
-        if (!report.IsReady)
-            throw PublicTesterFailure(
-                "docker preflight did not pass; refusing to execute candidate code. errors: " +
-                string.Join("; ", report.Errors.Take(8).Select(Sanitize)) +
-                (report.Warnings.Count > 0
-                    ? " warnings: " + string.Join("; ", report.Warnings.Take(8).Select(Sanitize))
-                    : ""));
-
-        // Reduced-protection warnings must not silently disappear just because the
-        // preflight is ready: surface them before any candidate code executes. The COMPLETE
-        // log line (prefix + warning) is assembled first and bounded LAST.
-        foreach (var warning in report.Warnings.Take(8))
-            _log?.Invoke(FinalPublicBound(
-                "tester preflight warning (reduced protection): " + Sanitize(warning)));
-
-        // ---- 7/8. exact candidate materialization with checked limits --------------------
+        // ---- 5. exact candidate materialization with checked limits (LOCAL, no Docker) ----
         state.Stage = "materialization";
         var limits = new MaterializationLimits
         {
@@ -350,11 +347,47 @@ public sealed class SandboxTesterGate : ITesterAgent
                 "the materialized workspace revision does not match the requested candidate " +
                 "SHA; the run is refused and the workspace is discarded.");
 
+        // ---- 6. cheap structural Restore prerequisites BEFORE any Docker use --------------
+        // Restore always runs the FIXED 'dotnet restore --locked-mode' command: it requires a
+        // committed, structurally sound packages.lock.json for every restored project. This
+        // bounded, no-follow, no-executing scan fails BEFORE any Restore/Tester Docker
+        // inspection, probe, session or container creation. (Whether a structurally valid
+        // lock file is CURRENT for its project is established authoritatively by the locked
+        // restore itself — a stale lock fails there, not here.)
+        IReadOnlyList<string> restoreTargets = [];
+        if (tester.Restore.Enabled)
+        {
+            state.Stage = "restore-prerequisite-check";
+            var prerequisites = RestorePrerequisiteValidator.Validate(workspace.SourcePath);
+            if (!prerequisites.IsValid)
+                throw PublicTesterFailure(
+                    FinalPublicBound(string.Join(" ", prerequisites.Failures)));
+            restoreTargets = prerequisites.RestoreTargets;
+        }
+
+        // ---- 7/8. real preflight before any candidate code runs ---------------------------
+        state.Stage = "preflight";
+        var report = await preflight.RunAsync(ct);
+        if (!report.IsReady)
+            throw PublicTesterFailure(
+                "docker preflight did not pass; refusing to execute candidate code. errors: " +
+                string.Join("; ", report.Errors.Take(8).Select(Sanitize)) +
+                (report.Warnings.Count > 0
+                    ? " warnings: " + string.Join("; ", report.Warnings.Take(8).Select(Sanitize))
+                    : ""));
+
+        // Reduced-protection warnings must not silently disappear just because the
+        // preflight is ready: surface them before any candidate code executes. The COMPLETE
+        // log line (prefix + warning) is assembled first and bounded LAST.
+        foreach (var warning in report.Warnings.Take(8))
+            _log?.Invoke(FinalPublicBound(
+                "tester preflight warning (reduced protection): " + Sanitize(warning)));
+
         // ---- 9. optional accepted restricted Restore --------------------------------------
         if (tester.Restore.Enabled)
         {
             var restoreFailure = await RunRestoreAsync(
-                runtime, workspace, ctx, sandbox, state, ct);
+                runtime, workspace, ctx, sandbox, state, restoreTargets, ct);
             if (restoreFailure is not null)
                 return GateFailure(ctx, restoreFailure);
         }
@@ -457,6 +490,7 @@ public sealed class SandboxTesterGate : ITesterAgent
         TesterRunContext ctx,
         SandboxConfig sandbox,
         RunState state,
+        IReadOnlyList<string> restoreTargets,
         CancellationToken ct)
     {
         var restore = sandbox.Roles.Tester.Restore;
@@ -526,6 +560,11 @@ public sealed class SandboxTesterGate : ITesterAgent
         state.Ownership?.SetContainer(state.Session.Info.ContainerId);
 
         state.Stage = "restricted-restore-execution";
+        // The restore TARGETS come from the bounded structural prerequisite scan (the single
+        // discovered solution, or every discovered project, container-relative and
+        // ordinal-sorted): the fixed restore command never relies on the working directory's
+        // implicit solution inference. Locked mode is the authoritative check that each
+        // committed lock file is CURRENT for its project; a stale lock fails the restore.
         var result = await state.Session.RunAsync(new SandboxCommand
         {
             Executable = "/usr/bin/dotnet",
@@ -534,8 +573,9 @@ public sealed class SandboxTesterGate : ITesterAgent
                 "restore",
                 "--locked-mode",
                 "--configfile", controlConfig,
-                "--packages", "/workspace/.tenninety/restore-packages",
+                "--packages", SandboxPolicy.RestorePackagesContainerPath,
                 "--nologo",
+                .. restoreTargets,
             ],
             WorkingDirectory = SandboxPolicy.ContainerWorkspacePath,
             Timeout = TimeSpan.FromSeconds(restore.TimeoutSeconds),
@@ -579,6 +619,9 @@ public sealed class SandboxTesterGate : ITesterAgent
     private static string CreateRestoreControl(
         string workspaceRoot, SandboxRestoreConfig restore)
     {
+        // The host-side mirror of SandboxPolicy.RestorePackagesContainerPath: the Restore
+        // container writes packages here (mounted at /workspace) and the fresh offline Tester
+        // container reads them back through NUGET_PACKAGES.
         var packages = Path.Combine(workspaceRoot, ".tenninety", "restore-packages");
         var control = Path.Combine(workspaceRoot, ".tenninety", "restore-control");
         if (Directory.Exists(packages) || File.Exists(packages) ||
@@ -881,12 +924,36 @@ public sealed class SandboxTesterGate : ITesterAgent
             Timeout = TimeSpan.FromSeconds(tester.TimeoutSeconds),
             Labels = AttemptLabels(runId, ctx, "tester", candidateSha),
             CandidateSha = candidateSha,
-            Environment = new Dictionary<string, string>
-            {
-                ["TENNINETY_WP"] = ctx.WorkPackageId,
-                ["TENNINETY_ATTEMPT"] = ctx.Attempt.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            },
+            Environment = TesterEnvironment(
+                ctx.WorkPackageId, ctx.Attempt, tester.Restore.Enabled),
         };
+    }
+
+    /// <summary>
+    /// Closed Tester container environment. TENNINETY_WP/TENNINETY_ATTEMPT carry the structured
+    /// identity; the fixed quiet-dotnet knobs (telemetry opt-out, no logo) keep build/test CLI
+    /// output clean — the same fixed values the Restore phase carries. When the accepted
+    /// Restore phase ran, the container additionally resolves packages from the SAME fixed
+    /// workspace-relative store the Restore phase populated
+    /// (<see cref="SandboxPolicy.RestorePackagesContainerPath"/>), so build/test consume the
+    /// accepted restored assets offline instead of performing an uncontrolled implicit network
+    /// restore. Without Restore the key is absent: dependencies must be pre-baked or vendored
+    /// in the image.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, string> TesterEnvironment(
+        string workPackageId, int attempt, bool restoreEnabled)
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["TENNINETY_WP"] = workPackageId,
+            ["TENNINETY_ATTEMPT"] = attempt.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
+            ["DOTNET_NOLOGO"] = "1",
+        };
+        if (restoreEnabled)
+            environment[SandboxPolicy.NuGetPackagesEnvironmentKey] =
+                SandboxPolicy.RestorePackagesContainerPath;
+        return environment;
     }
 
     private IReadOnlyDictionary<string, string> AttemptLabels(
@@ -983,9 +1050,9 @@ public sealed class SandboxTesterGate : ITesterAgent
     /// a sanitizer is defense in depth, not proof that arbitrary text is safe to publish.</summary>
     private static string Describe(Exception primary, RunState? state) =>
         primary is TesterInfrastructureException
-            {
-                Provenance: TesterInfrastructureProvenance.Controlled,
-            }
+        {
+            Provenance: TesterInfrastructureProvenance.Controlled,
+        }
             ? Sanitize(primary.Message)
             : "stage " + (state?.Stage ?? "unknown") + " failed (" + primary.GetType().Name + ")";
 

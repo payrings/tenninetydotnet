@@ -64,9 +64,11 @@ public static class JsonExtractor
         }
 
         if (!sawOpeningBrace)
-            throw new InvalidOperationException($"no JSON object found in model response: {Truncate(text)}");
-        throw new InvalidOperationException($"no valid JSON object found in model response: {Truncate(text)}");
+            throw new InvalidOperationException(
+                "no JSON object found in model response: " +
+                FrontierDiagnostics.Build(text));
+        throw new InvalidOperationException(
+            "no valid JSON object found in model response: " +
+            FrontierDiagnostics.Build(text));
     }
-
-    private static string Truncate(string s) => s.Length <= 200 ? s : s[..200] + "…";
 }

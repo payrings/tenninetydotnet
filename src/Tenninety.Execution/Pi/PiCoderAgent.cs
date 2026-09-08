@@ -10,7 +10,10 @@ namespace Tenninety.Execution.Pi;
 ///
 /// The model string follows pi's "provider/id" pattern (custom local providers are set up
 /// via ~/.pi/agent/models.json; llama.cpp router is built in). Leave Model empty to use
-/// whatever model the user's pi settings select.
+/// whatever model the user's pi settings select. NOTE: this is the host-side (unsafe-host)
+/// path only — the containerized Pi path generates its own provider configuration inside the
+/// bounded tmpfs home (see <c>CoderToolPlan.BuildPi</c>); it does not depend on host ~/.pi
+/// state.
 /// </summary>
 public sealed class PiCoderAgent : CliCoderAgentBase
 {

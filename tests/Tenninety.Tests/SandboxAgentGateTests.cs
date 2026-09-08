@@ -270,12 +270,12 @@ public sealed class SandboxAgentGateTests : IDisposable
 
     private RecordingSandboxSession Session(
         SandboxSpec spec, List<string> timeline, Action<SandboxCommand> onRun) => new()
-    {
-        Role = spec.Role,
-        SourcePath = spec.HostWorkspacePath!.Value,
-        EventSink = timeline.Add,
-        OnRun = onRun,
-    };
+        {
+            Role = spec.Role,
+            SourcePath = spec.HostWorkspacePath!.Value,
+            EventSink = timeline.Add,
+            OnRun = onRun,
+        };
 
     private Task DeleteWorkspace(string path)
     {

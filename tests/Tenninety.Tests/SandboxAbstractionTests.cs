@@ -144,9 +144,9 @@ public class SandboxAbstractionTests : IDisposable
         public int MemoryMb = 8192;
         public int Pids = 256;
         public TimeSpan Timeout = TimeSpan.FromMinutes(30);
-        public string? CandidateSha;
-        public bool OmitWorkspace;
-        public Dictionary<string, string>? Labels;
+        public string? CandidateSha = null;
+        public bool OmitWorkspace = false;
+        public Dictionary<string, string>? Labels = null;
     }
 
     private SandboxSpec ValidSpec(Action<SpecDraft>? mutate = null)
@@ -1315,12 +1315,12 @@ public class SandboxAbstractionIdentityLabelTests : IDisposable
     public void Empty_or_whitespace_only_required_values_fail()
     {
         foreach (var key in SandboxSpec.RequiredLabelKeys)
-        foreach (var blank in new[] { "", "   " })
-        {
-            var labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Coder);
-            labels[key] = blank;
-            Assert.Throws<InvalidOperationException>(() => Spec(labels: labels).Validate());
-        }
+            foreach (var blank in new[] { "", "   " })
+            {
+                var labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Coder);
+                labels[key] = blank;
+                Assert.Throws<InvalidOperationException>(() => Spec(labels: labels).Validate());
+            }
     }
 
     [Fact]

@@ -4,10 +4,12 @@ namespace Tenninety.Execution.Sandbox;
 
 /// <summary>
 /// Docker sandbox preflight: verifies Docker client/daemon connectivity, resolves and
-/// verifies every configured live role image, inspects the configured networks, detects
+/// verifies every configured live role image REQUIRED BY THE CALLER (default: all roles;
+/// Tester-only revert probes only the Tester and the Restore phase when enabled), inspects the
+/// configured networks, detects
 /// rootless mode, parses cgroup enforcement, reports LSM facts, and then runs REAL probes
-/// built by the SAME typed create factory as production — one probe per distinct live
-/// role configuration (Coder/Reviewer/Tester and Restore when enabled), each with a fresh
+/// built by the SAME typed create factory as production — one probe per distinct live role
+/// configuration (Coder/Reviewer/Tester and Restore when enabled), each with a fresh
 /// validated disposable workspace, the role's own image, identity, network and resource
 /// limits. Every probe must prove it is running, every effective hardening setting is
 /// verified from realistic inspect data, and cleanup is only proven after a final typed
@@ -24,15 +26,18 @@ public sealed class DockerSandboxPreflight
     private readonly string _authoritativeRepositoryPath;
     private readonly bool _ownedManagedRoot;
     private readonly Func<string, Task>? _deleteWorkspaceOverride;
+    private readonly SandboxLiveRoles _requiredRoles;
 
     public DockerSandboxPreflight(
         DockerCli cli,
         SandboxConfig config,
         string managedRoot,
         string authoritativeRepositoryPath,
-        bool ownedManagedRoot = false)
+        bool ownedManagedRoot = false,
+        SandboxLiveRoles requiredRoles = SandboxLiveRoles.All)
         : this(cli, config, managedRoot, authoritativeRepositoryPath,
-            deleteWorkspaceOverride: null, ownedManagedRoot: ownedManagedRoot)
+            deleteWorkspaceOverride: null, ownedManagedRoot: ownedManagedRoot,
+            requiredRoles: requiredRoles)
     {
     }
 
@@ -45,7 +50,8 @@ public sealed class DockerSandboxPreflight
         string authoritativeRepositoryPath,
         Func<string, Task>? deleteWorkspaceOverride)
         : this(cli, config, managedRoot, authoritativeRepositoryPath,
-            deleteWorkspaceOverride, ownedManagedRoot: false)
+            deleteWorkspaceOverride, ownedManagedRoot: false,
+            requiredRoles: SandboxLiveRoles.All)
     {
     }
 
@@ -55,7 +61,8 @@ public sealed class DockerSandboxPreflight
         string managedRoot,
         string authoritativeRepositoryPath,
         Func<string, Task>? deleteWorkspaceOverride,
-        bool ownedManagedRoot)
+        bool ownedManagedRoot,
+        SandboxLiveRoles requiredRoles = SandboxLiveRoles.All)
     {
         _cli = cli;
         _config = config;
@@ -63,6 +70,9 @@ public sealed class DockerSandboxPreflight
         _authoritativeRepositoryPath = authoritativeRepositoryPath;
         _ownedManagedRoot = ownedManagedRoot;
         _deleteWorkspaceOverride = deleteWorkspaceOverride;
+        _requiredRoles = requiredRoles == SandboxLiveRoles.None
+            ? SandboxLiveRoles.All
+            : requiredRoles;
     }
 
     public async Task<DockerPreflightReport> RunAsync(CancellationToken ct = default)
@@ -121,11 +131,18 @@ public sealed class DockerSandboxPreflight
                 warnings.Add("SELinux is not reported by the Docker daemon; reduced host protection.");
         }
 
-        // 4. Resolve every configured live role image and verify identity + waiting-command
-        //    prerequisites for EVERY distinct image.
-        var coderImage = await ResolveImageAsync(_config.Roles.Coder.Image, "coder", errors, ct);
-        var reviewerImage = await ResolveImageAsync(_config.Roles.Reviewer.Image, "reviewer", errors, ct);
-        var testerImage = await ResolveImageAsync(_config.Roles.Tester.Image, "tester", errors, ct);
+        // 4. Resolve every CONFIGURED live role image for the REQUIRED roles only and verify
+        //    identity + waiting-command prerequisites for EVERY distinct image. Tester-only
+        //    callers (revert) never demand unrelated Coder/Reviewer images here.
+        var coderImage = _requiredRoles.HasFlag(SandboxLiveRoles.Coder)
+            ? await ResolveImageAsync(_config.Roles.Coder.Image, "coder", errors, ct)
+            : null;
+        var reviewerImage = _requiredRoles.HasFlag(SandboxLiveRoles.Reviewer)
+            ? await ResolveImageAsync(_config.Roles.Reviewer.Image, "reviewer", errors, ct)
+            : null;
+        var testerImage = _requiredRoles.HasFlag(SandboxLiveRoles.Tester)
+            ? await ResolveImageAsync(_config.Roles.Tester.Image, "tester", errors, ct)
+            : null;
         foreach (var (info, role) in new[]
                  {
                      (coderImage, "coder"), (reviewerImage, "reviewer"), (testerImage, "tester"),
@@ -153,20 +170,25 @@ public sealed class DockerSandboxPreflight
         //    inspect failure is an error — never silently treated as absent. INVALID
         //    configured names are described by category (a raw invalid configuration value is
         //    never echoed into public diagnostics); VALIDATED names are bounded, non-secret
-        //    identifiers and may be named where useful.
-        if (!Tenninety.Core.Models.SandboxConfig.IsValidDockerNetworkName(_config.ModelNetwork))
-            errors.Add(
-                "sandbox.model_network is not a permitted Docker network name (the invalid " +
-                "value is withheld); reserved networks (host, bridge, none, default) are " +
-                "never permitted.");
-        else
+        //    identifiers and may be named where useful. The model network matters only for
+        //    Coder execution; the restore network only for Tester execution with Restore
+        //    enabled.
+        if (_requiredRoles.HasFlag(SandboxLiveRoles.Coder))
         {
-            var modelNetwork = await InspectNetworkOrDefaultAsync(_config.ModelNetwork, "model", errors, ct);
-            if (modelNetwork is { IsReserved: true })
-                errors.Add($"the model network '{_config.ModelNetwork}' resolved to a reserved network.");
+            if (!Tenninety.Core.Models.SandboxConfig.IsValidDockerNetworkName(_config.ModelNetwork))
+                errors.Add(
+                    "sandbox.model_network is not a permitted Docker network name (the invalid " +
+                    "value is withheld); reserved networks (host, bridge, none, default) are " +
+                    "never permitted.");
+            else
+            {
+                var modelNetwork = await InspectNetworkOrDefaultAsync(_config.ModelNetwork, "model", errors, ct);
+                if (modelNetwork is { IsReserved: true })
+                    errors.Add($"the model network '{_config.ModelNetwork}' resolved to a reserved network.");
+            }
         }
 
-        if (_config.Roles.Tester.Restore.Enabled)
+        if (_requiredRoles.HasFlag(SandboxLiveRoles.Tester) && _config.Roles.Tester.Restore.Enabled)
         {
             var restoreName = _config.Roles.Tester.Restore.NetworkName;
             if (string.IsNullOrWhiteSpace(restoreName) ||
@@ -316,19 +338,28 @@ public sealed class DockerSandboxPreflight
 
         if (errors.Count == 0)
         {
-            var coder = _config.Roles.Coder;
-            Add(SandboxRole.Coder, SandboxNetworkPolicy.Model, coderImage, coder.Image,
-                coder.Cpus, coder.MemoryMb, coder.Pids);
-            var reviewer = _config.Roles.Reviewer;
-            Add(SandboxRole.Reviewer, SandboxNetworkPolicy.None, reviewerImage, reviewer.Image,
-                reviewer.Cpus, reviewer.MemoryMb, reviewer.Pids);
-            var tester = _config.Roles.Tester;
-            Add(SandboxRole.Tester, SandboxNetworkPolicy.None, testerImage, tester.Image,
-                tester.Cpus, tester.MemoryMb, tester.Pids);
-            if (_config.Roles.Tester.Restore.Enabled && testerImage is not null)
+            if (_requiredRoles.HasFlag(SandboxLiveRoles.Coder))
             {
-                Add(SandboxRole.Restore, SandboxNetworkPolicy.Restore, testerImage, tester.Image,
+                var coder = _config.Roles.Coder;
+                Add(SandboxRole.Coder, SandboxNetworkPolicy.Model, coderImage, coder.Image,
+                    coder.Cpus, coder.MemoryMb, coder.Pids);
+            }
+            if (_requiredRoles.HasFlag(SandboxLiveRoles.Reviewer))
+            {
+                var reviewer = _config.Roles.Reviewer;
+                Add(SandboxRole.Reviewer, SandboxNetworkPolicy.None, reviewerImage, reviewer.Image,
+                    reviewer.Cpus, reviewer.MemoryMb, reviewer.Pids);
+            }
+            if (_requiredRoles.HasFlag(SandboxLiveRoles.Tester))
+            {
+                var tester = _config.Roles.Tester;
+                Add(SandboxRole.Tester, SandboxNetworkPolicy.None, testerImage, tester.Image,
                     tester.Cpus, tester.MemoryMb, tester.Pids);
+                if (_config.Roles.Tester.Restore.Enabled && testerImage is not null)
+                {
+                    Add(SandboxRole.Restore, SandboxNetworkPolicy.Restore, testerImage, tester.Image,
+                        tester.Cpus, tester.MemoryMb, tester.Pids);
+                }
             }
         }
         return plans;

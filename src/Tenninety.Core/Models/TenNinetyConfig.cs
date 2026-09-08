@@ -32,13 +32,11 @@ public sealed class TenNinetyConfig
     [JsonPropertyName("local_models_endpoint")]
     public string LocalModelsEndpoint { get; set; } = "http://localhost:8000/v1";
 
-    /// <summary>Per-attempt wall-clock budget for one live agent call, in minutes (clamped >= 1).</summary>
+    /// <summary>Per-attempt wall-clock budget for one live agent call, in minutes. Explicit
+    /// values below 1 (or above the persisted bound) are rejected with a named-field
+    /// validation error — never silently clamped; an omitted value keeps the default.</summary>
     [JsonPropertyName("attempt_timeout_minutes")]
-    public int AttemptTimeoutMinutes
-    {
-        get => field;
-        set => field = Math.Max(1, value);
-    } = 10;
+    public int AttemptTimeoutMinutes { get; set; } = 10;
 
     /// <summary>Human-settable switch: route both local models through one llama-swap proxy so
     /// the coder and reviewer can share one GPU card (models are swapped on demand by name).
@@ -88,20 +86,16 @@ public sealed class TenNinetyConfig
     [JsonPropertyName("test_command")]
     public string TestCommand { get; set; } = "dotnet test";
 
-    /// <summary>C# 14 field-backed properties: budgets are clamped on write (including during deserialization).</summary>
+    /// <summary>Explicit values outside [1, 1000] are rejected with a named-field validation
+    /// error — never silently clamped; an omitted value keeps the default. MUST be strictly
+    /// less than <see cref="MaxTotalAttempts"/> (see <see cref="ValidateRetryThresholds"/>).</summary>
     [JsonPropertyName("max_attempts_before_escalation")]
-    public int MaxAttemptsBeforeEscalation
-    {
-        get => field;
-        set => field = Math.Max(1, value);
-    } = 10;
+    public int MaxAttemptsBeforeEscalation { get; set; } = 10;
 
+    /// <summary>Explicit values outside [1, 10000] are rejected with a named-field validation
+    /// error — never silently clamped; an omitted value keeps the default.</summary>
     [JsonPropertyName("max_total_attempts")]
-    public int MaxTotalAttempts
-    {
-        get => field;
-        set => field = Math.Max(1, value);
-    } = 20;
+    public int MaxTotalAttempts { get; set; } = 20;
 
     [JsonPropertyName("mock")]
     public MockBehaviorConfig Mock { get; set; } = new();
@@ -126,12 +120,103 @@ public sealed class TenNinetyConfig
 
     public void Validate()
     {
-        _ = NormalizedProviderMode;
         if (LocalModels is null || Aider is null || OpenCode is null || Pi is null || Mock is null)
             throw new InvalidOperationException("config contains a null settings object.");
         if (Sandbox is null)
             throw new InvalidOperationException("config contains a null sandbox settings object.");
+        // Null-string validation runs FIRST: a JSON "field": null must be reported as a null
+        // value with its owning field name, not as a downstream "unknown mode" style error.
+        ValidateRequiredStrings();
+        _ = NormalizedProviderMode;
         Sandbox.ValidateStructural();
+        ValidateRetryThresholds();
+        ValidateBounds();
+    }
+
+    /// <summary>Explicit null/blank rejection for string-bearing configuration. A JSON
+    /// `"field": null` must never silently degrade into the empty-string default, so every
+    /// security- or behavior-relevant string is checked with its owning field name.</summary>
+    private void ValidateRequiredStrings()
+    {
+        RequireNonNullOrThrow(ExecutionMode, "execution_mode");
+        RequireNonNullOrThrow(FrontierEndpoint, "frontier_endpoint");
+        RequireNonNullOrThrow(ProviderMode, "provider_mode");
+        RequireNonNullOrThrow(FrontierModel, "frontier_model");
+        RequireNonNullOrThrow(FrontierApiKeyEnv, "frontier_api_key_env");
+        RequireNonNullOrThrow(LocalModelsEndpoint, "local_models_endpoint");
+        RequireNonNullOrThrow(LlamaSwapEndpoint, "llama_swap_endpoint");
+        RequireNonNullOrThrow(LlamaSwapCoderEndpoint, "llama_swap_coder_endpoint");
+        RequireNonNullOrThrow(CoderAgent, "coder_agent");
+        RequireNonNullOrThrow(BuildCommand, "build_command");
+        RequireNonNullOrThrow(TestCommand, "test_command");
+        if (LocalModels is not null)
+        {
+            RequireNonNullOrThrow(LocalModels.Coder, "local_models.coder");
+            RequireNonNullOrThrow(LocalModels.Reviewer, "local_models.reviewer");
+            RequireNonNullOrThrow(LocalModels.CoderEndpoint, "local_models.coder_endpoint");
+            RequireNonNullOrThrow(LocalModels.ReviewerEndpoint, "local_models.reviewer_endpoint");
+        }
+        if (Aider is not null)
+        {
+            RequireNonNullOrThrow(Aider.Model, "aider.model");
+            RequireNonNullOrThrow(Aider.ExtraArgs, "aider.extra_args");
+        }
+        if (OpenCode is not null)
+        {
+            RequireNonNullOrThrow(OpenCode.Model, "opencode.model");
+            RequireNonNullOrThrow(OpenCode.ExtraArgs, "opencode.extra_args");
+        }
+        if (Pi is not null)
+        {
+            RequireNonNullOrThrow(Pi.Model, "pi.model");
+            RequireNonNullOrThrow(Pi.ExtraArgs, "pi.extra_args");
+        }
+    }
+
+    private static void RequireNonNullOrThrow(string? value, string field)
+    {
+        if (value is null)
+            throw new InvalidOperationException(
+                $"config field '{field}' must not be null: set it to a string value or omit " +
+                "the field entirely to receive its default.");
+    }
+
+    /// <summary>
+    /// The engine checks the TOTAL attempt budget BEFORE escalating to the Frontier
+    /// (ExecutionEngine.HandleThresholdAsync), so the local budget must be strictly smaller
+    /// than the total budget — equality or reversal would make Frontier advice unreachable.
+    /// Both bounds are also capped so a typo cannot disable the gate indefinitely.
+    /// </summary>
+    private void ValidateRetryThresholds()
+    {
+        // Field-range bounds run FIRST so an out-of-range value is reported by its OWN field
+        // (never silently clamped), then the cross-field relationship.
+        if (MaxAttemptsBeforeEscalation is < 1 or > 1_000)
+            throw new InvalidOperationException(
+                $"max_attempts_before_escalation must be within [1, 1000] but is " +
+                $"{MaxAttemptsBeforeEscalation}.");
+        if (MaxTotalAttempts is < 1 or > 10_000)
+            throw new InvalidOperationException(
+                $"max_total_attempts must be within [1, 10000] but is {MaxTotalAttempts}.");
+        if (MaxAttemptsBeforeEscalation >= MaxTotalAttempts)
+            throw new InvalidOperationException(
+                $"max_attempts_before_escalation ({MaxAttemptsBeforeEscalation}) must be strictly " +
+                $"less than max_total_attempts ({MaxTotalAttempts}): the engine blocks on the " +
+                "total budget before escalating, so equal or reversed values would prevent " +
+                "every Frontier repair-advice call.");
+    }
+
+    /// <summary>Upper bounds for the remaining numeric knobs. Explicit out-of-range values
+    /// are rejected with the owning field named; an omitted value keeps its documented
+    /// default. There is no silent clamping anywhere in configuration ingestion.</summary>
+    private void ValidateBounds()
+    {
+        if (MaxConcurrentWorkers is < 1 or > 64)
+            throw new InvalidOperationException(
+                $"max_concurrent_workers must be within [1, 64] but is {MaxConcurrentWorkers}.");
+        if (AttemptTimeoutMinutes is < 1 or > 10_080)
+            throw new InvalidOperationException(
+                $"attempt_timeout_minutes must be within [1, 10080] but is {AttemptTimeoutMinutes}.");
     }
 }
 

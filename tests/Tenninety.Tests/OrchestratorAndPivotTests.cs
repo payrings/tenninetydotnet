@@ -124,8 +124,10 @@ public class OrchestratorRunTests
         var state = new RuntimeState { QueueStatus = { ["WP-001"] = TenNinety.WpStatus.Pending } };
         var config = new TenNinetyConfig
         {
+            // The engine blocks on the TOTAL budget before escalating, so the escalation
+            // budget must be strictly smaller: 1 escalation, then BLOCKED at 2 total.
             MaxAttemptsBeforeEscalation = 1,
-            MaxTotalAttempts = 1,
+            MaxTotalAttempts = 2,
             Mock = new MockBehaviorConfig
             {
                 ReviewerFailAttempts = 100,
@@ -393,7 +395,6 @@ public class RevertServiceTests
     // ---- Phase 5A: exact post-revert candidate identity ---------------------------------
 
     private sealed class IdentityRecordingTester(
-        Tenninety.Git.IGitService git,
         List<string> recorded,
         string? forcedSha) : ITesterAgent
     {
@@ -435,7 +436,7 @@ public class RevertServiceTests
     {
         var recorded = new List<string>();
         var (service, git, dir) = MakeRevertFixture(g =>
-            new IdentityRecordingTester(g, recorded, forcedSha: null));
+            new IdentityRecordingTester(recorded, forcedSha: null));
         using (dir)
         {
             var target = git.FindCommit("main")!.Sha; // the WP-001 promotion
@@ -463,7 +464,7 @@ public class RevertServiceTests
         {
             var recorded = new List<string>();
             var (service, git, dir) = MakeRevertFixture(g =>
-                new IdentityRecordingTester(g, recorded, forced));
+                new IdentityRecordingTester(recorded, forced));
             using (dir)
             {
                 var mainBefore = git.FindCommit(TenNinety.MainBranch)!.Sha;
@@ -582,7 +583,7 @@ public class RevertServiceTests
             Assert.True(TesterRunContext.IsFullCommitSha(spec.CandidateSha));
             Assert.NotEqual(target, spec.CandidateSha);
             Assert.NotEqual(git.FindCommit(TenNinety.MainBranch)!.Sha, spec.CandidateSha);
-            var hotfixCommit = git.FindCommit(spec.CandidateSha);
+            var hotfixCommit = git.FindCommit(spec.CandidateSha!);
             Assert.NotNull(hotfixCommit);
             Assert.StartsWith("Revert", hotfixCommit!.Subject);
             // The promoted main content equals the tested revert content.

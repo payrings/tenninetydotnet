@@ -595,13 +595,13 @@ public class SandboxConfigTests
             typeof(SandboxRestoreConfig),
         };
         foreach (var type in types)
-        foreach (var property in type.GetProperties())
-        {
-            var name = property.Name.ToLowerInvariant();
-            Assert.All(forbidden, f =>
-                Assert.True(!name.Contains(f),
-                    $"{type.Name}.{property.Name} must not exist: raw Docker surface is forbidden."));
-        }
+            foreach (var property in type.GetProperties())
+            {
+                var name = property.Name.ToLowerInvariant();
+                Assert.All(forbidden, f =>
+                    Assert.True(!name.Contains(f),
+                        $"{type.Name}.{property.Name} must not exist: raw Docker surface is forbidden."));
+            }
     }
 
     [Fact]

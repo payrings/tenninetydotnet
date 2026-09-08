@@ -62,6 +62,25 @@ public static partial class Sanitizer
     }
 
     /// <summary>
+    /// Sanitization for DIAGNOSTIC text that may reach logs or the terminal: applies the full
+    /// secret redaction of <see cref="SanitizeText"/> and then removes control characters
+    /// (C0, DEL, C1) so remote/model-controlled output can never inject terminal escapes,
+    /// carriage-return line rewriting or NUL bytes into diagnostics. Newlines and tabs are
+    /// preserved for readability. Callers remain responsible for the final length bound —
+    /// combine with a truncation step, never publish an unbounded diagnostic.
+    /// </summary>
+    public static string SanitizeDiagnostic(string input)
+    {
+        var text = SanitizeText(input);
+        if (string.IsNullOrEmpty(text)) return text;
+        return new string(text.Where(IsSafeDiagnosticChar).ToArray());
+    }
+
+    private static bool IsSafeDiagnosticChar(char c) =>
+        c is '\n' or '\t' ||
+        (!char.IsControl(c) && c is not (>= '\u0080' and <= '\u009F'));
+
+    /// <summary>
     /// Best-effort DETECTION of high-confidence secret material (private key blocks, known
     /// token formats such as sk-/ghp_/github_pat_/AKIA, and Azure key shapes). Used by the
     /// candidate promotion policy's bounded content scan: a detected secret rejects the whole

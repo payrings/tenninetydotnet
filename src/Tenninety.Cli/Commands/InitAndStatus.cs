@@ -3,6 +3,7 @@ using Tenninety.Core;
 using Tenninety.Core.Security;
 using Tenninety.Execution;
 using Tenninety.Execution.Sandbox;
+using Tenninety.Git;
 
 namespace Tenninety.Cli.Commands;
 
@@ -11,20 +12,30 @@ public static class InitCommand
     public static int Run()
     {
         var root = Directory.GetCurrentDirectory();
+
+        // ---- repository checks BEFORE any framework file is written or committed --------
+        var existing = PrepareExistingRepository(root);
+        if (existing.Error is { } error)
+        {
+            AnsiConsole.MarkupLine($"[red]{Markup.Escape(error)}[/]");
+            return 1;
+        }
+
         var stateDir = Path.Combine(root, TenNinety.StateDir);
         var configExisted = File.Exists(Path.Combine(stateDir, TenNinety.ConfigFile));
         var ignoreExisted = File.Exists(Path.Combine(stateDir, ".gitignore"));
         var specExisted = File.Exists(Path.Combine(root, TenNinety.SpecFile));
         var ws = Workspace.Create();
         var commitPaths = new List<string>();
-        if (!ws.Git.IsRepository())
+        if (existing.RepositoryPresent)
         {
-            ws.Git.Init();
-            AnsiConsole.MarkupLine("[green]Initialized git repository on branch 'main'.[/]");
+            AnsiConsole.MarkupLine("[dim]Git repository already present.[/]");
         }
         else
         {
-            AnsiConsole.MarkupLine("[dim]Git repository already present.[/]");
+            // Fresh workspace: create the repository on 'main' with a usable local identity.
+            ws.Git.Init();
+            AnsiConsole.MarkupLine("[green]Initialized git repository on branch 'main'.[/]");
         }
 
         if (!configExisted)
@@ -78,6 +89,68 @@ public static class InitCommand
         ## UI Descriptions (optional)
         - Textual wireframes for frontend work packages.
         """;
+
+    /// <summary>
+    /// Pre-flight for running <c>tenninety init</c> in an EXISTING Git repository. All checks
+    /// run BEFORE any framework file is written or committed, and nothing is renamed or
+    /// switched automatically:
+    ///  - running inside a SUBDIRECTORY of a repository (or inside a bare repository) is
+    ///    refused so a nested repository can never be created accidentally;
+    ///  - an existing repository must already be on 'main' (plan acceptance and startup
+    ///    require it); the exact remediation is printed instead of silently renaming or
+    ///    switching the operator's branch;
+    ///  - a missing commit identity is resolved consistently with the fresh-init path: the
+    ///    repository-LOCAL Tenninety identity is established (never global config).
+    /// Returns a record describing the detected situation; Error is set when init must stop.
+    /// </summary>
+    internal static ExistingRepositoryCheck PrepareExistingRepository(string root)
+    {
+        var git = new GitService(root);
+        var topLevel = git.RepositoryTopLevel();
+        if (topLevel is null)
+        {
+            if (git.IsBareRepository())
+                return new ExistingRepositoryCheck(
+                    Error: "this is a bare Git repository; tenninety init requires a working " +
+                           "tree. Clone or create a normal repository first.");
+            return new ExistingRepositoryCheck(RepositoryPresent: false);
+        }
+
+        var normalizedTop = Path.GetFullPath(topLevel).TrimEnd('/');
+        var normalizedRoot = Path.GetFullPath(root).TrimEnd('/');
+        if (!string.Equals(normalizedTop, normalizedRoot, StringComparison.Ordinal))
+            return new ExistingRepositoryCheck(
+                RepositoryPresent: true,
+                Error: "tenninety init was run inside an existing Git repository, but not at " +
+                       "its top level. cd to the repository top level and run tenninety init " +
+                       "there; refusing to create a nested repository.");
+
+        // Symbolic head resolution also covers the unborn-branch case (a repository without
+        // any commit yet); a null result means HEAD is detached.
+        var branch = git.SymbolicHeadBranch();
+        if (branch is null)
+            return new ExistingRepositoryCheck(
+                RepositoryPresent: true,
+                Error: "the existing repository is in a detached-HEAD state; plan acceptance " +
+                       "and startup require branch 'main'. Check out a branch first, e.g.: " +
+                       "git switch -c main");
+        if (branch != TenNinety.MainBranch)
+            return new ExistingRepositoryCheck(
+                RepositoryPresent: true,
+                Error: $"the existing repository is on branch '{branch}', but plan acceptance " +
+                       $"and startup require '{TenNinety.MainBranch}'. Nothing was renamed or " +
+                       $"switched; bring your work to 'main' first, e.g. (fish) " +
+                       $"git switch main; or rename this branch: git branch -m {branch} {TenNinety.MainBranch}");
+
+        // Existing repositories must be able to commit the framework files exactly like fresh
+        // ones: establish the repository-local Tenninety identity when none is resolvable.
+        git.EnsureLocalIdentity();
+        return new ExistingRepositoryCheck(RepositoryPresent: true);
+    }
+
+    internal sealed record ExistingRepositoryCheck(
+        bool RepositoryPresent = false,
+        string? Error = null);
 }
 
 public static class StatusCommand

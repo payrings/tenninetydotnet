@@ -6,6 +6,22 @@ using System.Text.Json.Serialization;
 namespace Tenninety.Core.Models;
 
 /// <summary>
+/// Declares which live roles a construction path actually needs, so validation and Docker
+/// preflight can be role-specific without weakening any role's hardening. Normal orchestration
+/// requires all three roles; Tester-only revert requires only the Tester (plus the optional
+/// Restore phase, which rides on the Tester image and is enabled by configuration, not here).
+/// </summary>
+[Flags]
+public enum SandboxLiveRoles
+{
+    None = 0,
+    Coder = 1,
+    Reviewer = 2,
+    Tester = 4,
+    All = Coder | Reviewer | Tester,
+}
+
+/// <summary>
 /// Container-isolation contract under the `sandbox` key of .tenninety/config.json.
 ///
 /// Mode semantics (fail closed):
@@ -150,26 +166,58 @@ public sealed class SandboxConfig
     /// mock while the normalized sandbox mode is docker) requires digest-pinned images,
     /// valid role networks and a container-reachable coder model endpoint. Mock never touches
     /// Docker and unsafe-host explicitly keeps the legacy host path, so both skip those rules.
+    /// The endpoint validation follows the EFFECTIVE container-side coder endpoint exactly
+    /// like <see cref="ValidateLiveDocker"/> (llama-swap versus direct model).
     /// </summary>
-    public void ValidateForProvider(string providerMode)
+    public void ValidateForProvider(
+        string providerMode,
+        bool useLlamaSwap = false,
+        string? llamaSwapCoderEndpoint = null)
     {
         ValidateStructural();
         if (NormalizedMode != "docker") return;
         if ((providerMode ?? "").Trim().ToLowerInvariant() == "mock") return;
-        ValidateLiveDocker();
+        ValidateLiveDocker(SandboxLiveRoles.All, useLlamaSwap, llamaSwapCoderEndpoint);
     }
 
     /// <summary>Hard requirements that gate any live docker execution. Network policy, model
     /// network naming and the reviewer budget are already enforced structurally; live docker
-    /// additionally requires pinned images and a container-reachable model endpoint.</summary>
-    public void ValidateLiveDocker()
+    /// additionally requires pinned images and a container-reachable model endpoint.
+    ///
+    /// Role-specific: only the requested roles' images are required, so Tester-only paths
+    /// (revert) never demand unrelated Coder/Reviewer images. The Coder endpoint is validated
+    /// around the EFFECTIVE container-side endpoint: with llama-swap enabled only
+    /// <c>llama_swap_coder_endpoint</c> is validated (the direct
+    /// <c>sandbox.roles.coder.model_endpoint</c> is documented as unused in that mode and must
+    /// not reject a valid llama-swap configuration); with llama-swap disabled the direct
+    /// endpoint is validated.</summary>
+    public void ValidateLiveDocker(
+        SandboxLiveRoles roles,
+        bool useLlamaSwap = false,
+        string? llamaSwapCoderEndpoint = null)
     {
-        RequirePinnedImage(Roles.Coder.Image, "sandbox.roles.coder.image");
-        RequirePinnedImage(Roles.Reviewer.Image, "sandbox.roles.reviewer.image");
-        RequirePinnedImage(Roles.Tester.Image, "sandbox.roles.tester.image");
-
-        ValidateHttpEndpoint(Roles.Coder.ModelEndpoint, "sandbox.roles.coder.model_endpoint");
+        if (roles.HasFlag(SandboxLiveRoles.Coder))
+        {
+            RequirePinnedImage(Roles.Coder.Image, "sandbox.roles.coder.image");
+            if (useLlamaSwap)
+                ValidateHttpEndpoint(llamaSwapCoderEndpoint, "llama_swap_coder_endpoint");
+            else
+                ValidateHttpEndpoint(Roles.Coder.ModelEndpoint, "sandbox.roles.coder.model_endpoint");
+        }
+        if (roles.HasFlag(SandboxLiveRoles.Reviewer))
+            RequirePinnedImage(Roles.Reviewer.Image, "sandbox.roles.reviewer.image");
+        if (roles.HasFlag(SandboxLiveRoles.Tester))
+            RequirePinnedImage(Roles.Tester.Image, "sandbox.roles.tester.image");
+        if (roles == SandboxLiveRoles.None)
+            throw new InvalidOperationException(
+                "live docker validation requires at least one role; refusing a validation " +
+                "call that would prove nothing.");
     }
+
+    /// <summary>Full orchestration validation (all roles, direct-model endpoint semantics).
+    /// Equivalent to <see cref="ValidateLiveDocker"/> with <see cref="SandboxLiveRoles.All"/>
+    /// and llama-swap disabled; kept for direct callers that only hold the sandbox section.</summary>
+    public void ValidateLiveDocker() => ValidateLiveDocker(SandboxLiveRoles.All);
 
     private static void RequirePinnedImage(string image, string field)
     {
@@ -294,6 +342,10 @@ public sealed class SandboxPromotionConfig
 
     public void Validate()
     {
+        if (AllowSensitivePaths is null)
+            throw new InvalidOperationException(
+                "sandbox.promotion.allow_sensitive_paths must not be null: set it to a list " +
+                "(possibly empty) or omit the field to receive the default.");
         if (MaxChangedFiles is < 1 or > 1_000_000)
             throw new InvalidOperationException(
                 $"sandbox.promotion.max_changed_files must be within [1, 1000000] but is " +
@@ -422,7 +474,7 @@ public sealed class TesterSandboxRoleConfig : SandboxRoleConfig
 
 /// <summary>Optional separate restricted-network restore phase over the tester attempt
 /// workspace. The test gate itself always runs offline.</summary>
-    public sealed class SandboxRestoreConfig
+public sealed class SandboxRestoreConfig
 {
     [JsonPropertyName("enabled")]
     public bool Enabled { get; set; }

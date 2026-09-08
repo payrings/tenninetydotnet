@@ -81,7 +81,8 @@ public sealed class SandboxCoderGate : ICoderAgent
         try
         {
             ctx.Validate();
-            _config.Sandbox.ValidateLiveDocker();
+            _config.Sandbox.ValidateLiveDocker(
+                SandboxLiveRoles.Coder, _config.UseLlamaSwap, _config.LlamaSwapCoderEndpoint);
             // Same fail-closed rules as CoderToolPlan, enforced before any Docker resource
             // exists: the effective container-side model endpoint must be well-formed.
             _ = ModelEndpointResolver.ResolveCoderContainerEndpoint(_config);
@@ -277,6 +278,28 @@ public sealed class SandboxCoderGate : ICoderAgent
         state.Ownership.SetContainer(state.ContainerId);
 
         state.Stage = "coder tool execution";
+        // Deterministic in-container setup for tools that need generated configuration inside
+        // the bounded tmpfs HOME (Pi writes its custom-provider models.json there). The
+        // setup runs BEFORE the tool command and its failure is an infrastructure failure —
+        // the tool never runs against a half-configured home.
+        if (plan.HomeSetupCommand is { } homeSetup)
+        {
+            state.Stage = "coder home setup";
+            var setupResult = await state.Session.RunAsync(homeSetup, ct);
+            if (setupResult.Cancelled && ct.IsCancellationRequested)
+                throw new OperationCanceledException(ct);
+            if (setupResult.TimedOut || setupResult.Cancelled || setupResult.OomKilled ||
+                setupResult.OutputTruncated || setupResult.SyntheticInfrastructureFailure)
+                throw new CoderInfrastructureException(
+                    "the coder home setup ended without a complete definitive result " +
+                    $"(timeout={setupResult.TimedOut}, cancelled={setupResult.Cancelled}, " +
+                    $"oom={setupResult.OomKilled}, truncated={setupResult.OutputTruncated}, " +
+                    $"synthetic={setupResult.SyntheticInfrastructureFailure}).");
+            if (!setupResult.Succeeded)
+                throw new CoderInfrastructureException(
+                    $"the coder home setup failed with exit code {setupResult.ExitCode}.");
+            state.Stage = "coder tool execution";
+        }
         var command = _coderCommandFactory?.Invoke(ctx)
             ?? plan.ToSandboxCommand(TimeSpan.FromSeconds(role.TimeoutSeconds));
         var result = await state.Session.RunAsync(command, ct);
@@ -457,11 +480,11 @@ public sealed class SandboxCoderGate : ICoderAgent
 
     private static CoderResult CandidateFailure(
         SandboxCommandResult result, CoderRunContext ctx) => new()
-    {
-        ProducedChanges = false,
-        Summary = $"containerized coder exited {result.ExitCode} for {ctx.WorkPackage.Id}",
-        FilesTouched = [],
-    };
+        {
+            ProducedChanges = false,
+            Summary = $"containerized coder exited {result.ExitCode} for {ctx.WorkPackage.Id}",
+            FilesTouched = [],
+        };
 
     private static void EnsureSeparated(string root, string repository)
     {

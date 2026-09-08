@@ -80,13 +80,15 @@ public class DockerIntegrationTests
             {
                 var rootWrite = await session.RunAsync(new SandboxCommand
                 {
-                    Executable = "touch", Arguments = ["/integration-root-write"],
+                    Executable = "touch",
+                    Arguments = ["/integration-root-write"],
                 });
                 Assert.NotEqual(0, rootWrite.ExitCode);
 
                 var tmpWrite = await session.RunAsync(new SandboxCommand
                 {
-                    Executable = "touch", Arguments = ["/tmp/integration-tmp-write"],
+                    Executable = "touch",
+                    Arguments = ["/tmp/integration-tmp-write"],
                 });
                 Assert.True(tmpWrite.Succeeded);
 
@@ -253,7 +255,9 @@ public class DockerIntegrationTests
                 HostWorkspacePath = ValidatedSandboxWorkspacePath.Create(
                     workspaceDir.FullName, _root, repoDir.FullName),
                 Network = SandboxNetworkPolicy.None,
-                Cpus = 1.0, MemoryMb = 256, Pids = 64,
+                Cpus = 1.0,
+                MemoryMb = 256,
+                Pids = 64,
                 Timeout = TimeSpan.FromMinutes(5),
                 Labels = new Dictionary<string, string>
                 {

@@ -98,15 +98,15 @@ public class CandidateScannerTests : IDisposable
     {
         var fifo = Path.Combine(Workspace.SourcePath, "src/pipe");
         using (var mkfifo = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-               {
-                   FileName = "mkfifo",
-                   WorkingDirectory = _repo.Root,
-                   RedirectStandardOutput = true,
-                   RedirectStandardError = true,
-                   UseShellExecute = false,
-                   CreateNoWindow = true,
-                   ArgumentList = { fifo },
-               }))
+        {
+            FileName = "mkfifo",
+            WorkingDirectory = _repo.Root,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            ArgumentList = { fifo },
+        }))
         {
             mkfifo!.WaitForExit();
             Assert.Equal(0, mkfifo.ExitCode);

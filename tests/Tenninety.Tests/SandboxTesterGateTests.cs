@@ -1154,7 +1154,8 @@ public class SandboxTesterGateTests : IDisposable
         /// perform controlled side effects at the exact moment container creation happens
         /// (after candidate materialization).</summary>
         public Func<Func<SandboxSpec, ISandboxSession>, SandboxSpec, ISandboxSession>?
-            SessionFactoryWrapper { get; set; }
+            SessionFactoryWrapper
+        { get; set; }
 
         public Task<ISandboxSession> CreateAsync(SandboxSpec spec, CancellationToken ct = default)
         {

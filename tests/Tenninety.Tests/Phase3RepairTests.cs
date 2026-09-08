@@ -116,9 +116,13 @@ public class Phase3RepairTests : IDisposable
         var workspace = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = newCandidate, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = MainSha,
-                Role = SandboxRole.Coder, RunId = "run-1", AttemptId = "attempt-3",
+                CommitSha = newCandidate,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = MainSha,
+                Role = SandboxRole.Coder,
+                RunId = "run-1",
+                AttemptId = "attempt-3",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-3", SandboxRole.Coder, workspace.AttemptRoot, "test");
@@ -150,9 +154,13 @@ public class Phase3RepairTests : IDisposable
         var workspace = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = newCandidate, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = MainSha,
-                Role = SandboxRole.Coder, RunId = "run-1", AttemptId = "attempt-4",
+                CommitSha = newCandidate,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = MainSha,
+                Role = SandboxRole.Coder,
+                RunId = "run-1",
+                AttemptId = "attempt-4",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-4", SandboxRole.Coder, workspace.AttemptRoot, "test");
@@ -184,9 +192,13 @@ public class Phase3RepairTests : IDisposable
         var workspace = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = newCandidate, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = MainSha,
-                Role = SandboxRole.Coder, RunId = "run-1", AttemptId = "attempt-5",
+                CommitSha = newCandidate,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = MainSha,
+                Role = SandboxRole.Coder,
+                RunId = "run-1",
+                AttemptId = "attempt-5",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-5", SandboxRole.Coder, workspace.AttemptRoot, "test");
@@ -217,9 +229,13 @@ public class Phase3RepairTests : IDisposable
         var workspace = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = newCandidate, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = MainSha,
-                Role = SandboxRole.Coder, RunId = "run-1", AttemptId = "attempt-6",
+                CommitSha = newCandidate,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = MainSha,
+                Role = SandboxRole.Coder,
+                RunId = "run-1",
+                AttemptId = "attempt-6",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-6", SandboxRole.Coder, workspace.AttemptRoot, "test");
@@ -250,9 +266,13 @@ public class Phase3RepairTests : IDisposable
         var workspace = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = newCandidate, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = MainSha,
-                Role = SandboxRole.Coder, RunId = "run-1", AttemptId = "attempt-7",
+                CommitSha = newCandidate,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = MainSha,
+                Role = SandboxRole.Coder,
+                RunId = "run-1",
+                AttemptId = "attempt-7",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-7", SandboxRole.Coder, workspace.AttemptRoot, "test");
@@ -303,9 +323,13 @@ public class Phase3RepairTests : IDisposable
         var workspace = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = newCandidate, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = MainSha,
-                Role = SandboxRole.Coder, RunId = "run-1", AttemptId = "attempt-8",
+                CommitSha = newCandidate,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = MainSha,
+                Role = SandboxRole.Coder,
+                RunId = "run-1",
+                AttemptId = "attempt-8",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-8", SandboxRole.Coder, workspace.AttemptRoot, "test");
@@ -340,9 +364,13 @@ public class Phase3RepairTests : IDisposable
         var workspace = new CandidateWorkspaceFactory(_repo.Git).Create(
             new CandidateWorkspaceRequest
             {
-                CommitSha = newCandidate, ManagedRoot = _managedRoot.Root,
-                WorkBranch = "work/WP-001", MainBaseSha = MainSha,
-                Role = SandboxRole.Coder, RunId = "run-1", AttemptId = "attempt-9",
+                CommitSha = newCandidate,
+                ManagedRoot = _managedRoot.Root,
+                WorkBranch = "work/WP-001",
+                MainBaseSha = MainSha,
+                Role = SandboxRole.Coder,
+                RunId = "run-1",
+                AttemptId = "attempt-9",
             });
         var proof = QuiescenceProof.Issue(
             "run-1", "attempt-9", SandboxRole.Coder, workspace.AttemptRoot, "test");
@@ -579,10 +607,14 @@ internal sealed class FailingRestoreGitService : IGitService
 
     public string RepoPath => _inner.RepoPath;
     public bool IsRepository() => _inner.IsRepository();
+    public string? RepositoryTopLevel() => _inner.RepositoryTopLevel();
+    public bool IsBareRepository() => _inner.IsBareRepository();
+    public void EnsureLocalIdentity() => _inner.EnsureLocalIdentity();
     public void Init() => _inner.Init();
     public bool IsClean() => _inner.IsClean();
     public bool IsPathClean(string relativePath) => _inner.IsPathClean(relativePath);
     public string CurrentBranch() => _inner.CurrentBranch();
+    public string? SymbolicHeadBranch() => _inner.SymbolicHeadBranch();
     public bool BranchExists(string branch) => _inner.BranchExists(branch);
     public void CreateAndCheckoutBranch(string branch) => _inner.CreateAndCheckoutBranch(branch);
     public void CheckoutBranch(string branch) => _inner.CheckoutBranch(branch);

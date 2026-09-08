@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text.Json;
 using Tenninety.Core.Models;
 using Tenninety.Execution.Sandbox;
 
@@ -8,16 +9,37 @@ namespace Tenninety.Execution.Coding;
 /// Frozen container-side invocation for one supported coding tool. The executable path and all
 /// security-relevant flags are selected by trusted code. Docker mode rejects configured extra
 /// arguments because aliases and future tool options cannot be safely denylisted.
+///
+/// Pi contract: the pinned Pi container has an EMPTY tmpfs home and no provider configuration,
+/// and Pi does not honor the generic OpenAI environment variables. Pi's supported custom
+/// provider mechanism is <c>~/.pi/agent/models.json</c>, so for <c>coder_agent=pi</c> trusted
+/// code generates that provider/model configuration (pointing at Tenninety's EFFECTIVE
+/// container-side model endpoint) and supplies it as <see cref="HomeSetupCommand"/> — the gate
+/// writes it into the bounded tmpfs HOME through a stdin-fed exec before the tool runs. The
+/// API key never enters the file: Pi resolves <c>$OPENAI_API_KEY</c> from the (closed)
+/// container environment at request time. No credential and no host configuration is baked
+/// into the image, and Aider/OpenCode plans are unchanged.
 /// </summary>
 public sealed record CoderToolPlan(
     string Tool,
     string Executable,
     IReadOnlyList<string> Arguments,
-    IReadOnlyDictionary<string, string> Environment)
+    IReadOnlyDictionary<string, string> Environment,
+    SandboxCommand? HomeSetupCommand = null)
 {
     private const int MaxInstructionChars = 131_072;
     private const int MaxExtraArguments = 128;
     private const int MaxExtraArgumentChars = 4096;
+
+    /// <summary>The pinned Pi image resolves its configuration under the bounded tmpfs HOME
+    /// (<see cref="SandboxPolicy.ContainerHomePath"/>); these are the EXACT in-container paths
+    /// of Pi's supported custom-provider file (Pi 0.85: <c>~/.pi/agent/models.json</c>).</summary>
+    public const string PiAgentContainerDir = SandboxPolicy.ContainerHomePath + "/.pi/agent";
+    public const string PiModelsContainerPath = PiAgentContainerDir + "/models.json";
+
+    /// <summary>Fixed provider name used only when the configured Pi model carries no
+    /// "provider/" prefix (Pi's documented model notation is "provider/id").</summary>
+    public const string PiDefaultProviderName = "tenninety-local";
 
     public static CoderToolPlan Create(TenNinetyConfig config, CoderRunContext ctx)
     {
@@ -47,7 +69,7 @@ public sealed record CoderToolPlan(
         {
             "aider" => BuildAider(config, instruction, endpoint, environment),
             "opencode" => BuildOpenCode(config, instruction, environment),
-            "pi" => BuildPi(config, instruction, environment),
+            "pi" => BuildPi(config, instruction, endpoint, environment),
             var value => throw new NotSupportedException(
                 $"unknown coder_agent '{value}' - supported: aider, opencode, pi."),
         };
@@ -103,19 +125,108 @@ public sealed record CoderToolPlan(
     }
 
     private static CoderToolPlan BuildPi(
-        TenNinetyConfig config, string instruction,
+        TenNinetyConfig config, string instruction, string endpoint,
         IReadOnlyDictionary<string, string> environment)
     {
         if (string.IsNullOrWhiteSpace(config.Pi.Model))
             throw new InvalidOperationException(
                 "pi.model must be explicit for a containerized coder.");
+        if (config.Pi.Model.Length > 512 || config.Pi.Model.Any(char.IsControl))
+            throw new InvalidOperationException(
+                "pi.model must be a bounded 'provider/id' string without control characters.");
+
+        var (provider, modelId) = SplitPiModel(config.Pi.Model);
         var args = new List<string>
         {
-            "-p", "--no-session", "--model", config.Pi.Model, instruction,
+            "-p", "--no-session",
+            // Pinned container: Pi must not attempt update checks, package updates or
+            // install/update telemetry at startup (--offline is Pi's documented equivalent
+            // of PI_OFFLINE=1), and project-local extensions/skills from the untrusted
+            // candidate workspace are ignored for the run.
+            "--offline",
+            "--no-approve",
+            "--model", config.Pi.Model,
+            instruction,
         };
         RejectExtraArguments(config.Pi.ExtraArgs, "pi");
+
+        var homeSetup = new SandboxCommand
+        {
+            Executable = "/bin/sh",
+            Arguments =
+            [
+                "-c",
+                "mkdir -p '" + PiAgentContainerDir + "' && cat > '" + PiModelsContainerPath + "'",
+            ],
+            StdIn = BuildPiModelsJson(provider, modelId, endpoint),
+            WorkingDirectory = SandboxPolicy.ContainerWorkspacePath,
+            MaxOutputBytes = 65536,
+        };
         return new CoderToolPlan(
-            "pi", "/usr/local/bin/pi", args.AsReadOnly(), environment);
+            "pi", "/usr/local/bin/pi", args.AsReadOnly(), environment, homeSetup);
+    }
+
+    /// <summary>Splits Pi's documented "provider/id" model notation. A value without a
+    /// slash selects the fixed local provider name; everything after the FIRST slash is the
+    /// model id (provider ids themselves never contain slashes).</summary>
+    internal static (string Provider, string ModelId) SplitPiModel(string model)
+    {
+        var trimmed = model.Trim();
+        var slash = trimmed.IndexOf('/');
+        return slash > 0
+            ? (trimmed[..slash], trimmed[(slash + 1)..])
+            : (PiDefaultProviderName, trimmed);
+    }
+
+    /// <summary>Deterministic Pi custom-provider configuration (models.json schema of the
+    /// pinned Pi 0.85): one OpenAI-compatible provider named <paramref name="provider"/>
+    /// whose baseUrl is Tenninety's EFFECTIVE container-side model endpoint and whose single
+    /// model entry is <paramref name="modelId"/>. The apiKey uses Pi's documented
+    /// <c>$ENV_VAR</c> resolution so the credential never enters the generated file.</summary>
+    internal static string BuildPiModelsJson(string provider, string modelId, string endpoint)
+    {
+        var document = new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["providers"] = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                [provider] = new Dictionary<string, object>(StringComparer.Ordinal)
+                {
+                    ["baseUrl"] = endpoint,
+                    ["api"] = "openai-completions",
+                    ["apiKey"] = "$OPENAI_API_KEY",
+                    // Safe defaults for local OpenAI-compatible servers (llama-swap or a
+                    // direct model server): no developer role, no reasoning_effort, no
+                    // streamed-usage request.
+                    ["compat"] = new Dictionary<string, object>(StringComparer.Ordinal)
+                    {
+                        ["supportsDeveloperRole"] = false,
+                        ["supportsReasoningEffort"] = false,
+                        ["supportsUsageInStreaming"] = false,
+                    },
+                    ["models"] = new object[]
+                    {
+                        new Dictionary<string, object>(StringComparer.Ordinal)
+                        {
+                            ["id"] = modelId,
+                            ["name"] = modelId,
+                            ["reasoning"] = false,
+                            ["input"] = new[] { "text" },
+                            ["contextWindow"] = 128_000,
+                            ["maxTokens"] = 16_384,
+                            ["cost"] = new Dictionary<string, int>(StringComparer.Ordinal)
+                            {
+                                ["input"] = 0,
+                                ["output"] = 0,
+                                ["cacheRead"] = 0,
+                                ["cacheWrite"] = 0,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        return JsonSerializer.Serialize(document,
+            new JsonSerializerOptions { WriteIndented = true });
     }
 
     internal static IReadOnlyList<string> ParseExtraArguments(string raw)

@@ -179,6 +179,75 @@ public sealed class CoderToolPlanTests
     public void Extra_argument_parser_rejects_unterminated_input(string raw) =>
         Assert.Throws<InvalidOperationException>(() => CoderToolPlan.ParseExtraArguments(raw));
 
+    // ---- Pi: generated models.json custom-provider configuration ------------------------------
+
+    [Fact]
+    public void Pi_plan_writes_the_effective_endpoint_into_the_tmpfs_home()
+    {
+        var plan = CoderToolPlan.Create(Config("pi"), Context());
+
+        // Aider/OpenCode never need a home setup; Pi always does in the pinned container.
+        Assert.Null(CoderToolPlan.Create(Config("aider"), Context()).HomeSetupCommand);
+        Assert.Null(CoderToolPlan.Create(Config("opencode"), Context()).HomeSetupCommand);
+
+        var setup = plan.HomeSetupCommand ?? throw new InvalidOperationException("missing home setup");
+        Assert.Equal("/bin/sh", setup.Executable);
+        Assert.Equal(SandboxPolicy.ContainerWorkspacePath, setup.WorkingDirectory);
+        Assert.Contains(CoderToolPlan.PiAgentContainerDir, setup.Arguments[1]);
+        Assert.Contains(CoderToolPlan.PiModelsContainerPath, setup.Arguments[1]);
+
+        using var document = System.Text.Json.JsonDocument.Parse(setup.StdIn!);
+        var provider = document.RootElement.GetProperty("providers").GetProperty("openai");
+        // The EFFECTIVE container-side endpoint is wired into Pi's supported custom-provider
+        // mechanism — never through the undocumented OPENAI_BASE_URL behavior.
+        Assert.Equal("http://coder-model:8000/v1", provider.GetProperty("baseUrl").GetString());
+        Assert.Equal("openai-completions", provider.GetProperty("api").GetString());
+        Assert.Equal("$OPENAI_API_KEY", provider.GetProperty("apiKey").GetString());
+        Assert.Equal("pi-coder", provider.GetProperty("models")[0].GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public void Pi_plan_routes_the_generated_provider_to_llama_swap_when_enabled()
+    {
+        var plan = CoderToolPlan.Create(LlamaSwapConfig("pi"), Context());
+
+        var setup = plan.HomeSetupCommand!;
+        using var document = System.Text.Json.JsonDocument.Parse(setup.StdIn!);
+        var provider = document.RootElement.GetProperty("providers").GetProperty("openai");
+        Assert.Equal("http://llama-swap:8080/v1", provider.GetProperty("baseUrl").GetString());
+        Assert.DoesNotContain("coder-model", setup.StdIn);
+        Assert.DoesNotContain("127.0.0.1", setup.StdIn);
+    }
+
+    [Fact]
+    public void Pi_plan_runs_offline_and_ignores_project_local_files()
+    {
+        var plan = CoderToolPlan.Create(Config("pi"), Context());
+
+        Assert.Contains("--offline", plan.Arguments);
+        Assert.Contains("--no-approve", plan.Arguments);
+        Assert.Contains("--no-session", plan.Arguments);
+        Assert.Equal("openai/pi-coder", ValueAfter(plan.Arguments, "--model"));
+    }
+
+    [Theory]
+    [InlineData("qwen3-coder", "tenninety-local", "qwen3-coder")]
+    [InlineData("stub/qwen3-stub", "stub", "qwen3-stub")]
+    [InlineData("openrouter/deepseek/deepseek-v3", "openrouter", "deepseek/deepseek-v3")]
+    public void Pi_model_notation_is_split_into_provider_and_id(string model, string provider, string id) =>
+        Assert.Equal((provider, id), CoderToolPlan.SplitPiModel(model));
+
+    [Fact]
+    public void Pi_plan_rejects_a_hostile_model_string()
+    {
+        var config = Config("pi");
+        config.Pi = new CoderCliAgentConfig { Model = "bad/\u001b[31mmodel" };
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => CoderToolPlan.Create(config, Context()));
+        Assert.Contains("pi.model", ex.Message);
+    }
+
     private static string ValueAfter(IReadOnlyList<string> arguments, string flag)
     {
         var index = arguments.ToList().IndexOf(flag);

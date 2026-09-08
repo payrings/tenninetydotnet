@@ -54,6 +54,15 @@ public static class SandboxPolicy
     private static readonly string[] DotnetEnvironmentKeys =
         ["DOTNET_CLI_TELEMETRY_OPTOUT", "DOTNET_NOLOGO"];
 
+    /// <summary>The Restore phase installs packages into a fixed workspace-relative store; the
+    /// offline Tester container must resolve that SAME store, so its absolute in-container path
+    /// is the one additional environment key the Tester role may carry. The value is a fixed
+    /// in-container path, never host data.</summary>
+    public const string NuGetPackagesEnvironmentKey = "NUGET_PACKAGES";
+
+    public const string RestorePackagesContainerPath =
+        "/workspace/.tenninety/restore-packages";
+
     private static readonly string[] ProxyEnvironmentKeys =
         ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
 
@@ -66,7 +75,9 @@ public static class SandboxPolicy
         CommonEnvironmentKeys.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> TesterEnvironmentKeys =
-        CommonEnvironmentKeys.Concat(DotnetEnvironmentKeys).ToFrozenSet(StringComparer.Ordinal);
+        CommonEnvironmentKeys.Concat(DotnetEnvironmentKeys)
+            .Concat([NuGetPackagesEnvironmentKey])
+            .ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> RestoreEnvironmentKeys =
         CommonEnvironmentKeys.Concat(DotnetEnvironmentKeys).Concat(ProxyEnvironmentKeys)

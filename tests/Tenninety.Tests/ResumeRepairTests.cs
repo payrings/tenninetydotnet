@@ -98,7 +98,9 @@ public sealed class ResumeRepairTests : IDisposable
                 Directory.CreateDirectory(Path.Combine(_managedRoot.Root, "attempt-a")).FullName,
                 _managedRoot.Root, _repo.Root),
             Network = SandboxNetworkPolicy.None,
-            Cpus = 1.0, MemoryMb = 1024, Pids = 128,
+            Cpus = 1.0,
+            MemoryMb = 1024,
+            Pids = 128,
             Timeout = TimeSpan.FromMinutes(5),
             Labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Tester),
         };
@@ -129,7 +131,9 @@ public sealed class ResumeRepairTests : IDisposable
                 Directory.CreateDirectory(Path.Combine(_managedRoot.Root, "attempt-b")).FullName,
                 _managedRoot.Root, _repo.Root),
             Network = SandboxNetworkPolicy.None,
-            Cpus = 1.0, MemoryMb = 1024, Pids = 128,
+            Cpus = 1.0,
+            MemoryMb = 1024,
+            Pids = 128,
             Timeout = TimeSpan.FromMinutes(5),
             Labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Tester),
         };

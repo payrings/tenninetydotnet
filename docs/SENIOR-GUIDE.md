@@ -286,8 +286,9 @@ are hard acceptance errors since the blueprint upgrade.
   "pi":       { "model": "local/coder", "extra_args": "" }, // explicit when selected
   "build_command": "dotnet build",
   "test_command": "dotnet test",
-  "max_attempts_before_escalation": 10,    // clamped >= 1
-  "max_total_attempts": 20,                // clamped >= 1
+  "max_attempts_before_escalation": 10,    // explicit values <1 or >1000 are rejected (never clamped);
+                                           // MUST be < max_total_attempts
+  "max_total_attempts": 20,                // explicit values <1 or >10000 are rejected (never clamped)
   "mock": {
     "reviewer_fail_attempts": 0,
     "tester_fail_attempts": 0,
@@ -302,6 +303,18 @@ are hard acceptance errors since the blueprint upgrade.
 }
 ```
 
+**Retry-threshold relationship.** The engine blocks on the TOTAL attempt budget BEFORE
+escalating to the Frontier, so `max_attempts_before_escalation` must be strictly less than
+`max_total_attempts`. Equal or reversed values are rejected at configuration load — they would
+make every Frontier repair-advice call unreachable.
+
+**Strict config ingestion.** `.tenninety/config.json` is loaded strictly: unknown members (a
+`provider_mod` typo is rejected instead of silently keeping mock mode), duplicate fields at any
+depth, explicit nulls for string/object/collection fields, and excessive file size or nesting
+depth fail with a clear error naming the owning field. Explicit out-of-range numbers (zero or
+negative attempt budgets, timeouts, workers) are rejected with the field named — never
+silently clamped; omitted fields keep their defaults, so older valid configs load unchanged.
+
 **Distinct-model rule.** Identical configured coder/reviewer identifiers abort live-agent
 creation. Independent peer review requires genuinely different weights, but aliases cannot be
 verified mechanically; operators must confirm what each endpoint serves.
@@ -311,8 +324,11 @@ verified mechanically; operators must confirm what each endpoint serves.
 `llama_swap_endpoint`; the sandboxed Coder routes through `llama_swap_coder_endpoint`. Both are
 validated on use – malformed, credential-bearing or (container-side) loopback values fail
 closed. With llama-swap disabled, the coder keeps `sandbox.roles.coder.model_endpoint` and host
-roles keep the shared/per-role fallback. OpenCode/Pi own their provider transport, so configure
-the selected tool's provider/model and authentication for that proxy separately.
+roles keep the shared/per-role fallback. OpenCode owns its provider transport, so configure its
+provider/model for that proxy separately; the containerized Pi needs no manual provider setup —
+trusted code generates Pi's supported `~/.pi/agent/models.json` (custom-provider file) inside
+the container's bounded tmpfs home, pointing at the effective endpoint with the configured
+`pi.model`.
 
 Framework secrets are env-var only: `TENNINETY_FRONTIER_API_KEY` (Frontier calls) and optional
 `TENNINETY_LOCAL_API_KEY` (framework Reviewer plus aider, translated to `OPENAI_API_KEY`).

@@ -23,6 +23,10 @@ public sealed class RestoreFlowTests : IDisposable
             "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup>" +
             "<PackageReference Include=\"xunit\" Version=\"2.9.3\" />" +
             "</ItemGroup></Project>");
+        // Restore runs 'dotnet restore --locked-mode': every restored project must carry a
+        // committed, consistent packages.lock.json, so the fixture candidate includes one.
+        File.WriteAllText(Path.Combine(_repo.Root, "packages.lock.json"),
+            RestoreFlowLockFile);
         File.WriteAllText(Path.Combine(_repo.Root, "source.txt"), "candidate\n");
         _candidateSha = _git.CommitAll("candidate")!;
 
@@ -88,10 +92,13 @@ public sealed class RestoreFlowTests : IDisposable
         Assert.True(timeline.IndexOf("restore:dispose") < timeline.IndexOf("create:tester"));
         var restoreCommand = runtime.Sessions[0].Commands.Single();
         Assert.Equal("/usr/bin/dotnet", restoreCommand.Executable);
+        // The restore target is EXPLICIT (discovered by the bounded prerequisite scan), never
+        // a working-directory inference.
         Assert.Equal(
             ["restore", "--locked-mode", "--configfile",
              "/workspace/.tenninety/restore-control/NuGet.Config", "--packages",
-             "/workspace/.tenninety/restore-packages", "--nologo"],
+             "/workspace/.tenninety/restore-packages", "--nologo",
+             "/workspace/tests.csproj"],
             restoreCommand.Arguments);
         Assert.Contains("<clear", controlXml);
         Assert.Contains("https://packages.example.test/v3/index.json", controlXml);
@@ -178,6 +185,22 @@ public sealed class RestoreFlowTests : IDisposable
                 return Task.CompletedTask;
             });
     }
+
+    private const string RestoreFlowLockFile = """
+        {
+          "version": 1,
+          "dependencies": {
+            "net10.0": {
+              "xunit": {
+                "type": "Direct",
+                "requested": "[2.9.3, )",
+                "resolved": "2.9.3",
+                "contentHash": "aaabbbcccdddeeeffffgggghhhhiiiijjjjkkkkllllmmmmnnnnooooppppqqqq"
+              }
+            }
+          }
+        }
+        """;
 
     private static RecordingSandboxSession Session(SandboxSpec spec, List<string> timeline) => new()
     {

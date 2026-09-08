@@ -93,7 +93,7 @@ public sealed class SandboxReviewerGate : IReviewerAgent
         try
         {
             ctx.Validate();
-            _config.Sandbox.ValidateLiveDocker();
+            _config.Sandbox.ValidateLiveDocker(SandboxLiveRoles.Reviewer);
         }
         catch (Exception ex)
         {

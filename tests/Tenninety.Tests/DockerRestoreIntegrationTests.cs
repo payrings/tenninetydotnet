@@ -118,6 +118,47 @@ public sealed class DockerRestoreIntegrationTests : IDisposable
         Assert.Empty(Directory.GetFileSystemEntries(_managedRoot.Root));
     }
 
+    /// <summary>A structurally VALID but STALE lock file: the prerequisite scan passes (the
+    /// lock document is well formed), and the locked restore itself — the authoritative
+    /// lock-currency check — refuses the mismatching dependency closure. The gate must return
+    /// the controlled "Restore exited N" ordinary failure without starting a Tester.</summary>
+    [DockerRestoreFact]
+    [Trait("Category", "DockerRestore")]
+    public async Task A_stale_lock_fails_the_locked_restore_as_an_ordinary_gate_failure()
+    {
+        using var repo = FixtureRepo();
+        // The lock file documents a version that does not match the project's requested
+        // xunit version: locked mode refuses it (NU1004 or the equivalent locked-mode
+        // failure), which is exactly the authoritative consistency check.
+        repo.WriteFile("tests/fixture/packages.lock.json",
+            "{\n  \"version\": 1,\n  \"dependencies\": {\n    \"net10.0\": {\n" +
+            "      \"xunit\": {\n        \"type\": \"Direct\",\n" +
+            "        \"requested\": \"[2.9.2, )\",\n        \"resolved\": \"2.9.2\",\n" +
+            "        \"contentHash\": \"aaabbbcccdddeeeffffgggghhhhiiiijjjjkkkkllllmmmmnnnnooooppppqqqq\"\n" +
+            "      }\n    }\n  }\n}\n");
+        repo.Commit("stale lock");
+        var mainSha = repo.Git.HeadSha();
+        repo.Git.CreateAndCheckoutBranch("work/WP-001");
+        var config = LiveConfig();
+        config.Sandbox.Roles.Tester.Restore.Acceptance.Repository =
+            Tenninety.Execution.Sandbox.SandboxPolicy.RepositoryIdentity(repo.Root);
+        config.Sandbox.ValidateStructural();
+
+        var gate = new SandboxTesterGate(repo.Git, config, log: null);
+        var result = await gate.RunTestsAsync(new TesterRunContext
+        {
+            Candidate = new CandidateRevision("work/WP-001", mainSha, mainSha),
+            WorkPackageId = "WP-001",
+            Attempt = 1,
+        });
+
+        Assert.False(result.Passed);
+        Assert.Contains("restricted Restore exited", result.OutputTail);
+        Assert.Null(result.RestoreOutputSha256);
+        Assert.Equal(mainSha, result.CandidateSha);
+        Assert.Empty(Directory.GetFileSystemEntries(_managedRoot.Root));
+    }
+
     private TestGitRepo FixtureRepo()
     {
         var repo = new TestGitRepo();
@@ -142,7 +183,10 @@ public sealed class DockerRestoreIntegrationTests : IDisposable
         ProviderMode = "aider",
         CoderAgent = "aider",
         LocalModels = new LocalModelsConfig { Coder = "coder", Reviewer = "reviewer" },
-        BuildCommand = "dotnet build tests/fixture/fixture.csproj --locked-mode --nologo -v q",
+        // Build with --no-restore (docs/TESTER-SANDBOX.md): the accepted Restore phase already
+        // populated the fixed package store the offline Tester resolves through NUGET_PACKAGES,
+        // and `--locked-mode` is a restore-only switch (it is rejected by `dotnet build`).
+        BuildCommand = "dotnet build tests/fixture/fixture.csproj --no-restore --nologo -v q",
         TestCommand = "dotnet run --project tests/fixture/fixture.csproj --no-build",
         Sandbox = DockerGateTestEnv.BuildRestoreConfig(_managedRoot.Root),
     };

@@ -230,11 +230,11 @@ public class HardeningTests
 
         await new OpenAiReviewerAgent(
             chat, "devstral-reviewer", diffProvider: _ => "diff").ReviewAsync(new ReviewerRunContext
-        {
-            Candidate = Candidate(),
-            WorkPackage = wp,
-            Attempt = 1,
-        });
+            {
+                Candidate = Candidate(),
+                WorkPackage = wp,
+                Attempt = 1,
+            });
 
         Assert.DoesNotContain(secret, chat.LastPrompt);
         Assert.Contains("REDACTED", chat.LastPrompt);

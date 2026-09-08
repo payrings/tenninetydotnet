@@ -535,5 +535,5 @@ public sealed class CandidateScanner
             ContentMayContainSecret: PromotionPolicy.ContainsLikelySecret(
                 Encoding.UTF8.GetString(ingestion.InspectedPrefix)));
         Trace($"ingested: {relative} mode={mode} oid={ingestion.ObjectSha} count={target.Count}");
-}
+    }
 }

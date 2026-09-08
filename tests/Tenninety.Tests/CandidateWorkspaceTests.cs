@@ -120,8 +120,9 @@ internal sealed class TestGitRepo : IDisposable
         };
         psi.Environment.Clear();
         psi.Environment["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? "/usr/bin:/bin";
-        psi.Environment["HOME"] = Path.Combine(Path.GetTempPath(), "tenninety-test-empty-home");
-        Directory.CreateDirectory(psi.Environment["HOME"]);
+        var emptyHome = Path.Combine(Path.GetTempPath(), "tenninety-test-empty-home");
+        psi.Environment["HOME"] = emptyHome;
+        Directory.CreateDirectory(emptyHome);
         psi.Environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
         psi.Environment["GIT_CONFIG_SYSTEM"] = "/dev/null";
         psi.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
@@ -196,16 +197,16 @@ public class CandidateWorkspaceTests : IDisposable
 
     private CandidateWorkspaceRequest Request(
         string sha, MaterializationLimits? limits = null, string? managedRoot = null) => new()
-    {
-        CommitSha = sha,
-        ManagedRoot = managedRoot ?? _managedRoot.Root,
-        WorkBranch = "work/WP-001",
-        MainBaseSha = new string('0', 40),
-        Role = SandboxRole.Coder,
-        RunId = "run-1",
-        AttemptId = "attempt-1",
-        Limits = limits,
-    };
+        {
+            CommitSha = sha,
+            ManagedRoot = managedRoot ?? _managedRoot.Root,
+            WorkBranch = "work/WP-001",
+            MainBaseSha = new string('0', 40),
+            Role = SandboxRole.Coder,
+            RunId = "run-1",
+            AttemptId = "attempt-1",
+            Limits = limits,
+        };
 
     [Fact]
     public void Materializes_exact_regular_file_content()
@@ -458,8 +459,8 @@ public class CandidateWorkspaceTests : IDisposable
 
         var workspace = Factory.Create(Request(sha));
 
-        Assert.Empty(Directory.EnumerateFileSystemEntries(workspace.SourcePath)
-            .Where(e => Path.GetFileName(e) != ".git"));
+        Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(workspace.SourcePath)
+, e => Path.GetFileName(e) != ".git");
         // The agent repository still carries exactly one (empty) baseline commit.
         Assert.Equal("1", TestGitRepo.RunGitIn(workspace.SourcePath, "rev-list", "--count", "HEAD").Trim());
         Assert.Equal(_repo.Git.ResolveTreeOfCommit(sha), workspace.BaselineTreeOid);

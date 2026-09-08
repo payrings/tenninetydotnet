@@ -189,7 +189,9 @@ public class DockerCliSandboxRuntimeTests : IDisposable
             Image = "sha256:" + new string('a', 64),
             HostWorkspacePath = MakeWorkspace(),
             Network = SandboxNetworkPolicy.Model,
-            Cpus = 1.0, MemoryMb = 1024, Pids = 128,
+            Cpus = 1.0,
+            MemoryMb = 1024,
+            Pids = 128,
             Timeout = TimeSpan.FromMinutes(5),
             Labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Coder),
         };
@@ -213,7 +215,9 @@ public class DockerCliSandboxRuntimeTests : IDisposable
             Image = "sha256:" + new string('a', 64),
             HostWorkspacePath = MakeWorkspace(),
             Network = SandboxNetworkPolicy.Model,
-            Cpus = 1.0, MemoryMb = 1024, Pids = 128,
+            Cpus = 1.0,
+            MemoryMb = 1024,
+            Pids = 128,
             Timeout = TimeSpan.FromMinutes(5),
             Labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Coder),
         };
@@ -237,7 +241,9 @@ public class DockerCliSandboxRuntimeTests : IDisposable
             Image = "sha256:" + new string('a', 64),
             HostWorkspacePath = MakeWorkspace(),
             Network = SandboxNetworkPolicy.Restore,
-            Cpus = 1.0, MemoryMb = 1024, Pids = 128,
+            Cpus = 1.0,
+            MemoryMb = 1024,
+            Pids = 128,
             Timeout = TimeSpan.FromMinutes(5),
             Labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Restore),
         };
@@ -270,7 +276,9 @@ public class DockerCliSandboxRuntimeTests : IDisposable
             HostWorkspacePath = ValidatedSandboxWorkspacePath.Create(
                 workspaceDir.FullName, _managedRoot.Root, _repo.Root),
             Network = SandboxNetworkPolicy.None,
-            Cpus = 1.0, MemoryMb = 1024, Pids = 128,
+            Cpus = 1.0,
+            MemoryMb = 1024,
+            Pids = 128,
             Timeout = TimeSpan.FromMinutes(5),
             Labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Tester),
         };
@@ -295,7 +303,9 @@ public class DockerCliSandboxRuntimeTests : IDisposable
             Image = "sha256:" + new string('a', 64),
             HostWorkspacePath = MakeWorkspace("attempt,a,b"),
             Network = SandboxNetworkPolicy.None,
-            Cpus = 1.0, MemoryMb = 1024, Pids = 128,
+            Cpus = 1.0,
+            MemoryMb = 1024,
+            Pids = 128,
             Timeout = TimeSpan.FromMinutes(5),
             Labels = SandboxAbstractionTests.CompleteLabels(SandboxRole.Tester),
         };

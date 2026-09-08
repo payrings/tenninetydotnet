@@ -16,6 +16,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history so the whitespace check can compute the pull-request/push base
+          # (merge-base) instead of scanning rolling history.
+          fetch-depth: 0
 
       - name: Setup .NET 10 (from global.json)
         uses: actions/setup-dotnet@v4
@@ -24,6 +28,15 @@ jobs:
 
       - name: Print .NET SDK
         run: dotnet --info
+
+      # The static checks declare their Python dependencies at pinned versions in
+      # scripts/ci/requirements.txt; they are installed into a fresh virtualenv here. The
+      # check script itself never performs an implicit pip install.
+      - name: Install pinned static-check dependencies
+        run: |
+          python3 -m venv .venv-static-checks
+          .venv-static-checks/bin/pip install --disable-pip-version-check \
+            -r scripts/ci/requirements.txt
 
       - name: Clean locked restore (dependency drift fails here)
         run: dotnet restore tenninety.slnx --locked-mode
@@ -46,9 +59,17 @@ jobs:
         run: docker compose config -q
 
       - name: Static configuration checks (JSON/YAML/XML syntax, Markdown links)
+        env:
+          PYTHON: ${{ github.workspace }}/.venv-static-checks/bin/python
         run: bash scripts/ci/static-checks.sh
 
-      - name: Whitespace check (git diff --check)
-        run: |
-          git diff --check
-          git log --check --oneline -5
+      # Whitespace errors introduced by the changes under test only (including the local
+      # index/worktree when the script is run before a push). A rolling
+      # `git log --check` would fail on pre-existing whitespace issues in merged
+      # history, which cannot be fixed without rewriting old commits.
+      - name: Whitespace check (introduced changes only)
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_PUSH_BEFORE: ${{ github.event.before }}
+        run: bash scripts/ci/whitespace-check.sh

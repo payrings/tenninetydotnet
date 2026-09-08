@@ -87,7 +87,7 @@ public sealed class TesterInfrastructureFlowTests : IDisposable
     public ExecutionEngine CreateEngine(ITesterAgent tester) =>
         new(Git, Config, Frontier, Coder, new ScriptedReviewer(0), tester, States, Audit);
 
-    public void ScriptSuccessfulRun(Action<RecordingSandboxSession, string?>? configure = null)
+    private void ScriptSuccessfulRun(Action<RecordingSandboxSession, string?>? configure = null)
     {
         Runtime.SessionFactory = spec =>
         {
@@ -115,7 +115,7 @@ public sealed class TesterInfrastructureFlowTests : IDisposable
             () => engine.ExecuteWpAsync(Plan.WorkPackages[0], State, CancellationToken.None));
 
         Assert.Contains("preflight", ex.Message);
-        Assert.Equal(1, Coder.Contexts.Count); // exactly one attempt, no automatic retry
+        Assert.Single(Coder.Contexts); // exactly one attempt, no automatic retry
         Assert.Equal(0, Frontier.RepairAdviceCalls);
         Assert.Equal(0, Frontier.RevertCalls);
         Assert.DoesNotContain(Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");
@@ -231,7 +231,7 @@ public sealed class TesterInfrastructureFlowTests : IDisposable
             () => engine.ExecuteWpAsync(Plan.WorkPackages[0], State, CancellationToken.None));
 
         Assert.Contains("could not produce a definitive exit code", ex.Message);
-        Assert.Equal(1, Coder.Contexts.Count);   // exactly one attempt, no automatic retry
+        Assert.Single(Coder.Contexts);   // exactly one attempt, no automatic retry
         Assert.Equal(0, Frontier.RepairAdviceCalls);
         Assert.Equal(0, Frontier.RevertCalls);
         Assert.DoesNotContain(Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");

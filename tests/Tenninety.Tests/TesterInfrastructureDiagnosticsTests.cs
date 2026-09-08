@@ -108,7 +108,7 @@ public sealed class TesterInfrastructureDiagnosticsTests : IDisposable
                     SandboxTesterGate.DeleteAttemptDirectory(path, Config.Sandbox.WorkspaceRoot!);
                     return Task.CompletedTask;
                 }
-                : path => deleteOverride(path));
+    : path => deleteOverride(path));
 
     private void ScriptSuccessfulRun(Action<RecordingSandboxSession>? configure = null)
     {
@@ -195,7 +195,8 @@ public sealed class TesterInfrastructureDiagnosticsTests : IDisposable
     public async Task A_hostile_transport_disposal_failure_is_a_controlled_cleanup_failure()
     {
         var gate = MakeGate(transportFactory: () => new SandboxTesterGateTests.ForwardingTransport(
-            FakeTransport) { ThrowOnDispose = true });
+            FakeTransport)
+        { ThrowOnDispose = true });
         ScriptSuccessfulRun();
 
         var ex = await Assert.ThrowsAsync<TesterInfrastructureException>(
@@ -380,7 +381,8 @@ public sealed class TesterInfrastructureDiagnosticsTests : IDisposable
         // Not the historical fixed "simulated" message: a real exception object carrying
         // unrelated host paths, a private hostname, secret-like text and a very long message.
         var gate = MakeGate(transportFactory: () => new SandboxTesterGateTests.ForwardingTransport(
-            FakeTransport) { DisposeException = HostileException("disposal") });
+            FakeTransport)
+        { DisposeException = HostileException("disposal") });
         ScriptSuccessfulRun();
 
         var ex = await Assert.ThrowsAsync<TesterInfrastructureException>(
