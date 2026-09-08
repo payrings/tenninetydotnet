@@ -95,6 +95,13 @@ public class GitServiceTests : IDisposable
     }
 
     [Fact]
+    public void Find_commit_treats_dash_prefixed_input_as_a_revision_not_an_option()
+    {
+        Assert.NotNull(_git.FindCommit("HEAD"));
+        Assert.Null(_git.FindCommit("-p"));
+    }
+
+    [Fact]
     public void Commit_all_excludes_new_secret_shaped_files()
     {
         File.WriteAllText(System.IO.Path.Combine(_tmp.Root, ".env"), "API_KEY=do-not-commit");

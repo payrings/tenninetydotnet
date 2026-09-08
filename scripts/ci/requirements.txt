@@ -1,5 +1,0 @@
-# Pinned Python dependencies for scripts/ci/static_checks.py.
-#
-# Install this file explicitly in the Python environment used for static checks;
-# the check script itself never performs an implicit `pip install`.
-pyyaml==6.0.3

@@ -68,6 +68,17 @@ public sealed class ProgramTests
         Assert.Contains("unknown command 'frobnicate'", error);
     }
 
+    [Theory]
+    [InlineData("-p")]
+    [InlineData("-1")]
+    [InlineData("-q")]
+    public async Task Main_rejects_revert_targets_starting_with_a_dash(string target)
+    {
+        var (exitCode, _) = await RunMain(["revert", target]);
+
+        Assert.Equal(2, exitCode);
+    }
+
     [Fact]
     public void Plan_parser_accepts_each_option_once_in_either_order()
     {

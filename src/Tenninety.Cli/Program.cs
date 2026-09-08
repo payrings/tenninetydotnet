@@ -133,7 +133,7 @@ internal static class Program
     private static ParsedArguments ParseRevertArguments(string[] args)
     {
         if (args.Length == 0 || string.IsNullOrWhiteSpace(args[0]) ||
-            args[0].StartsWith("--", StringComparison.Ordinal))
+            args[0].StartsWith('-'))
             throw new ArgumentException("usage: tenninety revert <commit> [--reason <text>]");
 
         var commit = args[0];

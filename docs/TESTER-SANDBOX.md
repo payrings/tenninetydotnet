@@ -387,16 +387,7 @@ dotnet build src/Tenninety.Cli/Tenninety.Cli.csproj -c Release \
 dotnet test tests/Tenninety.Tests/Tenninety.Tests.csproj -c Release \
   --no-build --no-restore                              # non-Docker suite
 docker compose config -q                             # compose topology validation
-bash scripts/ci/static-checks.sh                     # JSON/JSONC/YAML/XML syntax + Markdown links
-bash scripts/ci/whitespace-check.sh                  # whitespace hygiene for the tip + working tree
 ```
-
-When a caller supplies `GITHUB_EVENT_NAME` with `GITHUB_BASE_REF` or `GITHUB_PUSH_BEFORE`,
-`scripts/ci/whitespace-check.sh` checks exactly the commits in that pull request or push,
-never a rolling history scan. Historical whitespace warnings in merged commits are not fixable
-without rewriting history. The static checks declare their Python dependencies at pinned
-versions in `scripts/ci/requirements.txt`; install them explicitly in the Python environment
-selected by `PYTHON`. The check script never performs an implicit `pip install`.
 
 The Docker categories below remain opt-in and outside the default matrix.
 

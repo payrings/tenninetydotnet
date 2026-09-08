@@ -495,7 +495,8 @@ public sealed class GitService : IGitService
 
     public GitCommit? FindCommit(string shaOrRef)
     {
-        var r = TryRun("show", "-s", "--pretty=format:%H%x1f%s%x1f%an%x1f%aI", shaOrRef);
+        var r = TryRun("show", "-s", "--pretty=format:%H%x1f%s%x1f%an%x1f%aI",
+            "--end-of-options", shaOrRef);
         if (r.ExitCode != 0) return null;
         var p = r.Output.Trim().Split('\x1f');
         return p.Length == 4 ? new GitCommit(p[0], p[1], p[2], p[3]) : null;
