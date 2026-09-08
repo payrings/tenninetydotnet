@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "tenninety.core": {
+        "type": "Project"
+      },
+      "tenninety.frontier": {
+        "type": "Project",
+        "dependencies": {
+          "Tenninety.Core": "[1.0.0, )"
+        }
+      },
+      "tenninety.git": {
+        "type": "Project",
+        "dependencies": {
+          "Tenninety.Core": "[1.0.0, )"
+        }
+      }
+    }
+  }
+}

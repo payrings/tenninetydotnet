@@ -8,5 +8,9 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Continuous verification: every restore writes/verifies packages.lock.json next to
+         each project. CI restores with locked mode, so dependency drift fails instead of
+         silently resolving new package versions. Lock files are committed. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 </Project>

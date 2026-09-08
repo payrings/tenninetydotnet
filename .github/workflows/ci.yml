@@ -1,0 +1,54 @@
+name: ci
+
+# Continuous verification: clean locked restore, Release build with warnings as errors,
+# the complete non-Docker test suite, and static configuration checks. Live Docker test
+# categories stay opt-in (they require provisioned images/networks) and are documented in
+# docs/TESTER-SANDBOX.md; this workflow never runs them.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 (from global.json)
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Print .NET SDK
+        run: dotnet --info
+
+      - name: Clean locked restore (dependency drift fails here)
+        run: dotnet restore tenninety.slnx --locked-mode
+
+      # Warnings are errors for the framework projects. The test project still carries a
+      # small set of pre-existing xunit-analyzer warnings; cleaning those up is tracked
+      # separately and must not block dependency drift / build / test verification.
+      - name: Release build (warnings visible)
+        run: dotnet build tenninety.slnx -c Release --no-restore
+
+      - name: Framework build (warnings are errors)
+        run: >
+          dotnet build src/Tenninety.Cli/Tenninety.Cli.csproj -c Release --no-restore
+          -p:TreatWarningsAsErrors=true
+
+      - name: Full non-Docker test suite
+        run: dotnet test tests/Tenninety.Tests/Tenninety.Tests.csproj -c Release --no-build --no-restore
+
+      - name: Validate docker compose configuration
+        run: docker compose config -q
+
+      - name: Static configuration checks (JSON/YAML/XML syntax, Markdown links)
+        run: bash scripts/ci/static-checks.sh
+
+      - name: Whitespace check (git diff --check)
+        run: |
+          git diff --check
+          git log --check --oneline -5
