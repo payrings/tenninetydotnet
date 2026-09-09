@@ -28,7 +28,17 @@
     "runtime": "docker-cli",
     "workspace_root": null,
     "max_workspace_mb": 4096,
+    // Must already exist and Docker network inspect must report "Internal": true. Missing,
+    // malformed, wrong-typed, duplicated or false evidence fails Coder preflight closed.
     "model_network": "tenninety-coder-model",
+    "promotion": {
+      "max_changed_files": 2000,
+      // Accepted range: 1..1024 MiB. 1025 and above are rejected to match the
+      // promotion pipeline's fixed 1 GiB safety ceiling.
+      "max_patch_mb": 64,
+      "allow_symlink_changes": false,
+      "allow_sensitive_paths": []
+    },
     "roles": {
       "coder": {
         // Built by ./docker/build-role-images.fish (aider | opencode | pi — must match

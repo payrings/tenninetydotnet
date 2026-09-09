@@ -17,8 +17,9 @@ namespace Tenninety.Execution.Coding;
 /// container-side model endpoint) and supplies it as <see cref="HomeSetupCommand"/> — the gate
 /// writes it into the bounded tmpfs HOME through a stdin-fed exec before the tool runs. The
 /// API key never enters the file: Pi resolves <c>$OPENAI_API_KEY</c> from the (closed)
-/// container environment at request time. No credential and no host configuration is baked
-/// into the image, and Aider/OpenCode plans are unchanged.
+/// container environment at request time. OpenCode similarly receives a trusted inline
+/// provider document whose API key is an environment reference. No credential and no host
+/// configuration is baked into the image.
 /// </summary>
 public sealed record CoderToolPlan(
     string Tool,
@@ -68,7 +69,7 @@ public sealed record CoderToolPlan(
         return config.CoderAgent.Trim().ToLowerInvariant() switch
         {
             "aider" => BuildAider(config, instruction, endpoint, environment),
-            "opencode" => BuildOpenCode(config, instruction, environment),
+            "opencode" => BuildOpenCode(config, instruction, endpoint, environment),
             "pi" => BuildPi(config, instruction, endpoint, environment),
             var value => throw new NotSupportedException(
                 $"unknown coder_agent '{value}' - supported: aider, opencode, pi."),
@@ -109,19 +110,68 @@ public sealed record CoderToolPlan(
     }
 
     private static CoderToolPlan BuildOpenCode(
-        TenNinetyConfig config, string instruction,
+        TenNinetyConfig config, string instruction, string endpoint,
         IReadOnlyDictionary<string, string> environment)
     {
         if (string.IsNullOrWhiteSpace(config.OpenCode.Model))
             throw new InvalidOperationException(
                 "opencode.model must be explicit for a containerized coder.");
+        var (providerId, modelId) = SplitOpenCodeModel(config.OpenCode.Model);
+        var openCodeEnvironment = new ReadOnlyDictionary<string, string>(
+            new Dictionary<string, string>(environment, StringComparer.Ordinal)
+            {
+                ["OPENCODE_CONFIG_CONTENT"] = BuildOpenCodeConfig(providerId, modelId, endpoint),
+            });
         var args = new List<string>
         {
             "run", "--auto", "--model", config.OpenCode.Model, instruction,
         };
         RejectExtraArguments(config.OpenCode.ExtraArgs, "opencode");
         return new CoderToolPlan(
-            "opencode", "/usr/local/bin/opencode", args.AsReadOnly(), environment);
+            "opencode", "/usr/local/bin/opencode", args.AsReadOnly(), openCodeEnvironment);
+    }
+
+    internal static (string ProviderId, string ModelId) SplitOpenCodeModel(string model)
+    {
+        var separator = model.IndexOf('/');
+        if (model.Length > 512 || separator <= 0 || separator != model.LastIndexOf('/') ||
+            separator == model.Length - 1 || model.Any(char.IsWhiteSpace) ||
+            model.Any(char.IsControl))
+            throw new InvalidOperationException(
+                "opencode.model must be a bounded 'provider/model' identifier with exactly one '/'.");
+        return (model[..separator], model[(separator + 1)..]);
+    }
+
+    internal static string BuildOpenCodeConfig(string providerId, string modelId, string endpoint)
+    {
+        var document = new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["provider"] = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                [providerId] = new Dictionary<string, object>(StringComparer.Ordinal)
+                {
+                    ["npm"] = "@ai-sdk/openai-compatible",
+                    ["name"] = "Tenninety local model",
+                    ["options"] = new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["baseURL"] = endpoint,
+                        ["apiKey"] = "{env:OPENAI_API_KEY}",
+                    },
+                    ["models"] = new Dictionary<string, object>(StringComparer.Ordinal)
+                    {
+                        [modelId] = new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            ["name"] = modelId,
+                        },
+                    },
+                },
+            },
+        };
+        var json = JsonSerializer.Serialize(document);
+        if (json.Length > SandboxPolicy.MaxEnvironmentValueLength)
+            throw new InvalidOperationException(
+                "the generated OpenCode provider configuration exceeded its environment bound.");
+        return json;
     }
 
     private static CoderToolPlan BuildPi(

@@ -53,6 +53,32 @@ public sealed class LocalChatClientTests
             client.CompleteAsync("reviewer", "system", "user", 100, default));
     }
 
+    [Fact]
+    public async Task Http_error_diagnostic_is_redacted_control_safe_and_bounded()
+    {
+        const string secret = "supersecretvalue123";
+        var body = "apiKey=" + secret + "\u001b[31m\r\0\u0085" + new string('x', 5000);
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadGateway)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "text/plain"),
+        });
+        var client = new LocalChatClient(new HttpClient(handler)
+        {
+            BaseAddress = new Uri("http://local-model/v1/"),
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.CompleteAsync("reviewer", "system", "user", 1000, default));
+
+        Assert.True(ex.Message.Length < 400);
+        Assert.DoesNotContain(secret, ex.Message, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u001b', ex.Message);
+        Assert.DoesNotContain('\r', ex.Message);
+        Assert.DoesNotContain('\0', ex.Message);
+        Assert.DoesNotContain('\u0085', ex.Message);
+    }
+
     private static HttpResponseMessage JsonResponse(string message) => new(HttpStatusCode.OK)
     {
         Content = new StringContent(

@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using Tenninety.Core.Models;
 using Tenninety.Execution;
 using Tenninety.Execution.Aider;
@@ -47,6 +49,23 @@ public class AgentFactoryTests
     public void Without_llama_swap_the_primary_local_endpoint_is_used()
     {
         Assert.Equal("http://localhost:8000/v1/", new AgentFactory(LiveConfig()).EndpointFor("coder"));
+    }
+
+    [Fact]
+    public async Task Shared_reviewer_client_has_no_implicit_timeout_but_honors_caller_cancellation()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var client = new AgentFactory(LiveConfig()).HttpClientFor($"http://127.0.0.1:{port}/v1");
+        Assert.Equal(Timeout.InfiniteTimeSpan, client.Timeout);
+
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var request = client.GetAsync("chat/completions", cancellation.Token);
+        using var accepted = await listener.AcceptTcpClientAsync(cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
     }
 
     [Fact]

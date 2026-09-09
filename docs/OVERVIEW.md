@@ -82,7 +82,7 @@ you choose which one with the `coder_agent` knob in `.tenninety/config.json`:
 | `coder_agent` | Tool | Behaviour |
 | --- | --- | --- |
 | `"aider"` (default) | [aider](https://aider.chat) | model string defaults to `openai/<coder>` pointed at your local endpoint |
-| `"opencode"` | [OpenCode](https://opencode.ai) | headless `run --auto`; model given as `"provider/model"` per your OpenCode config |
+| `"opencode"` | [OpenCode](https://opencode.ai) | headless `run --auto`; trusted code maps the explicit `"provider/model"` to the effective local endpoint |
 | `"pi"` | [Pi](https://pi.dev) | print mode (`-p --no-session`); model follows pi's `provider/id` notation |
 
 Every agent receives the same instruction – the job card (goal, directives, acceptance
@@ -95,6 +95,11 @@ OpenCode and Pi require an explicit `model` in live mode so the framework can me
 verify that the coder and reviewer identifiers differ. Docker-mode `extra_args` are closed;
 Aider also receives `/dev/null` config and environment-file paths. Repository files remain
 untrusted tool input, so provider credentials should be narrowly scoped and never stored there.
+Containerized OpenCode does not depend on inaccessible host/user configuration: trusted code
+serializes a one-provider `OPENCODE_CONFIG_CONTENT` document using
+`@ai-sdk/openai-compatible`, the effective container endpoint, the exact configured
+`provider/model`, and the literal `{env:OPENAI_API_KEY}` reference. The real key remains only in
+the closed Coder environment.
 
 ## llama-swap – two models on one card
 
@@ -142,10 +147,9 @@ with llama-swap disabled, the sandboxed Coder keeps using `sandbox.roles.coder.m
 and host roles keep the shared/per-role endpoint fallback – nothing else changes.
 
 With the default aider coder, both agents route through the proxy by model identifier (aider's
-`openai/coder` request carries model `coder`, which matches the profile name). OpenCode and Pi
-own their provider transport, so configure their provider/model and authentication to use the
-same proxy; the flag directly routes the Reviewer but does not rewrite those tools' provider
-configuration.
+`openai/coder` request carries model `coder`, which matches the profile name). For containerized
+OpenCode and Pi, trusted generated provider configuration points at the same effective proxy;
+neither relies on host/user provider files.
 
 ---
 
@@ -166,7 +170,8 @@ Every gate in the pipeline is mechanically enforced rather than requested:
   instead of the queue inventing a way forward. In live mode the mechanical gate fails
    closed: no discovered tests or empty commands mean failure, never silent success.
 - Live Docker roles receive only an exact disposable candidate workspace. Coder joins the
-  pre-existing internal model network – whose only non-role member is the operator-run
+  pre-existing model network only after strict Docker inspection proves `Internal=true` – its
+  only non-role member is the operator-run
   llama-swap container – and carries no general egress; Reviewer and Tester are `network=none`.
   Optional Restore runs first in a separate operator-accepted restricted network, then a fresh
   offline Tester validates the derived tree.

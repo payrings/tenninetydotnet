@@ -1,4 +1,5 @@
 using Tenninety.Cli.Commands;
+using Tenninety.Core.Security;
 
 namespace Tenninety.Cli;
 
@@ -57,14 +58,15 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"error: {ex.Message}");
+            Console.Error.WriteLine(Sanitizer.SanitizeDiagnostic($"error: {ex.Message}", 4000));
             return ex is ArgumentException ? 2 : 1;
         }
     }
 
     private static int Unknown(string command)
     {
-        Console.Error.WriteLine($"unknown command '{command}'.\n\n{Usage}");
+        var safeCommand = Sanitizer.SanitizeDiagnostic(command, 512);
+        Console.Error.WriteLine($"unknown command '{safeCommand}'.\n\n{Usage}");
         return 2;
     }
 

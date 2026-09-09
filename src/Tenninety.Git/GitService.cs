@@ -1,3 +1,4 @@
+using System.Text;
 using Tenninety.Core;
 
 namespace Tenninety.Git;
@@ -193,6 +194,10 @@ public sealed class GitOutputLimitExceededException(long maxBytes)
 
 public sealed class GitService : IGitService
 {
+    private const string DiffTruncationMarker =
+        "\n… [diff truncated – showing head and tail] …\n";
+    private const string StderrTruncationMarker =
+        "\n... [git stderr truncated - showing head and tail] ...\n";
     private static readonly string[] EnvironmentAllowlist =
     [
         "PATH", "HOME", "LANG", "LC_ALL", "USER", "LOGNAME", "TMPDIR",
@@ -472,15 +477,18 @@ public sealed class GitService : IGitService
     public string DiffAgainstMain(string branch) =>
         Run("diff", $"{TenNinety.MainBranch}...{branch}", "--stat").Output;
 
-    /// <summary>Bounded unified patch of branch vs main; long patches keep head and tail with
-    /// an elision marker so a model sees both the opening context and the latest changes.</summary>
+    /// <summary>Bounded unified patch of branch vs main; stdout and stderr are drained
+    /// concurrently while only bounded head/tail text is retained. Long patches keep an
+    /// elision marker so a model sees both the opening context and the latest changes.</summary>
     public string DiffPatchAgainstMain(string branch, int maxChars = 20000)
     {
-        var patch = Run("diff", $"{TenNinety.MainBranch}...{branch}").Output;
-        if (patch.Length <= maxChars) return patch;
-        var headLen = maxChars * 3 / 4;
-        var tailLen = maxChars - headLen;
-        return patch[..headLen] + "\n… [diff truncated – showing head and tail] …\n" + patch[^tailLen..];
+        if (maxChars <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxChars), "the diff character limit must be positive.");
+        var args = new[] { "diff", $"{TenNinety.MainBranch}...{branch}" };
+        var (exitCode, patch, stderr) = TryRunBoundedText(args, maxChars);
+        if (exitCode != 0)
+            throw new GitException(string.Join(' ', args), exitCode, stderr);
+        return patch;
     }
 
     public IReadOnlyList<GitCommit> RecentCommits(int count)
@@ -802,6 +810,91 @@ public sealed class GitService : IGitService
         return (proc.ExitCode, stdout, stderr);
     }
 
+    private (int ExitCode, string Output, string Stderr) TryRunBoundedText(
+        string[] args, int maxOutputChars)
+    {
+        using var proc = System.Diagnostics.Process.Start(BuildGitStartInfo(args))
+            ?? throw new InvalidOperationException("failed to start git process.");
+        var stdoutTask = Task.Run(() => ReadHeadTail(
+            proc.StandardOutput, maxOutputChars, DiffTruncationMarker));
+        var stderrTask = Task.Run(() => ReadHeadTail(
+            proc.StandardError, 16_384, StderrTruncationMarker));
+        try
+        {
+            if (!proc.WaitForExit((int)TimeSpan.FromMinutes(2).TotalMilliseconds))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                if (!proc.WaitForExit((int)TimeSpan.FromSeconds(10).TotalMilliseconds))
+                    throw new TimeoutException(
+                        $"git command timed out and did not terminate: {string.Join(' ', args)}");
+                try { Task.WaitAll([stdoutTask, stderrTask], TimeSpan.FromSeconds(5)); } catch { }
+                throw new TimeoutException($"git command timed out: {string.Join(' ', args)}");
+            }
+            return (
+                proc.ExitCode,
+                stdoutTask.GetAwaiter().GetResult(),
+                stderrTask.GetAwaiter().GetResult());
+        }
+        catch
+        {
+            KillAndReap(proc);
+            try { Task.WaitAll([stdoutTask, stderrTask], TimeSpan.FromSeconds(5)); } catch { }
+            throw;
+        }
+    }
+
+    private static string ReadHeadTail(TextReader reader, int maxChars, string marker)
+    {
+        var headLimit = (int)((long)maxChars * 3 / 4);
+        var tailLimit = maxChars - headLimit;
+        var head = new StringBuilder(Math.Min(headLimit, 4096));
+        var tail = new char[tailLimit];
+        var tailCount = 0;
+        var tailWrite = 0;
+        long total = 0;
+        var buffer = new char[4096];
+        int read;
+        while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            total += read;
+            var offset = 0;
+            var headChars = Math.Min(read, headLimit - head.Length);
+            if (headChars > 0)
+            {
+                head.Append(buffer, 0, headChars);
+                offset = headChars;
+            }
+            for (; offset < read; offset++)
+            {
+                tail[tailWrite] = buffer[offset];
+                tailWrite = (tailWrite + 1) % tailLimit;
+                if (tailCount < tailLimit) tailCount++;
+            }
+        }
+
+        var tailText = TailText(tail, tailCount, tailWrite);
+        if (total <= maxChars) return head + tailText;
+
+        var headText = head.ToString();
+        // Do not split a valid UTF-16 surrogate pair at either elision boundary.
+        if (headText.Length > 0 && char.IsHighSurrogate(headText[^1]))
+            headText = headText[..^1];
+        if (tailText.Length > 0 && char.IsLowSurrogate(tailText[0]))
+            tailText = tailText[1..];
+        return headText + marker + tailText;
+    }
+
+    private static string TailText(char[] tail, int count, int write)
+    {
+        if (count == 0) return "";
+        if (count < tail.Length) return new string(tail, 0, count);
+        var ordered = new char[count];
+        var first = tail.Length - write;
+        Array.Copy(tail, write, ordered, 0, first);
+        if (write > 0) Array.Copy(tail, 0, ordered, first, write);
+        return new string(ordered);
+    }
+
     /// <summary>Runs git capturing RAW stdout bytes (binary-safe), with an optional hard cap.
     /// The stdout reader runs concurrently with the exit wait: a cap violation is observed
     /// IMMEDIATELY (killing and reaping the process then and there) instead of waiting for a
@@ -877,6 +970,10 @@ public sealed class GitService : IGitService
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             RedirectStandardInput = true,
+            StandardOutputEncoding = new UTF8Encoding(
+                encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false),
+            StandardErrorEncoding = new UTF8Encoding(
+                encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false),
             UseShellExecute = false,
             CreateNoWindow = true,
         };

@@ -1,5 +1,6 @@
 using Spectre.Console;
 using Tenninety.Core;
+using Tenninety.Core.Security;
 using Tenninety.Execution;
 
 namespace Tenninety.Cli.Commands;
@@ -15,7 +16,7 @@ public static class StartCommand
 
         var orchestrator = new Orchestrator(
             ws.Git, plan, state, ws.Config, ws.CreateFrontier(),
-            ws.States, ws.Audit, log: line => Console.WriteLine($"[tenninety] {line}"));
+            ws.States, ws.Audit, log: WriteLog);
 
         var interactive = !headless && !Console.IsInputRedirected && !Console.IsOutputRedirected;
         if (interactive)
@@ -53,12 +54,15 @@ public static class StartCommand
         }
         catch (Exception ex)
         {
-            return Failed(1, ex.Message);
+            return Failed(1, Sanitizer.SanitizeDiagnostic(ex.Message, 4000));
         }
 
         static int Succeeded(string message) { AnsiConsole.MarkupLine($"[green]{Markup.Escape(message)}[/]"); return 0; }
         static int Failed(int code, string message) { AnsiConsole.MarkupLine($"[red]{Markup.Escape(message)}[/]"); return code; }
     }
+
+    private static void WriteLog(string line) =>
+        Console.WriteLine(Sanitizer.SanitizeDiagnostic($"[tenninety] {line}", 4000));
 }
 
 /// <summary>tenninety revert &lt;commit&gt; — hotfix flow (Part IV.5).</summary>
@@ -67,17 +71,22 @@ public static class RevertCommand
     public static async Task<int> Run(string commit, string? reason)
     {
         var ws = Workspace.Load();
-        var tester = new AgentFactory(ws.Config).CreateTester(ws.Git, line => Console.WriteLine($"[tenninety] {line}"));
+        var tester = new AgentFactory(ws.Config).CreateTester(ws.Git, WriteLog);
         var service = new RevertService(ws.Git, ws.Config, ws.CreateFrontier(), tester, ws.Audit,
-            log: line => Console.WriteLine($"[tenninety] {line}"));
+            log: WriteLog);
 
         var outcome = await service.RevertAsync(commit, reason ?? "", CancellationToken.None);
         if (outcome.Success)
         {
-            AnsiConsole.MarkupLine($"[green]{Markup.Escape(outcome.Message)}[/]");
+            AnsiConsole.MarkupLine(
+                $"[green]{Markup.Escape(Sanitizer.SanitizeDiagnostic(outcome.Message, 4000))}[/]");
             return 0;
         }
-        AnsiConsole.MarkupLine($"[red]{Markup.Escape(outcome.Message)}[/]");
+        AnsiConsole.MarkupLine(
+            $"[red]{Markup.Escape(Sanitizer.SanitizeDiagnostic(outcome.Message, 4000))}[/]");
         return 1;
     }
+
+    private static void WriteLog(string line) =>
+        Console.WriteLine(Sanitizer.SanitizeDiagnostic($"[tenninety] {line}", 4000));
 }

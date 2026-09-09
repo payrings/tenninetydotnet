@@ -11,7 +11,7 @@ The repository ships pinned Dockerfiles and a fish script for all role images:
 | Image | Directory | Contract |
 |---|---|---|
 | Coder (aider) | `docker/coder-aider` | `aider` at `/usr/local/bin/aider` (Python base) |
-| Coder (OpenCode) | `docker/coder-opencode` | `opencode` at `/usr/local/bin/opencode` (Node base) |
+| Coder (OpenCode) | `docker/coder-opencode` | `opencode` at `/usr/local/bin/opencode` plus Git (Node base) |
 | Coder (Pi) | `docker/coder-pi` | `pi` at `/usr/local/bin/pi` (Node base) |
 | Reviewer | `docker/reviewer` | offline exploration toolbox: bash, coreutils, grep, sed, gawk, find, diff, git, jq, ripgrep |
 | Tester | `docker/tester` | .NET 10 SDK, `/bin/bash`, `/usr/bin/dotnet` (exact path the trusted Restore command invokes) |
@@ -23,6 +23,8 @@ before printing its ID:
 - no `ENTRYPOINT` — the runtime appends the fixed `sleep infinity` waiting command;
 - `/workspace` working directory; no credentials, keys, host paths or host configuration baked
   in (no feed credentials, no NuGet.config — Restore generates its own trusted config).
+- the OpenCode image has a working Git executable; the build script validates OpenCode and Git
+  from the finished image before accepting its ID.
 
 Build and copy the exact IDs into `.tenninety/config.json`:
 
@@ -38,6 +40,22 @@ NOT bit-for-bit reproducibility: the live apt repositories and the unlocked tran
 npm/Python dependency closure mean image content is not guaranteed identical across builds —
 rebuild deliberately and record the resulting local image ID. Nothing is pulled or built at
 runtime.
+
+## OpenCode coder configuration (pinned container)
+
+The pinned OpenCode container has an empty tmpfs home and receives no host/user provider files.
+For `"coder_agent": "opencode"`, trusted code strictly splits the explicit
+`opencode.model` as exactly one `provider/model` pair and serializes a bounded
+`OPENCODE_CONFIG_CONTENT` document with:
+
+- `npm: "@ai-sdk/openai-compatible"`;
+- the effective container-side endpoint in `options.baseURL`;
+- `options.apiKey: "{env:OPENAI_API_KEY}"`, so the actual key never enters the JSON;
+- exactly the configured provider and model IDs.
+
+`OPENCODE_CONFIG_CONTENT` exists only in the Coder role's closed environment allowlist. The
+finished image also includes Git, which OpenCode needs for repository-aware operation, and the
+image build script verifies both executables.
 
 ## Pi coder configuration (pinned container)
 
@@ -59,7 +77,7 @@ runs) with:
 The Pi invocation runs `--offline` (no update checks, package updates or install/update
 telemetry at startup) and `--no-approve` (project-local extensions/skills from the untrusted
 candidate workspace are ignored). No credential and no host configuration is baked into the
-image, and Aider/OpenCode plans are unchanged. The live
+image; Aider's plan is unchanged. The live
 `DockerPiStub` category (see the Docker categories table) proves this end to end against a
 local stub OpenAI-compatible server.
 
@@ -83,6 +101,12 @@ probes only the Tester (plus the Restore phase when enabled) — unrelated Coder
 and the Coder endpoint are deliberately not demanded, while Tester hardening is never reduced.
 Merely selecting a mock Tester resolves no Docker executable, reads no Docker settings and
 creates no temporary directories.
+
+Coder preflight strictly parses the pre-existing model network's Docker inspect response and
+requires `Internal` to be the boolean `true`. A missing, wrong-typed, duplicated or malformed
+field, or `Internal=false`, fails before live probes. This requirement is specific to the Coder
+model network; the separately operator-accepted restricted Restore network keeps its existing
+acceptance-ID and proxy controls.
 
 ## Exact candidate identity
 
@@ -398,7 +422,7 @@ prerequisite message until their own opt-in is set:
 
 | Category trait | Opt-in | Prerequisites |
 |---|---|---|
-| `Category=DockerCoder` | `TENNINETY_RUN_DOCKER_CODER_TESTS=1` | `TENNINETY_CODER_TEST_IMAGE`, `TENNINETY_REVIEWER_TEST_IMAGE`, `TENNINETY_TESTER_TEST_IMAGE` (exact local sha256 IDs, numeric non-root USER, no ENTRYPOINT), `TENNINETY_TEST_MODEL_NETWORK` (pre-existing), `TENNINETY_CODER_TEST_MODEL_ENDPOINT` |
+| `Category=DockerCoder` | `TENNINETY_RUN_DOCKER_CODER_TESTS=1` | `TENNINETY_CODER_TEST_IMAGE`, `TENNINETY_REVIEWER_TEST_IMAGE`, `TENNINETY_TESTER_TEST_IMAGE` (exact local sha256 IDs, numeric non-root USER, no ENTRYPOINT), `TENNINETY_TEST_MODEL_NETWORK` (pre-existing with Docker `Internal=true`), `TENNINETY_CODER_TEST_MODEL_ENDPOINT` |
 | `Category=DockerPiStub` | `TENNINETY_RUN_DOCKER_PI_STUB_TESTS=1` | `TENNINETY_PI_TEST_IMAGE` (the local pinned Pi coder image), the three role images above, `TENNINETY_TEST_MODEL_NETWORK` (a pre-existing local bridge network whose gateway address carries the test-hosted stub OpenAI server). No GPU and no real model: the stub answers Pi's tool calls deterministically and proves the configured endpoint, provider/model and a minimal workspace edit. |
 | `Category=DockerReviewer` | `TENNINETY_RUN_DOCKER_REVIEWER_TESTS=1` | same role images + model network + endpoint |
 | `Category=DockerTester` | `TENNINETY_RUN_DOCKER_TESTER_TESTS=1` | same role images + model network + endpoint; tester image must contain the .NET SDK |
@@ -429,7 +453,8 @@ fresh Reviewer → fresh Tester with exact candidate SHA propagation.
   retries on the next start; `tenninety status` reports its facts.
 - Positive live-Docker execution HAS been exercised in the stable-release gate: against a
   real Docker 29.7.2 daemon with a local image (explicit numeric non-root USER, no
-  ENTRYPOINT, .NET SDK for the Tester) and the pre-existing `tenninety-coder-model` network,
+  ENTRYPOINT, .NET SDK for the Tester) and the pre-existing internal
+  `tenninety-coder-model` network,
   the deterministic DockerCoder, scripted DockerReviewer, offline DockerTester (offline
   build/test plus implicit-restore rejection), deterministic DockerEndToEnd, the generic
   Docker transport/runtime/session/preflight category, and the Pi stub-endpoint category

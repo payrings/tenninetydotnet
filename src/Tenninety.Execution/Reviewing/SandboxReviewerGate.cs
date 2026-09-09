@@ -268,7 +268,7 @@ public sealed class SandboxReviewerGate : IReviewerAgent
                 return new ReviewResult
                 {
                     Passed = verdict.Passed,
-                    Reasons = verdict.Reasons.Select(Sanitize).ToList(),
+                    Reasons = verdict.Reasons.Select(Diagnostic).ToList(),
                     ReviewerModel = _model,
                     CandidateSha = ctx.Candidate.CommitSha,
                 };
@@ -438,6 +438,9 @@ public sealed class SandboxReviewerGate : IReviewerAgent
     private static string Sanitize(string value) =>
         Core.Security.Sanitizer.SanitizeText(value ?? "");
 
+    private static string Diagnostic(string value) =>
+        Core.Security.Sanitizer.SanitizeDiagnostic(value ?? "", 2000);
+
     private static string Bound(string value) =>
-        value.Length <= 2000 ? value : value[..1990] + "...[bounded]";
+        Core.Security.Sanitizer.SanitizeDiagnostic(value ?? "", 2000);
 }

@@ -552,7 +552,8 @@ public class DockerCliTests : IDisposable
     public async Task InspectNetwork_uses_the_exact_vector_and_requires_the_requested_name()
     {
         var transport = new FakeDockerCliTransport();
-        transport.Enqueue(Ok("[{\"Name\":\"tenninety-coder-model\",\"Id\":\"net-1\",\"Driver\":\"bridge\"}]"));
+        transport.Enqueue(Ok("[{\"Name\":\"tenninety-coder-model\",\"Id\":\"net-1\"," +
+                             "\"Driver\":\"bridge\",\"Internal\":true}]"));
         var cli = new DockerCli(transport);
 
         var info = await cli.InspectNetworkAsync("tenninety-coder-model");
@@ -560,6 +561,7 @@ public class DockerCliTests : IDisposable
         Assert.Equal(["network", "inspect", "tenninety-coder-model"], transport.Invocations[0].Arguments);
         Assert.NotNull(info);
         Assert.Equal("tenninety-coder-model", info!.Name);
+        Assert.True(info.Internal);
         Assert.False(info.IsReserved);
     }
 
@@ -611,7 +613,8 @@ public class DockerCliTests : IDisposable
     public async Task InspectNetwork_rejects_a_mismatched_inspected_name()
     {
         var transport = new FakeDockerCliTransport();
-        transport.Enqueue(Ok("[{\"Name\":\"some-other-network\",\"Id\":\"net-1\",\"Driver\":\"bridge\"}]"));
+        transport.Enqueue(Ok("[{\"Name\":\"some-other-network\",\"Id\":\"net-1\"," +
+                             "\"Driver\":\"bridge\",\"Internal\":true}]"));
         var cli = new DockerCli(transport);
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => cli.InspectNetworkAsync("tenninety-coder-model"));

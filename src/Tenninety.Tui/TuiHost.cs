@@ -130,7 +130,7 @@ public static class TuiHost
         try { await task; }
         catch (Exception ex)
         {
-            _banner = $"daemon error: {ex.Message}";
+            _banner = Diagnostic($"daemon error: {ex.Message}");
         }
     }
 
@@ -140,7 +140,8 @@ public static class TuiHost
     private static void Draw(Workspace ws, Plan plan, RuntimeState state)
     {
         Console.Clear();
-        AnsiConsole.Write(new Rule($"[b]10/90 tenninety[/b] — {Markup.Escape(plan.ProjectName)}")
+        AnsiConsole.Write(new Rule(
+                $"[b]10/90 tenninety[/b] — {Markup.Escape(Diagnostic(plan.ProjectName, 512))}")
             .RuleStyle("grey"));
 
         var health = new Grid();
@@ -151,15 +152,18 @@ public static class TuiHost
             ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(ws.SpecPath)))[..8].ToLowerInvariant()
             : "n/a";
         health.AddRow(
-            new Markup($"[b]Mode[/] {state.ExecutionMode}{(state.Paused ? " [red](paused)[/]" : "")}"),
-            new Markup($"[b]Provider[/] {Markup.Escape(ws.Config.ProviderMode)}{(ws.Config.UseLlamaSwap ? " + llama-swap" : "")}"),
-            new Markup($"[b]Models[/] {Markup.Escape(ws.Config.LocalModels.Coder)} / {Markup.Escape(ws.Config.LocalModels.Reviewer)}"),
+            new Markup($"[b]Mode[/] {Markup.Escape(Diagnostic(state.ExecutionMode, 64))}" +
+                       (state.Paused ? " [red](paused)[/]" : "")),
+            new Markup($"[b]Provider[/] {Markup.Escape(Diagnostic(ws.Config.ProviderMode, 128))}" +
+                       (ws.Config.UseLlamaSwap ? " + llama-swap" : "")),
+            new Markup($"[b]Models[/] {Markup.Escape(Diagnostic(ws.Config.LocalModels.Coder, 256))} / " +
+                       Markup.Escape(Diagnostic(ws.Config.LocalModels.Reviewer, 256))),
             new Markup($"[b]Spec hash[/] {specHash}"));
         health.AddRow(
-            new Markup($"[b]Branch[/] {Markup.Escape(branch)}"),
+            new Markup($"[b]Branch[/] {Markup.Escape(Diagnostic(branch, 512))}"),
             new Markup($"[b]Git[/] {(clean == "true" ? "[green]clean[/]" : "[red]dirty[/]")}"),
-            new Markup($"[b]Frontier[/] {Markup.Escape(ws.Config.FrontierEndpoint)}"),
-            new Markup($"[b]Current WP[/] {Markup.Escape(state.CurrentWp ?? "-")}"));
+            new Markup($"[b]Frontier[/] {Markup.Escape(Diagnostic(ws.Config.FrontierEndpoint, 512))}"),
+            new Markup($"[b]Current WP[/] {Markup.Escape(Diagnostic(state.CurrentWp ?? "-", 256))}"));
         AnsiConsole.Write(health);
 
         var table = new Table().Border(TableBorder.Rounded)
@@ -184,10 +188,10 @@ public static class TuiHost
                 _ => "white",
             };
             table.AddRow(
-                $"[{color}]{Markup.Escape("[" + status + "]")}[/]",
-                Markup.Escape(wp.Id),
-                Markup.Escape(wp.Layer),
-                Markup.Escape(wp.Title) +
+                $"[{color}]{Markup.Escape("[" + Diagnostic(status, 64) + "]")}[/]",
+                Markup.Escape(Diagnostic(wp.Id, 256)),
+                Markup.Escape(Diagnostic(wp.Layer, 256)),
+                Markup.Escape(Diagnostic(wp.Title, 1000)) +
                 (Core.Validation.WpMarkers.IsConflict(wp) ? " [red]⚠CONFLICT[/]"
                     : Core.Validation.WpMarkers.IsAmbiguous(wp) ? " [yellow]⚠AMBIGUOUS[/]" : ""),
                 attempts);
@@ -195,7 +199,7 @@ public static class TuiHost
         AnsiConsole.Write(table);
 
         if (_banner is not null)
-            AnsiConsole.MarkupLine($"\n[yellow]{Markup.Escape(_banner)}[/]");
+            AnsiConsole.MarkupLine($"\n[yellow]{Markup.Escape(Diagnostic(_banner))}[/]");
 
         AnsiConsole.MarkupLine(
             "\n[grey][[P]][/] Pause/Resume  [grey][[S]][/] Snapshot & Pivot  [grey][[R]][/] Revert  " +
@@ -212,7 +216,7 @@ public static class TuiHost
         }
         catch (Exception ex)
         {
-            return $"cannot start pivot: {ex.Message}";
+            return Diagnostic($"cannot start pivot: {ex.Message}");
         }
 
         using (workspaceLock)
@@ -265,21 +269,25 @@ public static class TuiHost
         }
         catch (Exception ex)
         {
-            return $"pivot analysis failed: {ex.Message}";
+            return Diagnostic($"pivot analysis failed: {ex.Message}");
         }
 
         Console.Clear();
         AnsiConsole.Write(new Rule("[b]Frontier pivot diff[/]").RuleStyle("aqua"));
-        AnsiConsole.MarkupLine($"[grey]{Markup.Escape(proposal.Rationale)}[/]\n");
+        AnsiConsole.MarkupLine($"[grey]{Markup.Escape(Diagnostic(proposal.Rationale))}[/]\n");
         var grid = new Grid();
         grid.AddColumn(); grid.AddColumn();
         grid.AddRow("[green]KEEP:[/]   " + proposal.Keep.Count, TruncateIds(proposal.Keep));
         grid.AddRow("[yellow]REWORK:[/] " + proposal.Rework.Count,
             TruncateIds(proposal.Rework.Select(r => r.Id)) +
-            (proposal.Rework.Count > 0 ? $"  [grey]{Markup.Escape(proposal.Rework[0].Reason)}[/]" : ""));
+            (proposal.Rework.Count > 0
+                ? $"  [grey]{Markup.Escape(Diagnostic(proposal.Rework[0].Reason, 1000))}[/]"
+                : ""));
         grid.AddRow("[red]CANCEL:[/]  " + proposal.Cancel.Count,
             TruncateIds(proposal.Cancel.Select(c => c.Id)) +
-            (proposal.Cancel.Count > 0 ? $"  [grey]{Markup.Escape(proposal.Cancel[0].Reason)}[/]" : ""));
+            (proposal.Cancel.Count > 0
+                ? $"  [grey]{Markup.Escape(Diagnostic(proposal.Cancel[0].Reason, 1000))}[/]"
+                : ""));
         grid.AddRow("[aqua]NEW:[/]     " + proposal.NewWorkPackages.Count,
             TruncateIds(proposal.NewWorkPackages.Select(w => w.Id)));
         AnsiConsole.Write(grid);
@@ -305,7 +313,10 @@ public static class TuiHost
 
         var commits = Safe(() => ws.Git.RecentCommits(10), new List<GitCommit>());
         for (var i = 0; i < commits.Count; i++)
-            AnsiConsole.MarkupLine($"  [{(i == 0 ? "yellow" : "white")}]({i})[/] [grey]{Markup.Escape(commits[i].Sha[..10])}[/] {Markup.Escape(commits[i].Subject)}");
+            AnsiConsole.MarkupLine(
+                $"  [{(i == 0 ? "yellow" : "white")}]({i})[/] " +
+                $"[grey]{Markup.Escape(commits[i].Sha[..10])}[/] " +
+                Markup.Escape(Diagnostic(commits[i].Subject, 1000)));
 
         if (commits.Count == 0)
             return "no commits found on main.";
@@ -319,14 +330,14 @@ public static class TuiHost
         {
             var found = commits.FirstOrDefault(c => c.Sha.StartsWith(selection, StringComparison.OrdinalIgnoreCase));
             if (found is null)
-                return $"commit '{selection}' not among recent commits.";
+                return Diagnostic($"commit '{selection}' not among recent commits.");
             target = found;
         }
 
         var reason = AnsiConsole.Ask<string>("Reason [optional]:", "");
         AnsiConsole.MarkupLine("\n[dim]Running hotfix flow (frontier guidance → mechanical revert → tests → merge)…[/]");
         var outcome = await service.RevertAsync(target.Sha, reason, CancellationToken.None);
-        return outcome.Message;
+        return Diagnostic(outcome.Message);
     }
 
     private static void ShowLogs(Workspace ws)
@@ -335,10 +346,14 @@ public static class TuiHost
         AnsiConsole.Write(new Rule("[b]Audit log (tail 30)[/]"));
         foreach (var e in ws.Audit.ReadTail(30))
             AnsiConsole.MarkupLine(
-                $"[grey]{Markup.Escape(e.Timestamp.Length >= 13 ? e.Timestamp[^13..] : e.Timestamp)}[/] " +
-                $"[b]{Markup.Escape(e.Event)}[/]" +
-                (string.IsNullOrEmpty(e.WorkPackageId) ? "" : $" {Markup.Escape(e.WorkPackageId)}") +
-                (string.IsNullOrEmpty(e.Detail) ? "" : $" [grey]{Markup.Escape(e.Detail)}[/]"));
+                $"[grey]{Markup.Escape(Diagnostic(e.Timestamp.Length >= 13 ? e.Timestamp[^13..] : e.Timestamp, 64))}[/] " +
+                $"[b]{Markup.Escape(Diagnostic(e.Event, 128))}[/]" +
+                (string.IsNullOrEmpty(e.WorkPackageId)
+                    ? ""
+                    : $" {Markup.Escape(Diagnostic(e.WorkPackageId, 256))}") +
+                (string.IsNullOrEmpty(e.Detail)
+                    ? ""
+                    : $" [grey]{Markup.Escape(Diagnostic(e.Detail))}[/]"));
         AnsiConsole.MarkupLine("\n[grey]Press any key to return to the dashboard…[/]");
         Console.ReadKey(intercept: true);
     }
@@ -347,9 +362,12 @@ public static class TuiHost
     {
         var list = ids.ToList();
         const int max = 8;
-        var shown = string.Join(", ", list.Take(max));
+        var shown = string.Join(", ", list.Take(max).Select(id => Diagnostic(id, 256)));
         return Markup.Escape(list.Count > max ? shown + $", …(+{list.Count - max})" : shown);
     }
+
+    private static string Diagnostic(string? value, int maxChars = 4000) =>
+        Core.Security.Sanitizer.SanitizeDiagnostic(value ?? "", maxChars);
 
     private static T Safe<T>(Func<T> f, T fallback)
     {

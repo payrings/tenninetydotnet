@@ -3,7 +3,8 @@
 # Contract (see docs/TESTER-SANDBOX.md):
 #   - numeric non-root USER (UID build argument), no ENTRYPOINT: the sandbox runtime appends the fixed
 #     `sleep infinity` waiting command and `--user <uid>` itself;
-#   - the supported tool is present at the EXACT path /usr/local/bin/opencode;
+#   - the supported tool is present at the EXACT path /usr/local/bin/opencode, with Git
+#     available for repository-aware operation;
 #   - no credentials, keys, host paths or host configuration are baked in;
 #   - /workspace is the working directory (the only writable bind at runtime).
 #
@@ -16,9 +17,13 @@ FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95ea
 
 ARG OPENCODE_VERSION=1.18.29
 
-RUN npm install --global "opencode-ai@${OPENCODE_VERSION}" \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
     && npm cache clean --force \
-    && test -x /usr/local/bin/opencode
+    && test -x /usr/local/bin/opencode \
+    && git --version >/dev/null
 
 # Numeric non-root identity, parameterized at build time: the sandbox runtime mounts the
 # attempt workspace owned by the HOST user that runs tenninety, so build the image with

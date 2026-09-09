@@ -209,7 +209,11 @@ public sealed class RevertService
     {
         var commit = _git.FindCommit(shaOrRef);
         if (commit is null)
-            return new RevertOutcome { Success = false, Message = $"commit '{shaOrRef}' not found." };
+            return new RevertOutcome
+            {
+                Success = false,
+                Message = Diagnostic($"commit '{shaOrRef}' not found."),
+            };
 
         // Exclusive workspace lock: a revert must never race an active daemon.
         using var _revertLock = DaemonLock.Acquire(_git.RepoPath);
@@ -218,7 +222,8 @@ public sealed class RevertService
             return new RevertOutcome
             {
                 Success = false,
-                Message = $"revert must start from '{TenNinety.MainBranch}', not '{_git.CurrentBranch()}'.",
+                Message = Diagnostic(
+                    $"revert must start from '{TenNinety.MainBranch}', not '{_git.CurrentBranch()}'."),
             };
 
         if (!_git.IsClean())
@@ -243,7 +248,7 @@ public sealed class RevertService
             };
         _audit.Append("REVERT_STARTED", detail:
             $"{commit.Sha[..12]} reason={Core.Security.Sanitizer.SanitizeText(reason)}");
-        _log?.Invoke($"reverting {commit.Sha[..12]} on branch '{branch}'");
+        Log($"reverting {commit.Sha[..12]} on branch '{branch}'");
 
         string diff;
         try
@@ -252,12 +257,12 @@ public sealed class RevertService
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            var detail = Core.Security.Sanitizer.SanitizeText(ex.Message);
+            var detail = Diagnostic(ex.Message);
             _audit.Append("REVERT_ERROR", detail: detail);
             return new RevertOutcome
             {
                 Success = false,
-                Message = $"could not inspect the target commit safely: {detail}",
+                Message = Diagnostic($"could not inspect the target commit safely: {detail}"),
             };
         }
         if (diff.Contains(GitShowTruncationMarker, StringComparison.Ordinal))
@@ -274,7 +279,7 @@ public sealed class RevertService
         var guidance = await _frontier.ProposeRevertAsync(
             new RevertRequest($"{commit.Sha}\n{commit.Subject}\n{commit.Author} {commit.Date}", diff, reason), ct);
         foreach (var step in guidance.Steps)
-            _log?.Invoke($"frontier step: {step}");
+            Log($"frontier step: {step}");
 
         if (!guidance.MechanicalRevertSufficient)
             return new RevertOutcome
@@ -336,17 +341,18 @@ public sealed class RevertService
             var mergeSha = _git.SquashMergeToMain(branch, $"Revert \"{commit.Subject}\" [hotfix]");
             try { _git.DeleteBranchSafe(branch, force: true); } catch { /* non-fatal */ }
             _audit.Append("REVERT_PROMOTED", detail: mergeSha);
-            _log?.Invoke($"revert promoted to main ({mergeSha[..12]})");
+            Log($"revert promoted to main ({mergeSha[..12]})");
             return new RevertOutcome { Success = true, Message = $"reverted {commit.Sha[..12]} via {mergeSha[..12]}." };
         }
         catch (Exception ex)
         {
             try { _git.CheckoutBranch(TenNinety.MainBranch); } catch { /* already on main */ }
-            _audit.Append("REVERT_ERROR", detail: Core.Security.Sanitizer.SanitizeText(ex.Message));
+            _audit.Append("REVERT_ERROR", detail: Diagnostic(ex.Message));
             return new RevertOutcome
             {
                 Success = false,
-                Message = $"revert failed: {ex.Message}; branch '{branch}' left for inspection.",
+                Message = Diagnostic(
+                    $"revert failed: {ex.Message}; branch '{branch}' left for inspection."),
                 BranchLeftBehind = branch,
             };
         }
@@ -431,4 +437,9 @@ public sealed class RevertService
 
     private static string Truncate(string value, int max) =>
         value.Length <= max ? value : value[..max] + "…";
+
+    private static string Diagnostic(string value) =>
+        Core.Security.Sanitizer.SanitizeDiagnostic(value ?? "", 4000);
+
+    private void Log(string message) => _log?.Invoke(Diagnostic(message));
 }

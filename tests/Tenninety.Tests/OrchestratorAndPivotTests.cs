@@ -415,7 +415,9 @@ public class RevertServiceTests
     }
 
     private static (RevertService Service, GitService Git, TempDir Dir) MakeRevertFixture(
-        Func<GitService, ITesterAgent> testerFactory)
+        Func<GitService, ITesterAgent> testerFactory,
+        IFrontierClient? frontier = null,
+        Action<string>? log = null)
     {
         var tmp = new TempDir();
         var git = new GitService(tmp.Root);
@@ -427,8 +429,8 @@ public class RevertServiceTests
         File.WriteAllText(tmp.Path("feature.txt"), "promoted change");
         git.CommitAll("WP-001: feature [work package]");
         return (new RevertService(
-            git, new TenNinetyConfig(), new MockFrontierClient(), testerFactory(git),
-            new AuditLog(System.IO.Path.Combine(tmp.Root, ".tenninety", "audit.jsonl"))), git, tmp);
+            git, new TenNinetyConfig(), frontier ?? new MockFrontierClient(), testerFactory(git),
+            new AuditLog(System.IO.Path.Combine(tmp.Root, ".tenninety", "audit.jsonl")), log), git, tmp);
     }
 
     [Fact]
@@ -480,6 +482,63 @@ public class RevertServiceTests
                 Assert.Single(recorded); // exactly one tester invocation per attempt
             }
         }
+    }
+
+    [Fact]
+    public async Task Revert_frontier_steps_and_reason_audit_are_diagnostic_safe_and_bounded()
+    {
+        const string secret = "supersecretvalue123";
+        var hostile = "apiKey=" + secret + "\u001b[31m\r\0\u0085" + new string('x', 5000);
+        var logs = new List<string>();
+        var (service, git, dir) = MakeRevertFixture(
+            _ => new ScriptedTester(0), new HostileRevertFrontier(hostile), logs.Add);
+        using (dir)
+        {
+            var outcome = await service.RevertAsync(git.FindCommit("main")!.Sha, hostile);
+
+            Assert.False(outcome.Success);
+            var diagnostic = Assert.Single(logs, line => line.Contains("frontier step"));
+            AssertDiagnosticSafe(diagnostic, secret, 4000);
+            var started = Assert.Single(
+                new AuditLog(dir.Path(".tenninety/audit.jsonl")).ReadTail(20),
+                entry => entry.Event == "REVERT_STARTED");
+            AssertDiagnosticSafe(started.Detail, secret, AuditLog.MaxDetailChars);
+        }
+    }
+
+    private static void AssertDiagnosticSafe(string value, string secret, int maxChars)
+    {
+        Assert.True(value.Length <= maxChars);
+        Assert.DoesNotContain(secret, value, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u001b', value);
+        Assert.DoesNotContain('\r', value);
+        Assert.DoesNotContain('\0', value);
+        Assert.DoesNotContain('\u0085', value);
+    }
+
+    private sealed class HostileRevertFrontier(string step) : IFrontierClient
+    {
+        private readonly MockFrontierClient _inner = new();
+
+        public Task<Plan> GeneratePlanAsync(string sanitizedSpecMarkdown, CancellationToken ct = default) =>
+            _inner.GeneratePlanAsync(sanitizedSpecMarkdown, ct);
+
+        public Task<RepairAdvice> GetRepairAdviceAsync(
+            RepairRequest request, CancellationToken ct = default) =>
+            _inner.GetRepairAdviceAsync(request, ct);
+
+        public Task<PivotProposal> ProposePivotAsync(
+            PivotRequest request, CancellationToken ct = default) =>
+            _inner.ProposePivotAsync(request, ct);
+
+        public Task<RevertGuidance> ProposeRevertAsync(
+            RevertRequest request, CancellationToken ct = default) =>
+            Task.FromResult(new RevertGuidance
+            {
+                Analysis = "manual review required",
+                Steps = [step],
+                MechanicalRevertSufficient = false,
+            });
     }
 
     [Fact]

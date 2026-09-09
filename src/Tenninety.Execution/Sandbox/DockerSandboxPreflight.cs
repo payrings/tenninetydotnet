@@ -185,6 +185,9 @@ public sealed class DockerSandboxPreflight
                 var modelNetwork = await InspectNetworkOrDefaultAsync(_config.ModelNetwork, "model", errors, ct);
                 if (modelNetwork is { IsReserved: true })
                     errors.Add($"the model network '{_config.ModelNetwork}' resolved to a reserved network.");
+                if (modelNetwork is { Internal: false })
+                    errors.Add($"the model network '{_config.ModelNetwork}' is not an internal Docker " +
+                               "network; Coder live execution is refused because its isolation is unproven.");
             }
         }
 

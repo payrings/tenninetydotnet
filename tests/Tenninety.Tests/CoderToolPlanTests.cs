@@ -142,6 +142,78 @@ public sealed class CoderToolPlanTests
     }
 
     [Theory]
+    [InlineData(false, "http://coder-model:8000/v1")]
+    [InlineData(true, "http://llama-swap:8080/v1")]
+    public void OpenCode_inline_provider_maps_the_effective_endpoint_and_model_exactly(
+        bool useLlamaSwap, string expectedEndpoint)
+    {
+        var config = useLlamaSwap ? LlamaSwapConfig("opencode") : Config("opencode");
+        config.OpenCode.Model = "local/coder";
+
+        var plan = CoderToolPlan.Create(config, Context());
+
+        Assert.Equal("local/coder", ValueAfter(plan.Arguments, "--model"));
+        var json = plan.Environment["OPENCODE_CONFIG_CONTENT"];
+        Assert.True(json.Length <= SandboxPolicy.MaxEnvironmentValueLength);
+        Assert.DoesNotContain(plan.Environment["OPENAI_API_KEY"], json, StringComparison.Ordinal);
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        var providers = document.RootElement.GetProperty("provider");
+        Assert.Equal(["local"], providers.EnumerateObject().Select(property => property.Name));
+        var provider = providers.GetProperty("local");
+        Assert.Equal("@ai-sdk/openai-compatible", provider.GetProperty("npm").GetString());
+        Assert.Equal(expectedEndpoint,
+            provider.GetProperty("options").GetProperty("baseURL").GetString());
+        Assert.Equal("{env:OPENAI_API_KEY}",
+            provider.GetProperty("options").GetProperty("apiKey").GetString());
+        var models = provider.GetProperty("models");
+        Assert.Equal(["coder"], models.EnumerateObject().Select(property => property.Name));
+        Assert.Equal("coder", models.GetProperty("coder").GetProperty("name").GetString());
+    }
+
+    [Theory]
+    [InlineData("local")]
+    [InlineData("/coder")]
+    [InlineData("local/")]
+    [InlineData("local/group/coder")]
+    [InlineData("local/co der")]
+    [InlineData("local/co\u001bder")]
+    public void OpenCode_rejects_malformed_provider_model_identifiers(string model)
+    {
+        var config = Config("opencode");
+        config.OpenCode.Model = model;
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => CoderToolPlan.Create(config, Context()));
+
+        Assert.Contains("provider/model", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OpenCode_rejects_an_oversized_provider_model_identifier()
+    {
+        var config = Config("opencode");
+        config.OpenCode.Model = "local/" + new string('m', 507);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => CoderToolPlan.Create(config, Context()));
+
+        Assert.Contains("provider/model", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OpenCode_inline_provider_is_only_exposed_to_the_coder_role()
+    {
+        Assert.Contains("OPENCODE_CONFIG_CONTENT",
+            SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Coder));
+        Assert.DoesNotContain("OPENCODE_CONFIG_CONTENT",
+            SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Reviewer));
+        Assert.DoesNotContain("OPENCODE_CONFIG_CONTENT",
+            SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Tester));
+        Assert.DoesNotContain("OPENCODE_CONFIG_CONTENT",
+            SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Restore));
+    }
+
+    [Theory]
     [InlineData("aider", "--verbose")]
     [InlineData("aider", "--model reviewer")]
     [InlineData("opencode", "-m reviewer")]
@@ -170,6 +242,9 @@ public sealed class CoderToolPlanTests
             () => ((IList<string>)plan.Arguments).Add("--hostile"));
         Assert.Throws<NotSupportedException>(
             () => ((IDictionary<string, string>)plan.Environment).Add("HOSTILE", "1"));
+        var openCodePlan = CoderToolPlan.Create(Config("opencode"), Context());
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary<string, string>)openCodePlan.Environment)["OPENCODE_CONFIG_CONTENT"] = "{}");
     }
 
     [Theory]

@@ -460,8 +460,9 @@ When mocks feel boring:
 4. Use different coder and reviewer identifiers, and verify that your model server maps them
    to genuinely different weights – different aliases can otherwise point at the same model.
    If both models do not fit your GPU card together, `"use_llama_swap": true` (default Compose
-   setup) is exactly the one-card path. OpenCode/Pi also need their own provider configured for
-   that proxy (see [`OVERVIEW.md`](OVERVIEW.md)).
+   setup) is exactly the one-card path. In Docker mode, trusted code generates the OpenCode/Pi
+   provider configuration for that effective proxy; no host/user provider file is mounted (see
+   [`OVERVIEW.md`](OVERVIEW.md)).
 5. Give secrets via environment variables (never in files – that is a security rule):
    ```bash
    # bash

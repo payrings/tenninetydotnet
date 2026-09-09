@@ -61,6 +61,27 @@ public class SanitizerTests
     {
         Assert.False(Sanitizer.IsExcludedFile("src/Services/Program.cs"));
     }
+
+    [Fact]
+    public void Diagnostic_sanitization_redacts_strips_terminal_controls_and_applies_the_final_bound()
+    {
+        const string secret = "supersecretvalue123";
+        var input = "before\u001b[31m\r\0\u0085\t\napiKey=" + secret + "\n" +
+                    new string('x', 5000) + "🙂";
+
+        var output = Sanitizer.SanitizeDiagnostic(input, 200);
+
+        Assert.True(output.Length <= 200);
+        Assert.DoesNotContain(secret, output, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", output, StringComparison.Ordinal);
+        Assert.Contains('\n', output);
+        Assert.Contains('\t', output);
+        Assert.DoesNotContain('\u001b', output);
+        Assert.DoesNotContain('\r', output);
+        Assert.DoesNotContain('\0', output);
+        Assert.DoesNotContain('\u0085', output);
+        Assert.EndsWith("...[truncated]", output, StringComparison.Ordinal);
+    }
 }
 
 public class JsonExtractorTests

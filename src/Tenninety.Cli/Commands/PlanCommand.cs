@@ -27,7 +27,7 @@ public static class PlanCommand
         var specPath = specArg is not null ? Path.GetFullPath(specArg) : ws.SpecPath;
         if (!File.Exists(specPath))
         {
-            AnsiConsole.MarkupLine($"[red]spec not found:[/] {Markup.Escape(specPath)}");
+            AnsiConsole.MarkupLine($"[red]spec not found:[/] {Markup.Escape(Diagnostic(specPath))}");
             return 1;
         }
 
@@ -40,7 +40,7 @@ public static class PlanCommand
         var frontier = ws.CreateFrontier();
         AnsiConsole.MarkupLine(
             $"[dim]Sending spec ({sanitized.Length} chars, sha {specHash}) to frontier " +
-            $"({Markup.Escape(ws.Config.ProviderMode)})…[/]");
+            $"({Markup.Escape(Diagnostic(ws.Config.ProviderMode, 128))})…[/]");
 
         Plan plan;
         try
@@ -49,7 +49,8 @@ public static class PlanCommand
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            AnsiConsole.MarkupLine($"[red]frontier planning failed:[/] {Markup.Escape(ex.Message)}");
+            AnsiConsole.MarkupLine(
+                $"[red]frontier planning failed:[/] {Markup.Escape(Diagnostic(ex.Message))}");
             return 1;
         }
 
@@ -61,18 +62,20 @@ public static class PlanCommand
             return 1;
         }
         foreach (var warning in validation.Warnings)
-            AnsiConsole.MarkupLine($"[yellow]warning:[/] {Markup.Escape(warning)}");
+            AnsiConsole.MarkupLine($"[yellow]warning:[/] {Markup.Escape(Diagnostic(warning))}");
 
         // Blueprint: CONFLICT WPs will never be executed until a pivot REWORKs them.
         var conflicts = plan.WorkPackages.Where(WpMarkers.IsConflict).ToList();
         var ambiguities = plan.WorkPackages.Where(w => WpMarkers.IsAmbiguous(w) && !WpMarkers.IsConflict(w)).ToList();
         if (conflicts.Count > 0)
             AnsiConsole.MarkupLine(
-                $"[red]{conflicts.Count} CONFLICT work package(s) ({Markup.Escape(string.Join(", ", conflicts.Select(w => w.Id)))}) " +
+                $"[red]{conflicts.Count} CONFLICT work package(s) " +
+                $"({Markup.Escape(Diagnostic(string.Join(", ", conflicts.Select(w => w.Id))))}) " +
                 "will be excluded from execution until resolved via a pivot.[/]");
         if (ambiguities.Count > 0)
             AnsiConsole.MarkupLine(
-                $"[yellow]{ambiguities.Count} AMBIGUOUS work package(s) ({Markup.Escape(string.Join(", ", ambiguities.Select(w => w.Id)))}) " +
+                $"[yellow]{ambiguities.Count} AMBIGUOUS work package(s) " +
+                $"({Markup.Escape(Diagnostic(string.Join(", ", ambiguities.Select(w => w.Id))))}) " +
                 "carry assumptions — review their notes before accepting.[/]");
 
         var defaultAnswer = conflicts.Count == 0 && ambiguities.Count == 0;
@@ -89,7 +92,8 @@ public static class PlanCommand
         }
         catch (Exception ex)
         {
-            AnsiConsole.MarkupLine($"[red]cannot accept plan:[/] {Markup.Escape(ex.Message)}");
+            AnsiConsole.MarkupLine(
+                $"[red]cannot accept plan:[/] {Markup.Escape(Diagnostic(ex.Message))}");
             return 1;
         }
 
@@ -140,7 +144,8 @@ public static class PlanCommand
 
             ws.Git.CommitPaths(
                 [TenNinety.SpecFile, $"{TenNinety.StateDir}/{TenNinety.PlanFile}"],
-                $"plan: accept execution graph for '{plan.ProjectName}' ({plan.WorkPackages.Count} WPs)");
+                $"plan: accept execution graph for '{Diagnostic(plan.ProjectName, 512)}' " +
+                $"({plan.WorkPackages.Count} WPs)");
             ws.Audit.Append("PLAN_GENERATED", detail: $"project={plan.ProjectName} wps={plan.WorkPackages.Count} spec={specHash}");
         }
 
@@ -156,13 +161,15 @@ public static class PlanCommand
 
     private static void RenderPlanSummary(Plan plan, Core.Validation.ValidationResult validation)
     {
-        AnsiConsole.Write(new Rule($"[b]{Markup.Escape(plan.ProjectName)}[/]").RuleStyle("grey"));
+        AnsiConsole.Write(new Rule(
+            $"[b]{Markup.Escape(Diagnostic(plan.ProjectName, 512))}[/]").RuleStyle("grey"));
         var byLayer = (plan.WorkPackages ?? [])
             .Where(w => w is not null)
             .GroupBy(w => w.Layer)
             .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
         foreach (var group in byLayer)
-            AnsiConsole.MarkupLine($"[b]{Markup.Escape(group.Key ?? "<null>")}[/]: {group.Count()} WP(s)");
+            AnsiConsole.MarkupLine(
+                $"[b]{Markup.Escape(Diagnostic(group.Key ?? "<null>", 256))}[/]: {group.Count()} WP(s)");
 
         // Blueprint structural analysis. Null-safe: the plan is untrusted output and may fail
         // validation; the summary must still render to show the operator WHY it was rejected.
@@ -170,16 +177,19 @@ public static class PlanCommand
         if (map is not null)
         {
             if (map.BoundedContexts is { Count: > 0 })
-                AnsiConsole.MarkupLine($"[b]Bounded contexts[/]: {Markup.Escape(string.Join(", ", map.BoundedContexts))}");
+                AnsiConsole.MarkupLine(
+                    $"[b]Bounded contexts[/]: {Markup.Escape(Diagnostic(string.Join(", ", map.BoundedContexts)))}");
             if (map.CoreEntities is { Count: > 0 })
-                AnsiConsole.MarkupLine($"[b]Core entities[/]: {Markup.Escape(string.Join(", ", map.CoreEntities))}");
+                AnsiConsole.MarkupLine(
+                    $"[b]Core entities[/]: {Markup.Escape(Diagnostic(string.Join(", ", map.CoreEntities)))}");
             foreach (var dep in map.KeyDependencies ?? [])
-                AnsiConsole.MarkupLine($"[b]Key dependency[/]: {Markup.Escape(dep)}");
+                AnsiConsole.MarkupLine($"[b]Key dependency[/]: {Markup.Escape(Diagnostic(dep))}");
         }
         if (plan.GlobalContext?.DirectoryStructure is { } dirs && dirs.Count > 0)
             foreach (var (root, projects) in dirs)
                 AnsiConsole.MarkupLine(
-                    $"[b]{Markup.Escape(root ?? "<null>")}[/]: {Markup.Escape(string.Join(", ", projects ?? []))}");
+                    $"[b]{Markup.Escape(Diagnostic(root ?? "<null>", 512))}[/]: " +
+                    Markup.Escape(Diagnostic(string.Join(", ", projects ?? []))));
         if (plan.GlobalContext?.Assumptions is { Count: > 0 } assumptions)
             AnsiConsole.MarkupLine(
                 $"[b]Assumptions[/]: {assumptions.Count} recorded");
@@ -197,15 +207,20 @@ public static class PlanCommand
             else if (WpMarkers.IsAmbiguous(wp)) notes = "[yellow]AMBIGUOUS[/]";
             table.AddRow(
                 (i + 1).ToString(),
-                Markup.Escape(wp.Id),
-                Markup.Escape(wp.Layer ?? ""),
-                Markup.Escape(wp.Module ?? ""),
-                Markup.Escape(wp.Title ?? ""),
-                dependencies.Count == 0 ? "-" : Markup.Escape(string.Join(",", dependencies)),
+                Markup.Escape(Diagnostic(wp.Id, 256)),
+                Markup.Escape(Diagnostic(wp.Layer ?? "", 256)),
+                Markup.Escape(Diagnostic(wp.Module ?? "", 256)),
+                Markup.Escape(Diagnostic(wp.Title ?? "", 1000)),
+                dependencies.Count == 0
+                    ? "-"
+                    : Markup.Escape(Diagnostic(string.Join(",", dependencies), 1000)),
                 (wp.Directives ?? []).Count.ToString(),
                 (wp.AcceptanceCriteria ?? []).Count.ToString(),
                 notes);
         }
         AnsiConsole.Write(table);
     }
+
+    private static string Diagnostic(string? value, int maxChars = 4000) =>
+        Sanitizer.SanitizeDiagnostic(value ?? "", maxChars);
 }

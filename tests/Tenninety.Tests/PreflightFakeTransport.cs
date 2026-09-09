@@ -37,6 +37,7 @@ public sealed class PreflightFakeTransport : IDockerCliTransport
     public readonly Dictionary<string, string> ImageUserOverride = new();
     public readonly HashSet<string> MissingNetworks = new(StringComparer.Ordinal);
     public string? NetworkInspectNameOverride;
+    public string? NetworkInspectJsonOverride;
     public bool NetworkInspectTimeout;
 
     public static readonly string CoderImageId = "sha256:" + new string('a', 64);
@@ -130,8 +131,11 @@ public sealed class PreflightFakeTransport : IDockerCliTransport
                 OutputTruncated: false, Duration: TimeSpan.FromMilliseconds(1));
         if (MissingNetworks.Contains(name))
             return Err("Error: No such network: " + name);
+        if (NetworkInspectJsonOverride is { } json)
+            return Ok(json);
         var reported = NetworkInspectNameOverride ?? name;
-        return Ok($"[{{\"Name\":\"{reported}\",\"Id\":\"{NetworkIdFixed}\",\"Driver\":\"bridge\"}}]");
+        return Ok($"[{{\"Name\":\"{reported}\",\"Id\":\"{NetworkIdFixed}\"," +
+                  "\"Driver\":\"bridge\",\"Internal\":true}]");
     }
 
     private DockerCliResult HandleCreate(DockerCliInvocation invocation)

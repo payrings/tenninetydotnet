@@ -17,8 +17,9 @@
 #     TENNINETY_IMAGE_UID / TENNINETY_IMAGE_GID to override;
 #   - each built image is verified against the sandbox contract BEFORE its ID is printed:
 #     numeric non-root USER, NO ENTRYPOINT, (for coder images) the tool at the exact
-#     expected path /usr/local/bin/<tool>, (for the tester) the .NET SDK at the exact path
-#     /usr/bin/dotnet, and no common credential/host-configuration file present;
+#     expected path /usr/local/bin/<tool>, Git in the OpenCode image, (for the tester) the
+#     .NET SDK at the exact path /usr/bin/dotnet, and no common credential/host-configuration
+#     file present;
 #   - the exact local image ID (sha256:<64 hex>) is printed per image - copy it into
 #     .tenninety/config.json (sandbox.roles.coder.image / roles.reviewer.image /
 #     roles.tester.image). Digest-pinned registry references are equally valid; a local
@@ -114,6 +115,14 @@ for role in $requested
         docker run --rm --entrypoint /bin/sh $image -c "test -x $tool"
         or begin
             echo "CONTRACT VIOLATION: $image lacks the expected tool at $tool" >&2
+            exit 1
+        end
+    end
+    if test "$role" = opencode
+        docker run --rm --network none --entrypoint /bin/sh $image \
+            -c '/usr/local/bin/opencode --version >/dev/null && command -v git >/dev/null && git --version >/dev/null'
+        or begin
+            echo "CONTRACT VIOLATION: $image lacks working OpenCode or Git executables" >&2
             exit 1
         end
     end

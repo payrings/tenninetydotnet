@@ -510,8 +510,8 @@ public sealed class SandboxCoderGate : ICoderAgent
             exception);
 
     private static string Sanitize(string value) =>
-        Core.Security.Sanitizer.SanitizeText(value ?? "");
+        Core.Security.Sanitizer.SanitizeDiagnostic(value ?? "");
 
     private static string Bound(string value) =>
-        value.Length <= 2000 ? value : value[..1990] + "...[bounded]";
+        Core.Security.Sanitizer.SanitizeDiagnostic(value ?? "", 2000);
 }

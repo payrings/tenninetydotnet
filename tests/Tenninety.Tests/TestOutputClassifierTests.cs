@@ -128,12 +128,18 @@ public class TestOutputClassifierTests
     public void The_report_tail_is_bounded_and_sanitized()
     {
         // The secret sits inside the final 4000 characters so it is part of the tail.
-        var stdout = new string('a', 5000) + "\napiKey: supersecretvalue123\n" + new string('b', 3000);
+        var stdout = new string('a', 5000) +
+                     "\napiKey: supersecretvalue123\u001b[31m\r\0\u0085\n" +
+                     new string('b', 3000);
         var c = TestOutputClassifier.Classify(Result(stdout: stdout));
 
         Assert.True(c.ReportTail.Length <= TestOutputClassifier.MaxReportTailChars);
         Assert.DoesNotContain("supersecretvalue123", c.ReportTail);
         Assert.Contains("[REDACTED]", c.ReportTail);
+        Assert.DoesNotContain('\u001b', c.ReportTail);
+        Assert.DoesNotContain('\r', c.ReportTail);
+        Assert.DoesNotContain('\0', c.ReportTail);
+        Assert.DoesNotContain('\u0085', c.ReportTail);
     }
 
     [Fact]

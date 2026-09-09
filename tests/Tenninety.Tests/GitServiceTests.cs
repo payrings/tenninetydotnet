@@ -151,7 +151,91 @@ public class GitServiceTests : IDisposable
         Assert.Equal("work/WP-004", _git.CurrentBranch());
     }
 
+    [Fact]
+    public void Bounded_diff_returns_a_small_patch_exactly()
+    {
+        _git.CreateAndCheckoutBranch("work/small-diff");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "small.txt"), "small change\n");
+        _git.CommitAll("small diff");
+
+        var expected = RunGitRaw("diff", "main...work/small-diff");
+        var actual = _git.DiffPatchAgainstMain("work/small-diff", 10_000);
+
+        Assert.Equal(expected, actual);
+        Assert.DoesNotContain("[diff truncated", actual, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bounded_diff_retains_only_the_configured_head_and_tail_of_a_large_patch()
+    {
+        const int maxChars = 1000;
+        const string marker = "\n… [diff truncated – showing head and tail] …\n";
+        _git.CreateAndCheckoutBranch("work/large-diff");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "000-head.txt"),
+            "HEAD-SENTINEL\n" + new string('H', 250_000) + "\n");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "zzz-tail.txt"),
+            new string('T', 250_000) + "\nTAIL-SENTINEL\n");
+        _git.CommitAll("large diff");
+
+        var full = RunGitRaw("diff", "main...work/large-diff");
+        var actual = _git.DiffPatchAgainstMain("work/large-diff", maxChars);
+
+        Assert.True(full.Length > maxChars);
+        Assert.Equal(full[..750], actual[..750]);
+        Assert.EndsWith(full[^250..], actual, StringComparison.Ordinal);
+        Assert.Contains("HEAD-SENTINEL", actual, StringComparison.Ordinal);
+        Assert.Contains("TAIL-SENTINEL", actual, StringComparison.Ordinal);
+        Assert.Equal(maxChars + marker.Length, actual.Length);
+        Assert.Equal(1, actual.Split(marker, StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void Bounded_diff_decodes_valid_utf8_without_broken_surrogates_at_elision_boundaries()
+    {
+        _git.CreateAndCheckoutBranch("work/unicode-diff");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "unicode.txt"),
+            "UNICODE-START\n" + string.Concat(Enumerable.Repeat("🙂漢", 2000)) +
+            "\nUNICODE-TAIL-🙂-漢\n");
+        _git.CommitAll("unicode diff");
+
+        var patch = _git.DiffPatchAgainstMain("work/unicode-diff", 257);
+
+        Assert.Contains("[diff truncated", patch, StringComparison.Ordinal);
+        Assert.Contains("UNICODE-TAIL-🙂-漢", patch, StringComparison.Ordinal);
+        Assert.DoesNotContain('\uFFFD', patch);
+        for (var i = 0; i < patch.Length; i++)
+        {
+            if (char.IsHighSurrogate(patch[i]))
+            {
+                Assert.True(i + 1 < patch.Length && char.IsLowSurrogate(patch[i + 1]));
+                i++;
+            }
+            else
+                Assert.False(char.IsLowSurrogate(patch[i]));
+        }
+    }
+
+    [Fact]
+    public void Bounded_diff_preserves_git_failures()
+    {
+        var ex = Assert.Throws<GitException>(() =>
+            _git.DiffPatchAgainstMain("branch-that-does-not-exist", 1000));
+
+        Assert.Contains("git 'diff main...branch-that-does-not-exist' failed", ex.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Bounded_diff_rejects_non_positive_limits_before_running_git(int maxChars) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            _git.DiffPatchAgainstMain("work/anything", maxChars));
+
     private string RunGit(params string[] args)
+        => RunGitRaw(args).Trim();
+
+    private string RunGitRaw(params string[] args)
     {
         var start = new System.Diagnostics.ProcessStartInfo
         {
@@ -167,7 +251,7 @@ public class GitServiceTests : IDisposable
         var stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
         Assert.True(process.ExitCode == 0, stderr);
-        return stdout.Trim();
+        return stdout;
     }
 
     public void Dispose() => _tmp.Dispose();

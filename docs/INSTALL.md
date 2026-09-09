@@ -1403,7 +1403,9 @@ Rules:
 - `qwen-coder` and `devstral-reviewer` must exactly match the host llama-swap YAML keys.
 - The two aliases must continue to resolve to different GGUF files.
 - While `use_llama_swap=true`, the shared and per-role local endpoint fields are ignored.
-- The isolated path uses aider. OpenCode and Pi require their own provider transport setup.
+- This KVM `unsafe-host` recipe deliberately uses aider. In Tenninety's Docker mode, trusted
+  code generates OpenCode's inline provider document and Pi's tmpfs-home provider file from the
+  effective container endpoint; neither depends on host/user provider configuration.
 - This guide deliberately selects `sandbox.mode=unsafe-host` **inside the disposable KVM guest**
   because its reverse-tunnel endpoint is guest loopback and the VM is the outer execution
   boundary. For Tenninety's Docker boundary instead, follow `SANDBOX-CONFIG.example.jsonc`, make

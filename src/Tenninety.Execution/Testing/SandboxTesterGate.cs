@@ -1065,7 +1065,8 @@ public sealed class SandboxTesterGate : ITesterAgent
             ? ""
             : " retained: attempt '" + Path.GetFileName(cleanup.RetainedWorkspace) + "'");
 
-    private static string Sanitize(string value) => Core.Security.Sanitizer.SanitizeText(value ?? "");
+    private static string Sanitize(string value) =>
+        Core.Security.Sanitizer.SanitizeDiagnostic(value ?? "");
 
     /// <summary>
     /// The complete-message limit for EVERY public Tester diagnostic: exception messages,

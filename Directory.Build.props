@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <!-- 10/90 v3.2 targets the latest .NET: .NET 10 (TFM net10.0) with C# 14. -->
+    <!-- 10/90 targets .NET 10 (TFM net10.0) with C# 14. -->
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>14.0</LangVersion>
     <Nullable>enable</Nullable>

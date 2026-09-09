@@ -76,6 +76,24 @@ public static partial class Sanitizer
         return new string(text.Where(IsSafeDiagnosticChar).ToArray());
     }
 
+    /// <summary>Diagnostic sanitization with an explicit final character bound. The bound is
+    /// applied after redaction/control removal so replacement text cannot grow past it.</summary>
+    public static string SanitizeDiagnostic(string input, int maxChars)
+    {
+        if (maxChars <= 0) throw new ArgumentOutOfRangeException(nameof(maxChars));
+        var text = SanitizeDiagnostic(input);
+        if (text.Length <= maxChars) return text;
+        const string marker = "...[truncated]";
+        var keep = Math.Max(0, maxChars - marker.Length);
+        var prefix = text[..keep];
+        if (prefix.Length > 0 && char.IsHighSurrogate(prefix[^1])) prefix = prefix[..^1];
+        if (keep > 0) return prefix + marker;
+        var bounded = text[..maxChars];
+        return bounded.Length > 0 && char.IsHighSurrogate(bounded[^1])
+            ? bounded[..^1]
+            : bounded;
+    }
+
     private static bool IsSafeDiagnosticChar(char c) =>
         c is '\n' or '\t' ||
         (!char.IsControl(c) && c is not (>= '\u0080' and <= '\u009F'));

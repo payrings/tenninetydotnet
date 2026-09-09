@@ -155,9 +155,9 @@ dotnet publish src/Tenninety.Cli -c Release -o ./dist   # optional self-containe
 Binary name is `tenninety` (`AssemblyName` in `Tenninety.Cli.csproj`). For ad-hoc runs:
 `dotnet run --project src/Tenninety.Cli -- <command>`.
 
-All targets pin through `Directory.Build.props` (`net10.0`, `LangVersion=14.0`). C# 14 is
-used deliberately in two places: extension members (`CoderResultExtensions`) and
-`field`-backed clamped properties (`TenNinetyConfig` budgets).
+All targets pin through `Directory.Build.props` (`net10.0`, `LangVersion=14.0`). C# 14 is used
+deliberately for extension members (`CoderResultExtensions`). Configuration budgets use normal
+properties and explicit validation; out-of-range persisted values are rejected, never clamped.
 
 ---
 
@@ -201,7 +201,7 @@ catches drift cheaply.
 | --- | --- | --- |
 | `spec.md` | yes | source of truth |
 | `.tenninety/plan.json` | yes | execution graph (schema_version `1`); never mutated by the engine |
-| `.tenninety/config.json` | yes | budgets/models/endpoints; budget fields clamp on deserialize (`field`-backed setters) |
+| `.tenninety/config.json` | yes | budgets/models/endpoints; explicit out-of-range values are rejected during strict load |
 | `.tenninety/state.json` | **no** | current WP, attempt bookkeeping, `queue_status`, paused/stop flags |
 | `.tenninety/audit-log.jsonl` | **no** | append-only events; feeds pivots, repair requests, `[L]` view |
 
@@ -324,11 +324,13 @@ verified mechanically; operators must confirm what each endpoint serves.
 `llama_swap_endpoint`; the sandboxed Coder routes through `llama_swap_coder_endpoint`. Both are
 validated on use – malformed, credential-bearing or (container-side) loopback values fail
 closed. With llama-swap disabled, the coder keeps `sandbox.roles.coder.model_endpoint` and host
-roles keep the shared/per-role fallback. OpenCode owns its provider transport, so configure its
-provider/model for that proxy separately; the containerized Pi needs no manual provider setup —
-trusted code generates Pi's supported `~/.pi/agent/models.json` (custom-provider file) inside
-the container's bounded tmpfs home, pointing at the effective endpoint with the configured
-`pi.model`.
+roles keep the shared/per-role fallback. Containerized OpenCode and Pi need no host/user provider
+configuration. Trusted code serializes OpenCode's inline provider in
+`OPENCODE_CONFIG_CONTENT`, mapping the configured `provider/model` exactly to the effective
+endpoint through `@ai-sdk/openai-compatible`; its `apiKey` is the literal
+`{env:OPENAI_API_KEY}` reference, never the key. Trusted code similarly generates Pi's supported
+`~/.pi/agent/models.json` inside the bounded tmpfs home, pointing at the effective endpoint with
+the configured `pi.model`.
 
 Framework secrets are env-var only: `TENNINETY_FRONTIER_API_KEY` (Frontier calls) and optional
 `TENNINETY_LOCAL_API_KEY` (framework Reviewer plus aider, translated to `OPENAI_API_KEY`).
@@ -349,7 +351,9 @@ endpoint is `llama_swap_coder_endpoint` (`http://llama-swap:8080/v1` – the con
 the internal network; host loopback is rejected there). With llama-swap disabled, the coder's
 `sandbox.roles.coder.model_endpoint` (e.g. a dedicated model-server container on the model
 network) applies instead. Live coding requires the selected coding-agent CLI in the
-digest-pinned Coder image.
+digest-pinned Coder image. Before any Coder probe, preflight strictly parses Docker's network
+inspect shape and requires the model network's `Internal` field to be the boolean `true`;
+missing, malformed, duplicated, wrong-typed or false evidence fails closed.
 
 **NVIDIA alternative:** the same compose works for a single NVIDIA card. Override
 `TENNINETY_LLAMA_SWAP_IMAGE` (upstream also publishes `unified-cuda`/`unified-cuda13`) and add a

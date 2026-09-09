@@ -72,6 +72,32 @@ public class DockerInspectParsingTests
     private static DockerContainerDetailed Parse(string json) =>
         DockerContainerDetailed.FromJson(Encoding.UTF8.GetBytes(json));
 
+    private static DockerNetworkInfo ParseNetwork(string json) =>
+        DockerNetworkInfo.FromJson(Encoding.UTF8.GetBytes(json));
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Network_internal_boolean_is_strictly_parsed(bool internalNetwork)
+    {
+        var network = ParseNetwork(
+            "[{\"Name\":\"tenninety-coder-model\",\"Id\":\"net-1\"," +
+            "\"Driver\":\"bridge\",\"Internal\":" +
+            internalNetwork.ToString().ToLowerInvariant() + "}]");
+
+        Assert.Equal(internalNetwork, network.Internal);
+        Assert.False(network.IsReserved);
+    }
+
+    [Theory]
+    [InlineData("[{\"Name\":\"net\",\"Id\":\"id\",\"Driver\":\"bridge\"}]")]
+    [InlineData("[{\"Name\":\"net\",\"Id\":\"id\",\"Driver\":\"bridge\",\"Internal\":\"true\"}]")]
+    [InlineData("[{\"Name\":\"net\",\"Id\":\"id\",\"Driver\":\"bridge\",\"Internal\":null}]")]
+    [InlineData("[{\"Name\":\"net\",\"Id\":\"id\",\"Driver\":\"bridge\",\"Internal\":true,\"Internal\":false}]")]
+    [InlineData("[{\"Name\":\"net\",\"Id\":\"id\",\"Driver\":\"bridge\",\"Internal\":true")]
+    public void Network_internal_missing_wrong_duplicate_or_malformed_fails_closed(string json) =>
+        Assert.Throws<InvalidOperationException>(() => ParseNetwork(json));
+
     // ---- valid null / empty representations parse successfully ---------------------
 
     [Fact]

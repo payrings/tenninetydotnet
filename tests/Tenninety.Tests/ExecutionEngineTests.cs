@@ -395,6 +395,40 @@ public class ExecutionEngineTests
     }
 
     [Fact]
+    public async Task Coder_exception_callback_and_persisted_feedback_are_diagnostic_safe_and_bounded()
+    {
+        using var h = new EngineHarness(maxAttempts: 1, maxTotal: 1);
+        const string secret = "supersecretvalue123";
+        var hostile = "apiKey=" + secret + "\u001b[31m\r\0\u0085" + new string('x', 5000);
+        var logs = new List<string>();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), new MessageThrowingCoder(hostile),
+            new ScriptedReviewer(0), new ScriptedTester(0), h.States, h.Audit,
+            globalContext: null, logs.Add);
+
+        var outcome = await engine.ExecuteWpAsync(
+            h.Plan.WorkPackages[0], h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Blocked, outcome);
+        var diagnostic = Assert.Single(logs, line => line.Contains("coder exception"));
+        AssertDiagnosticSafe(diagnostic, secret, 4000);
+        var feedback = Assert.Single(h.States.Load().Attempts["WP-001"].Feedback);
+        AssertDiagnosticSafe(feedback, secret, 4000);
+        var audit = Assert.Single(h.Audit.ReadTail(20), entry => entry.Event == "CODER_FAILED");
+        AssertDiagnosticSafe(audit.Detail, secret, AuditLog.MaxDetailChars);
+    }
+
+    private static void AssertDiagnosticSafe(string value, string secret, int maxChars)
+    {
+        Assert.True(value.Length <= maxChars);
+        Assert.DoesNotContain(secret, value, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u001b', value);
+        Assert.DoesNotContain('\r', value);
+        Assert.DoesNotContain('\0', value);
+        Assert.DoesNotContain('\u0085', value);
+    }
+
+    [Fact]
     public async Task Docker_reviewer_cancellation_never_checkpoints_authoritative_dirt()
     {
         using var h = new EngineHarness();
@@ -449,6 +483,13 @@ public class ExecutionEngineTests
         public Task<CoderResult> ImplementAsync(
             CoderRunContext ctx, CancellationToken ct = default) =>
             throw new CoderInfrastructureException("simulated Docker startup failure");
+    }
+
+    private sealed class MessageThrowingCoder(string message) : ICoderAgent
+    {
+        public Task<CoderResult> ImplementAsync(
+            CoderRunContext ctx, CancellationToken ct = default) =>
+            throw new InvalidOperationException(message);
     }
 
     private sealed class CancellingMutatingReviewer(

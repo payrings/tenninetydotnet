@@ -350,9 +350,9 @@ public sealed class SandboxPromotionConfig
             throw new InvalidOperationException(
                 $"sandbox.promotion.max_changed_files must be within [1, 1000000] but is " +
                 $"{MaxChangedFiles}.");
-        if (MaxPatchMb is < 1 or > 4_096)
+        if (MaxPatchMb is < 1 or > 1_024)
             throw new InvalidOperationException(
-                $"sandbox.promotion.max_patch_mb must be within [1, 4096] but is {MaxPatchMb}.");
+                $"sandbox.promotion.max_patch_mb must be within [1, 1024] but is {MaxPatchMb}.");
         if (AllowSymlinkChanges)
             throw new InvalidOperationException(
                 "sandbox.promotion.allow_symlink_changes is not supported in v1: symlink and " +

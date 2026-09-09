@@ -271,6 +271,18 @@ public sealed class StrictConfigIngestionTests : IDisposable
         Assert.Equal(1, config.MaxConcurrentWorkers);
     }
 
+    [Fact]
+    public void Promotion_patch_limit_boundary_is_enforced_during_strict_ingestion()
+    {
+        Write("""{ "sandbox": { "promotion": { "max_patch_mb": 1024 } } }""");
+        Assert.Equal(1024, _store.Load().Sandbox.Promotion.MaxPatchMb);
+
+        Write("""{ "sandbox": { "promotion": { "max_patch_mb": 1025 } } }""");
+        var ex = LoadError();
+        Assert.Contains("sandbox.promotion.max_patch_mb", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("[1, 1024]", ex.Message, StringComparison.Ordinal);
+    }
+
     // ---- retry-threshold relationships (issue 8) ----------------------------------------------
 
     [Fact]

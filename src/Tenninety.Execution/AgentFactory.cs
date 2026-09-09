@@ -51,7 +51,14 @@ public sealed class AgentFactory
         var key = baseUrl.EndsWith('/') ? baseUrl : baseUrl + "/";
         return SharedClients.GetOrAdd(key, url =>
         {
-            var client = new HttpClient { BaseAddress = new Uri(url) };
+            // Attempt budgets are enforced by the caller's cancellation token. Disabling the
+            // unrelated 100-second HttpClient default prevents long configured attempts from
+            // being cut off early while retaining explicit cancellation.
+            var client = new HttpClient
+            {
+                BaseAddress = new Uri(url),
+                Timeout = Timeout.InfiniteTimeSpan,
+            };
             var key2 = Environment.GetEnvironmentVariable("TENNINETY_LOCAL_API_KEY");
             if (!string.IsNullOrEmpty(key2))
                 client.DefaultRequestHeaders.Authorization =

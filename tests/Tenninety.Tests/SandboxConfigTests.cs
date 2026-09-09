@@ -418,7 +418,21 @@ public class SandboxConfigTests
         AssertOutOfBounds(s => s.MaxWorkspaceMb = 2_097_152);
         AssertOutOfBounds(s => s.Promotion.MaxChangedFiles = 0);
         AssertOutOfBounds(s => s.Promotion.MaxPatchMb = 0);
-        AssertOutOfBounds(s => s.Promotion.MaxPatchMb = 8192);
+        AssertOutOfBounds(s => s.Promotion.MaxPatchMb = 1025);
+    }
+
+    [Fact]
+    public void Promotion_patch_limit_accepts_1024_and_rejects_1025()
+    {
+        var accepted = LiveDockerConfig();
+        accepted.Promotion.MaxPatchMb = 1024;
+        accepted.ValidateStructural();
+
+        var rejected = LiveDockerConfig();
+        rejected.Promotion.MaxPatchMb = 1025;
+        var ex = Assert.Throws<InvalidOperationException>(rejected.ValidateStructural);
+        Assert.Contains("sandbox.promotion.max_patch_mb", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("[1, 1024]", ex.Message, StringComparison.Ordinal);
     }
 
     private static void AssertOutOfBounds(Action<SandboxConfig> mutate)
@@ -636,7 +650,7 @@ public class SandboxConfigTests
         original.MaxWorkspaceMb = 8192;
         original.ModelNetwork = "custom-model-net";
         original.Promotion.MaxChangedFiles = 500;
-        original.Promotion.MaxPatchMb = 32;
+        original.Promotion.MaxPatchMb = 1024;
         original.Promotion.AllowSensitivePaths.Add("Dockerfile");
         original.Roles.Coder.ModelEndpoint = "http://coder-model:8000/v1";
         original.Roles.Coder.Cpus = 2.5;

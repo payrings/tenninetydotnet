@@ -58,7 +58,7 @@ public static partial class TestOutputClassifier
         var zeroTests = result.Succeeded && ZeroTestsOutput().IsMatch(combined);
         // Sanitize the complete output BEFORE selecting the presentation tail so bounding can
         // never strip a secret's identifying prefix while retaining its value.
-        var tail = FinalBound(Core.Security.Sanitizer.SanitizeText(combined));
+        var tail = FinalBound(Core.Security.Sanitizer.SanitizeDiagnostic(combined));
 
         var reason = (result.TimedOut, result.Cancelled, result.OomKilled, result.OutputTruncated) switch
         {
@@ -100,7 +100,7 @@ public static partial class TestOutputClassifier
                      classification.OperationalReason.Length == 0 &&
                      !(zeroTestsFailClosed && classification.ZeroTestsDetected),
             ExitCode = zero ? -1 : classification.ExitCode,
-            Command = commandLabel,
+            Command = Core.Security.Sanitizer.SanitizeDiagnostic(commandLabel ?? "", 1000),
             OutputTail = FinalBound(tail),
             CandidateSha = candidateSha,
         };
@@ -108,6 +108,10 @@ public static partial class TestOutputClassifier
 
     /// <summary>The final presentation bound: applied LAST, after every operational reason,
     /// zero-test explanation and build-failure suffix has been appended.</summary>
-    public static string FinalBound(string value) =>
-        value.Length <= MaxReportTailChars ? value : value[^MaxReportTailChars..];
+    public static string FinalBound(string value)
+    {
+        if (value.Length <= MaxReportTailChars) return value;
+        var tail = value[^MaxReportTailChars..];
+        return tail.Length > 0 && char.IsLowSurrogate(tail[0]) ? tail[1..] : tail;
+    }
 }

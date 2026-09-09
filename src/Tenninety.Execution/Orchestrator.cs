@@ -193,18 +193,18 @@ public sealed class Orchestrator
 
         var message = string.Join(" | ", detail);
         _audit.Append("QUEUE_DEADLOCKED", detail: message);
-        _log?.Invoke($"Queue deadlocked — no executable WP is ready. {message}");
+        Log($"Queue deadlocked — no executable WP is ready. {message}");
         return OrchestratorExit.Deadlocked;
     }
 
     private void NotifyActionRequired(WorkPackage wp) =>
-        _log?.Invoke($"ACTION REQUIRED: '{wp.Id}' is BLOCKED after {_config.MaxTotalAttempts} attempts.");
+        Log($"ACTION REQUIRED: '{wp.Id}' is BLOCKED after {_config.MaxTotalAttempts} attempts.");
 
     public void Pause()
     {
         ExecutionControl.SetPause(_git.RepoPath);
         _audit.Append("PAUSED_REQUESTED");
-        _log?.Invoke("pause requested");
+        Log("pause requested");
     }
 
     public void Resume()
@@ -214,13 +214,13 @@ public sealed class Orchestrator
         _state.StopRequested = false;
         Persist();
         _audit.Append("RESUMED");
-        _log?.Invoke("resumed");
+        Log("resumed");
     }
 
     public void RequestStop()
     {
         ExecutionControl.SetStop(_git.RepoPath);
-        _log?.Invoke("stop requested – daemon will halt at the next safe point");
+        Log("stop requested – daemon will halt at the next safe point");
     }
 
     private void Persist()
@@ -275,4 +275,7 @@ public sealed class Orchestrator
         foreach (var wp in _plan.WorkPackages)
             _state.QueueStatus[wp.Id] = wp.Status;
     }
+
+    private void Log(string message) => _log?.Invoke(
+        Core.Security.Sanitizer.SanitizeDiagnostic(message ?? "", 4000));
 }

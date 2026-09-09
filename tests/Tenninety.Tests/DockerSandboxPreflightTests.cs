@@ -411,6 +411,54 @@ public class DockerSandboxPreflightTests : IDisposable
     }
 
     [Fact]
+    public async Task Internal_model_network_passes_existing_preflight_behavior()
+    {
+        var cfg = LiveConfig();
+        var transport = new PreflightFakeTransport(cfg);
+
+        var report = await MakePreflight(transport, cfg).RunAsync();
+
+        Assert.True(report.Passed, string.Join("; ", report.Errors));
+        Assert.Equal(3, transport.CreatedProbes);
+    }
+
+    [Fact]
+    public async Task Non_internal_model_network_fails_before_live_probes()
+    {
+        var cfg = LiveConfig();
+        var transport = new PreflightFakeTransport(cfg)
+        {
+            NetworkInspectJsonOverride =
+                "[{\"Name\":\"tenninety-coder-model\",\"Id\":\"" +
+                PreflightFakeTransport.NetworkIdFixed +
+                "\",\"Driver\":\"bridge\",\"Internal\":false}]",
+        };
+
+        var report = await MakePreflight(transport, cfg).RunAsync();
+
+        Assert.False(report.Passed);
+        Assert.Contains(report.Errors, error => error.Contains("not an internal Docker network"));
+        Assert.Equal(0, transport.CreatedProbes);
+    }
+
+    [Theory]
+    [InlineData("[{\"Name\":\"tenninety-coder-model\",\"Id\":\"id\",\"Driver\":\"bridge\"}]")]
+    [InlineData("[{\"Name\":\"tenninety-coder-model\",\"Id\":\"id\",\"Driver\":\"bridge\",\"Internal\":\"true\"}]")]
+    [InlineData("[{\"Name\":\"tenninety-coder-model\",\"Id\":\"id\",\"Driver\":\"bridge\",\"Internal\":true,\"Internal\":false}]")]
+    [InlineData("[{\"Name\":\"tenninety-coder-model\"")]
+    public async Task Untrustworthy_model_network_inspect_fails_before_live_probes(string json)
+    {
+        var cfg = LiveConfig();
+        var transport = new PreflightFakeTransport(cfg) { NetworkInspectJsonOverride = json };
+
+        var report = await MakePreflight(transport, cfg).RunAsync();
+
+        Assert.False(report.Passed);
+        Assert.Contains(report.Errors, error => error.Contains("could not be inspected"));
+        Assert.Equal(0, transport.CreatedProbes);
+    }
+
+    [Fact]
     public async Task Reserved_model_network_is_rejected_without_any_network_call()
     {
         var cfg = LiveConfig();
@@ -488,6 +536,47 @@ public class DockerSandboxPreflightTests : IDisposable
         var restoreCreate = transport.Creates[3].Arguments.ToList();
         Assert.Equal("tenninety-restore", restoreCreate[restoreCreate.IndexOf("--network") + 1]);
         Assert.Contains("tenninety.role=restore", restoreCreate);
+    }
+
+    [Fact]
+    public async Task Restore_network_behavior_does_not_require_internal_true()
+    {
+        var cfg = LiveConfig();
+        cfg.Roles.Tester.Restore.Enabled = true;
+        cfg.Roles.Tester.Restore.NetworkName = "tenninety-restore";
+        cfg.Roles.Tester.Restore.ProxyUrl = "http://restore-proxy:3128";
+        cfg.Roles.Tester.Restore.ApprovedFeeds = ["https://api.nuget.org/v3/index.json"];
+        cfg.Roles.Tester.Restore.Acceptance = new SandboxRestoreAcceptance
+        {
+            Version = SandboxRestoreAcceptance.CurrentVersion,
+            Accepted = true,
+            Repository = "repository",
+            Instance = "instance",
+            ExpiresUtc = DateTimeOffset.UtcNow.AddHours(1).ToString("O"),
+            NetworkId = PreflightFakeTransport.NetworkIdFixed,
+            FirewallProfile = "restore-egress-v1",
+            StorageQuotaId = "restore-quota-v1",
+            StorageQuotaBytes = 8L * 1024 * 1024 * 1024,
+            HardQuotaEnforced = true,
+            OperatorAcknowledged = true,
+        };
+        cfg.Roles.Tester.Restore.Acceptance.FeedPolicySha256 =
+            cfg.Roles.Tester.Restore.ComputeFeedPolicySha256();
+        var transport = new PreflightFakeTransport(cfg)
+        {
+            NetworkInspectJsonOverride =
+                "[{\"Name\":\"tenninety-restore\",\"Id\":\"" +
+                PreflightFakeTransport.NetworkIdFixed +
+                "\",\"Driver\":\"bridge\",\"Internal\":false}]",
+        };
+        var preflight = new DockerSandboxPreflight(
+            new DockerCli(transport), cfg, _managedRoot.Root, _repo.Root,
+            ownedManagedRoot: false, requiredRoles: SandboxLiveRoles.Tester);
+
+        var report = await preflight.RunAsync();
+
+        Assert.True(report.Passed, string.Join("; ", report.Errors));
+        Assert.Equal(2, transport.CreatedProbes);
     }
 
     // ---- probe verification (effective settings) -----------------------------------------------

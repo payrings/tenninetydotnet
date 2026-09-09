@@ -210,6 +210,29 @@ public class StoreRoundTripTests
             Assert.True(doc.RootElement.TryGetProperty("event", out _));
         }
     }
+
+    [Fact]
+    public void Audit_log_sanitizes_and_bounds_every_public_text_field()
+    {
+        using var tmp = new TempDir();
+        const string secret = "supersecretvalue123";
+        var hostile = "safe\u001b[31m\r\0\u0085 apiKey=" + secret + " " +
+                      new string('x', AuditLog.MaxDetailChars + 1000);
+        var audit = new AuditLog(tmp.Path("audit-log.jsonl"));
+
+        audit.Append("EVENT\u001b", "WP\r001", hostile);
+
+        var entry = Assert.Single(audit.ReadTail());
+        Assert.Equal("EVENT", entry.Event);
+        Assert.Equal("WP001", entry.WorkPackageId);
+        Assert.True(entry.Detail.Length <= AuditLog.MaxDetailChars);
+        Assert.DoesNotContain(secret, entry.Detail, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", entry.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u001b', entry.Detail);
+        Assert.DoesNotContain('\r', entry.Detail);
+        Assert.DoesNotContain('\0', entry.Detail);
+        Assert.DoesNotContain('\u0085', entry.Detail);
+    }
 }
 
 public sealed class TempDir : IDisposable

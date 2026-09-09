@@ -496,6 +496,7 @@ public sealed record DockerNetworkInfo(
     string Name,
     string Id,
     string Driver,
+    bool Internal,
     bool IsReserved)
 {
     public static DockerNetworkInfo FromJson(byte[] inspectJson)
@@ -508,9 +509,10 @@ public sealed record DockerNetworkInfo(
             var name = DockerJsonParsing.GetRequiredString(root, "Name");
             var id = DockerJsonParsing.GetRequiredString(root, "Id");
             var driver = DockerJsonParsing.GetRequiredString(root, "Driver");
+            var internalNetwork = DockerJsonParsing.GetRequiredBool(root, "Internal");
             var isReserved = new[] { "host", "bridge", "none", "default" }.Contains(
                 name, StringComparer.OrdinalIgnoreCase);
-            return new DockerNetworkInfo(name, id, driver, isReserved);
+            return new DockerNetworkInfo(name, id, driver, internalNetwork, isReserved);
         }
         catch (Exception ex) when (ex is not InvalidOperationException)
         {

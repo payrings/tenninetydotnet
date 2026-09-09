@@ -68,6 +68,42 @@ public sealed class ProgramTests
         Assert.Contains("unknown command 'frobnicate'", error);
     }
 
+    [Fact]
+    public async Task Unknown_command_diagnostic_is_sanitized_and_bounded_before_terminal_output()
+    {
+        const string secret = "supersecretvalue123";
+        var command = "apiKey=" + secret + "\u001b[31m\r\0\u0085" + new string('x', 5000);
+
+        var (exitCode, error) = await RunMain([command]);
+
+        Assert.Equal(2, exitCode);
+        Assert.True(error.Length < 2000);
+        Assert.DoesNotContain(secret, error, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", error, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u001b', error);
+        Assert.DoesNotContain('\r', error);
+        Assert.DoesNotContain('\0', error);
+        Assert.DoesNotContain('\u0085', error);
+    }
+
+    [Fact]
+    public async Task Top_level_exception_diagnostic_is_sanitized_and_bounded_before_terminal_output()
+    {
+        const string secret = "supersecretvalue123";
+        var hostileArgument = "apiKey=" + secret + "\u001b[31m\r\0\u0085" + new string('x', 5000);
+
+        var (exitCode, error) = await RunMain(["status", hostileArgument]);
+
+        Assert.Equal(2, exitCode);
+        Assert.True(error.Length <= 4001);
+        Assert.DoesNotContain(secret, error, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", error, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u001b', error);
+        Assert.DoesNotContain('\r', error);
+        Assert.DoesNotContain('\0', error);
+        Assert.DoesNotContain('\u0085', error);
+    }
+
     [Theory]
     [InlineData("-p")]
     [InlineData("-1")]

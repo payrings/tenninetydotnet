@@ -79,7 +79,7 @@ public sealed class ExecutionEngine
             if (!_git.IsClean() && (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock"))
             {
                 _git.CommitAll($"{wp.Id}: wip checkpoint");
-                _log?.Invoke($"[{wp.Id}] committed leftover working-tree changes as a WIP checkpoint");
+                Log($"[{wp.Id}] committed leftover working-tree changes as a WIP checkpoint");
             }
             else if (!_git.IsClean())
             {
@@ -100,7 +100,7 @@ public sealed class ExecutionEngine
             SyncQueue(state, wp.Id, TenNinety.WpStatus.Active);
             Persist(state);
             _audit.Append("WP_STARTED", wp.Id, $"branch={branch}");
-            _log?.Invoke($"[{wp.Id}] started on branch '{branch}'");
+            Log($"[{wp.Id}] started on branch '{branch}'");
 
             while (true)
             {
@@ -115,7 +115,7 @@ public sealed class ExecutionEngine
                     info.Total++;
                 }
                 Persist(state);
-                _log?.Invoke($"[{wp.Id}] attempt {info.Total} (phase count {info.Count}/{info.Max})");
+                Log($"[{wp.Id}] attempt {info.Total} (phase count {info.Count}/{info.Max})");
 
                 // 1. CODER
                 var coderBase = new CandidateRevision(branch, _git.HeadSha(), expectedMainSha);
@@ -145,7 +145,7 @@ public sealed class ExecutionEngine
                     RecordFailure(info, TenNinety.FailureTypes.Coder,
                         Sanitise($"coder exception: {ex.Message}"));
                     _audit.Append("CODER_FAILED", wp.Id, Truncate(Sanitise(ex.Message), 200));
-                    _log?.Invoke($"[{wp.Id}] coder exception: {ex.Message}");
+                    Log($"[{wp.Id}] coder exception: {ex.Message}");
                     if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
                     continue;
                 }
@@ -155,7 +155,7 @@ public sealed class ExecutionEngine
                 if (sha is null &&
                     (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock"))
                     sha = _git.CommitAll(
-                        $"{wp.Id}: {Truncate(Sanitise(code.Summary), 80)} [attempt {info.Total}]");
+                        $"{wp.Id}: {Diagnostic(code.Summary, 80)} [attempt {info.Total}]");
                 if (sha is null || !code.ProducesRealChange)
                 {
                     RecordFailure(info, TenNinety.FailureTypes.Coder,
@@ -213,7 +213,7 @@ public sealed class ExecutionEngine
                         RecordFeedback(info, TenNinety.FailureTypes.Reviewer, Sanitise(reason));
                     _audit.Append("REVIEW_FAILED", wp.Id,
                         Truncate(Sanitise(string.Join(" | ", review.Reasons.Take(3))), 500));
-                    _log?.Invoke($"[{wp.Id}] review FAILED ({review.Reasons.Count} reasons)");
+                    Log($"[{wp.Id}] review FAILED ({review.Reasons.Count} reasons)");
                     if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
                     continue;
                 }
@@ -255,7 +255,7 @@ public sealed class ExecutionEngine
                     RecordFeedback(info, TenNinety.FailureTypes.Tester,
                         Sanitise($"tests exited {test.ExitCode}. Output tail:\n{test.OutputTail}"));
                     _audit.Append("TESTS_FAILED", wp.Id, $"exit={test.ExitCode}");
-                    _log?.Invoke($"[{wp.Id}] tests FAILED (exit {test.ExitCode})");
+                    Log($"[{wp.Id}] tests FAILED (exit {test.ExitCode})");
                     if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
                     continue;
                 }
@@ -268,7 +268,7 @@ public sealed class ExecutionEngine
                     RecordFeedback(info, TenNinety.FailureTypes.Tester,
                         "the tester did not return the exact requested candidate identity; refusing the gate.");
                     _audit.Append("TESTS_FAILED", wp.Id, "candidate identity missing or mismatched");
-                    _log?.Invoke($"[{wp.Id}] tests rejected: candidate identity missing or mismatched");
+                    Log($"[{wp.Id}] tests rejected: candidate identity missing or mismatched");
                     if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
                     continue;
                 }
@@ -292,7 +292,7 @@ public sealed class ExecutionEngine
                 _audit.Append("WP_PROMOTED", wp.Id,
                     $"merge={mergeSha[..Math.Min(12, mergeSha.Length)]} " +
                     $"branchTip={branchTip[..Math.Min(12, branchTip.Length)]}");
-                _log?.Invoke($"[{wp.Id}] PASSED — promoted to main");
+                Log($"[{wp.Id}] PASSED — promoted to main");
                 return WpOutcome.Done;
             }
         }
@@ -338,7 +338,7 @@ public sealed class ExecutionEngine
         SyncQueue(state, wp.Id, TenNinety.WpStatus.Pending);
         Persist(state);
         _audit.Append("PAUSED", wp.Id, $"attempt {GetAttemptInfo(state, wp.Id).Total}");
-        _log?.Invoke($"[{wp.Id}] paused — state saved");
+        Log($"[{wp.Id}] paused — state saved");
         return WpOutcome.Paused;
     }
 
@@ -359,13 +359,13 @@ public sealed class ExecutionEngine
             SyncQueue(state, wp.Id, TenNinety.WpStatus.Blocked);
             Persist(state);
             _audit.Append("WP_BLOCKED", wp.Id, $"{info.Total} failed attempts — human action required");
-            _log?.Invoke($"[{wp.Id}] BLOCKED after {info.Total} attempts");
+            Log($"[{wp.Id}] BLOCKED after {info.Total} attempts");
             return true;
         }
 
         if (info.Count >= info.Max)
         {
-            _log?.Invoke($"[{wp.Id}] escalating to Frontier for repair advice…");
+            Log($"[{wp.Id}] escalating to Frontier for repair advice…");
             var request = new RepairRequest(
                 wp, info.Total, info.Feedback,
                 info.Advice.LastOrDefault(),
@@ -391,7 +391,7 @@ public sealed class ExecutionEngine
             if (info.Feedback.Count > 20) info.Feedback = info.Feedback.TakeLast(20).ToList();
             Persist(state);
             _audit.Append("ESCALATION_ADVICE", wp.Id, Truncate(advice.Analysis, 200));
-            _log?.Invoke($"[{wp.Id}] advice injected — local counter reset");
+            Log($"[{wp.Id}] advice injected — local counter reset");
         }
 
         return false;
@@ -458,13 +458,14 @@ public sealed class ExecutionEngine
 
     private static void RecordFailure(AttemptInfo info, string type, string reason)
     {
+        reason = Diagnostic(reason);
         info.LastFailureType = type;
         info.LastFailureReasons = new List<string> { reason };
         RecordFeedback(info, type, reason);
     }
 
     private static void RecordFeedback(AttemptInfo info, string type, string reason) =>
-        info.Feedback.Add($"[{type}] {reason}");
+        info.Feedback.Add(Diagnostic($"[{type}] {reason}"));
 
     private void Persist(RuntimeState state) => _stateStore.Save(state);
 
@@ -486,7 +487,7 @@ public sealed class ExecutionEngine
         if (!_git.IsClean())
             throw new InvalidOperationException(
                 $"could not checkpoint all interrupted changes for '{wpId}'; work branch retained.");
-        _log?.Invoke($"[{wpId}] checkpointed partial work after {reason}");
+        Log($"[{wpId}] checkpointed partial work after {reason}");
     }
 
     private string SafeDiff(string wpId)
@@ -496,6 +497,11 @@ public sealed class ExecutionEngine
     }
 
     private static string Sanitise(string s) => Core.Security.Sanitizer.SanitizeText(s ?? "");
+
+    private static string Diagnostic(string value, int maxChars = 4000) =>
+        Core.Security.Sanitizer.SanitizeDiagnostic(value ?? "", maxChars);
+
+    private void Log(string message) => _log?.Invoke(Diagnostic(message));
 
     private void EnsureBranchAndBaseUnchanged(
         string branch, string expectedMainSha, string stage, bool requireClean = false)

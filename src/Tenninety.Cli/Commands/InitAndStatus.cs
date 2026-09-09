@@ -17,7 +17,8 @@ public static class InitCommand
         var existing = PrepareExistingRepository(root);
         if (existing.Error is { } error)
         {
-            AnsiConsole.MarkupLine($"[red]{Markup.Escape(error)}[/]");
+            AnsiConsole.MarkupLine(
+                $"[red]{Markup.Escape(Sanitizer.SanitizeDiagnostic(error, 4000))}[/]");
             return 1;
         }
 
@@ -73,7 +74,9 @@ public static class InitCommand
         if (ws.Config.ProviderMode.Equals("mock", StringComparison.OrdinalIgnoreCase))
             AnsiConsole.MarkupLine(
                 "[yellow]provider_mode=mock:[/] frontier + local agents are simulated offline. " +
-                $"Set provider_mode and {Markup.Escape(ws.Config.FrontierApiKeyEnv)} for live models.");
+                $"Set provider_mode and " +
+                $"{Markup.Escape(Sanitizer.SanitizeDiagnostic(ws.Config.FrontierApiKeyEnv, 256))} " +
+                "for live models.");
         return 0;
     }
 
@@ -175,15 +178,18 @@ public static class StatusCommand
         var health = new Grid();
         health.AddColumn(); health.AddColumn(); health.AddColumn(); health.AddColumn();
         health.AddRow(
-            new Markup($"[b]Project[/] {Markup.Escape(plan.ProjectName)}"),
-            new Markup($"[b]Mode[/] {Markup.Escape(state.ExecutionMode)}{(state.Paused ? " [red](PAUSED)[/]" : "")}"),
-            new Markup($"[b]Provider[/] {Markup.Escape(ws.Config.ProviderMode)}{(ws.Config.UseLlamaSwap ? " + llama-swap" : "")}"),
-            new Markup($"[b]Models[/] {Markup.Escape(ws.Config.LocalModels.Coder)} / {Markup.Escape(ws.Config.LocalModels.Reviewer)}"));
+            new Markup($"[b]Project[/] {Markup.Escape(Diagnostic(plan.ProjectName, 512))}"),
+            new Markup($"[b]Mode[/] {Markup.Escape(Diagnostic(state.ExecutionMode, 64))}" +
+                       (state.Paused ? " [red](PAUSED)[/]" : "")),
+            new Markup($"[b]Provider[/] {Markup.Escape(Diagnostic(ws.Config.ProviderMode, 128))}" +
+                       (ws.Config.UseLlamaSwap ? " + llama-swap" : "")),
+            new Markup($"[b]Models[/] {Markup.Escape(Diagnostic(ws.Config.LocalModels.Coder, 256))} / " +
+                       Markup.Escape(Diagnostic(ws.Config.LocalModels.Reviewer, 256))));
         health.AddRow(
-            new Markup($"[b]Branch[/] {Markup.Escape(ws.Git.CurrentBranch())}"),
+            new Markup($"[b]Branch[/] {Markup.Escape(Diagnostic(ws.Git.CurrentBranch(), 512))}"),
             new Markup($"[b]Tree[/] {(ws.Git.IsClean() ? "[green]clean[/]" : "[red]dirty[/]")}"),
             new Markup($"[b]Spec hash[/] {SpecHash(ws)}"),
-            new Markup($"[b]Frontier[/] {Markup.Escape(ws.Config.FrontierEndpoint)}"));
+            new Markup($"[b]Frontier[/] {Markup.Escape(Diagnostic(ws.Config.FrontierEndpoint, 512))}"));
         var sandbox = ws.Config.Sandbox;
         var sandboxMode = SandboxStatusText.SandboxMode(ws.Config);
         var sandboxImages = SandboxStatusText.SandboxImages(ws.Config);
@@ -191,17 +197,19 @@ public static class StatusCommand
             ws.Config, state.SandboxRecovery);
         health.AddRow(
             new Markup($"[b]Sandbox[/] {(sandboxMode.Warning
-                ? $"[red]{Markup.Escape(sandboxMode.Text)}[/]"
-                : Markup.Escape(sandboxMode.Text))}"),
+                ? $"[red]{Markup.Escape(Diagnostic(sandboxMode.Text, 1000))}[/]"
+                : Markup.Escape(Diagnostic(sandboxMode.Text, 1000)))}"),
             new Markup($"[b]Sandbox images[/] {(sandboxImages.Warning
-                ? $"[yellow]{Markup.Escape(sandboxImages.Text)}[/]"
-                : Markup.Escape(sandboxImages.Text))}"),
-            new Markup($"[b]Workspace root[/] {Markup.Escape(string.IsNullOrWhiteSpace(sandbox.WorkspaceRoot) ? "(default)" : sandbox.WorkspaceRoot)}"),
+                ? $"[yellow]{Markup.Escape(Diagnostic(sandboxImages.Text, 1000))}[/]"
+                : Markup.Escape(Diagnostic(sandboxImages.Text, 1000)))}"),
+            new Markup($"[b]Workspace root[/] {Markup.Escape(Diagnostic(
+                string.IsNullOrWhiteSpace(sandbox.WorkspaceRoot) ? "(default)" : sandbox.WorkspaceRoot,
+                1000))}"),
             new Markup($"[b]Max workspace[/] {sandbox.MaxWorkspaceMb} MB"));
         health.AddRow(
             new Markup($"[b]Sandbox recovery[/] {(sandboxRecovery.Warning
-                ? $"[red]{Markup.Escape(sandboxRecovery.Text)}[/]"
-                : Markup.Escape(sandboxRecovery.Text))}"),
+                ? $"[red]{Markup.Escape(Diagnostic(sandboxRecovery.Text, 1000))}[/]"
+                : Markup.Escape(Diagnostic(sandboxRecovery.Text, 1000)))}"),
             new Markup($"[b]Restore[/] {(sandbox.Roles.Tester.Restore.Enabled
                 ? "[yellow]restricted network enabled[/]"
                 : "disabled (offline Tester)")}"),
@@ -209,9 +217,14 @@ public static class StatusCommand
             new Markup($"[b]Recovered workspaces[/] {state.SandboxRecovery.WorkspacesRemoved}/{state.SandboxRecovery.WorkspacesFound}"));
         health.AddRow(
             new Markup($"[b]Repository scope[/] {Markup.Escape(SandboxPolicy.RepositoryIdentity(ws.Root))}"),
-            new Markup($"[b]Restore network[/] {Markup.Escape(string.IsNullOrWhiteSpace(sandbox.Roles.Tester.Restore.NetworkName) ? "(not configured)" : sandbox.Roles.Tester.Restore.NetworkName)}"),
+            new Markup($"[b]Restore network[/] {Markup.Escape(Diagnostic(
+                string.IsNullOrWhiteSpace(sandbox.Roles.Tester.Restore.NetworkName)
+                    ? "(not configured)"
+                    : sandbox.Roles.Tester.Restore.NetworkName,
+                256))}"),
             new Markup($"[b]Restore feeds[/] {sandbox.Roles.Tester.Restore.ApprovedFeeds.Count}"),
-            new Markup($"[b]Recovery time[/] {Markup.Escape(state.SandboxRecovery.LastRunUtc ?? "never")}"));
+            new Markup($"[b]Recovery time[/] {Markup.Escape(Diagnostic(
+                state.SandboxRecovery.LastRunUtc ?? "never", 128))}"));
 
         var table = new Table().Border(TableBorder.Rounded)
             .Title($"Queue — {plan.WorkPackages.Count} work packages");
@@ -235,10 +248,10 @@ public static class StatusCommand
                 _ => "white",
             };
             table.AddRow(
-                $"[{color}]{Markup.Escape("[" + status + "]")}[/]",
-                Markup.Escape(wp.Id),
-                Markup.Escape(wp.Layer),
-                Markup.Escape(wp.Title) + FlagSuffix(wp),
+                $"[{color}]{Markup.Escape("[" + Diagnostic(status, 64) + "]")}[/]",
+                Markup.Escape(Diagnostic(wp.Id, 256)),
+                Markup.Escape(Diagnostic(wp.Layer, 256)),
+                Markup.Escape(Diagnostic(wp.Title, 1000)) + FlagSuffix(wp),
                 attempts);
         }
 
@@ -258,6 +271,9 @@ public static class StatusCommand
         File.Exists(ws.SpecPath)
             ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(ws.SpecPath)))[..8].ToLowerInvariant()
             : "n/a";
+
+    private static string Diagnostic(string? value, int maxChars = 4000) =>
+        Sanitizer.SanitizeDiagnostic(value ?? "", maxChars);
 }
 
 public static class ControlCommands

@@ -64,7 +64,7 @@ public sealed class LocalChatClient : IChatClient
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(
                 $"local model call failed ({(int)response.StatusCode}): " +
-                Truncate(Core.Security.Sanitizer.SanitizeText(body)));
+                Core.Security.Sanitizer.SanitizeDiagnostic(body, 300));
 
         using var doc = JsonDocument.Parse(body);
         var content = doc.RootElement
@@ -101,7 +101,6 @@ public sealed class LocalChatClient : IChatClient
         return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
     }
 
-    private static string Truncate(string s) => s.Length <= 300 ? s : s[..300] + "…";
 }
 
 /// <summary>
@@ -174,7 +173,7 @@ public sealed class OpenAiReviewerAgent : IReviewerAgent
             && arr.ValueKind == JsonValueKind.Array;
         if (reasonsShapeValid)
             foreach (var r in arr.EnumerateArray())
-                reasons.Add(r.GetString() ?? "");
+                reasons.Add(Core.Security.Sanitizer.SanitizeDiagnostic(r.GetString() ?? "", 2000));
         reasons.RemoveAll(string.IsNullOrWhiteSpace);
         var protocolValid = reasonsShapeValid
             && (verdict == "FAIL" || verdict == "PASS" && reasons.Count == 0);

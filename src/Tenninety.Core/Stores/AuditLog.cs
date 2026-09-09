@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json.Serialization;
+using Tenninety.Core.Security;
 
 namespace Tenninety.Core.Stores;
 
@@ -21,13 +22,19 @@ public sealed class AuditEvent
 /// <summary>Append-only JSONL audit trail (.tenninety/audit-log.jsonl). Included in pivot snapshots.</summary>
 public sealed class AuditLog
 {
+    public const int MaxDetailChars = 4000;
     private readonly object _lock = new();
     public string Path { get; }
     public AuditLog(string? path = null) => Path = path ?? TenNinety.Resolve(TenNinety.AuditFile);
 
     public void Append(string @event, string? wp = null, string detail = "")
     {
-        var line = Json.SerializeCompact(new AuditEvent { Event = @event, WorkPackageId = wp, Detail = detail });
+        var line = Json.SerializeCompact(new AuditEvent
+        {
+            Event = Sanitizer.SanitizeDiagnostic(@event ?? "", 128),
+            WorkPackageId = wp is null ? null : Sanitizer.SanitizeDiagnostic(wp, 256),
+            Detail = Sanitizer.SanitizeDiagnostic(detail ?? "", MaxDetailChars),
+        });
         lock (_lock)
         {
             var dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(Path));
@@ -47,7 +54,14 @@ public sealed class AuditLog
                 .Select(l =>
                 {
                     try { return Json.Deserialize<AuditEvent>(l); }
-                    catch { return new AuditEvent { Event = "UNPARSEABLE", Detail = l }; }
+                    catch
+                    {
+                        return new AuditEvent
+                        {
+                            Event = "UNPARSEABLE",
+                            Detail = Sanitizer.SanitizeDiagnostic(l, MaxDetailChars),
+                        };
+                    }
                 })
                 .ToList();
         }
