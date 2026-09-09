@@ -30,6 +30,7 @@ public sealed class ExecutionEngine
     private readonly IReviewerAgent _reviewer;
     private readonly ITesterAgent _tester;
     private readonly StateStore _stateStore;
+    private readonly PromotionTransactionStore _promotionStore;
     private readonly AuditLog _audit;
     private readonly GlobalContext? _global;
     private readonly Action<string>? _log;
@@ -38,7 +39,7 @@ public sealed class ExecutionEngine
         IGitService git, TenNinetyConfig config, IFrontierClient frontier,
         ICoderAgent coder, IReviewerAgent reviewer, ITesterAgent tester,
         StateStore stateStore, AuditLog audit, GlobalContext? globalContext = null,
-        Action<string>? log = null)
+        Action<string>? log = null, PromotionTransactionStore? promotionStore = null)
     {
         _global = globalContext;
         _git = git;
@@ -48,6 +49,8 @@ public sealed class ExecutionEngine
         _reviewer = reviewer;
         _tester = tester;
         _stateStore = stateStore;
+        _promotionStore = promotionStore ?? new PromotionTransactionStore(
+            Path.Combine(git.RepoPath, TenNinety.StateDir, TenNinety.PromotionFile));
         _audit = audit;
         _log = log;
     }
@@ -68,6 +71,7 @@ public sealed class ExecutionEngine
             ?? throw new InvalidOperationException("main has no commit to use as a work-package base.");
 
         var resumingBranch = _git.BranchExists(branch);
+        var promotionRecorded = false;
         if (resumingBranch)
             _git.CheckoutBranch(branch);
         else
@@ -281,14 +285,69 @@ public sealed class ExecutionEngine
 
                 // 4. PROMOTE – always as ONE squashed commit so reverting a package is exact.
                 var branchTip = _git.HeadSha();
-                var mergeSha = _git.SquashMergeToMain(
-                    branch, $"{wp.Id}: {wp.Title} [work package]");
-                TryDeleteBranch(branch);
+                var mergeSha = _git.PrepareSquashPromotion(
+                    branch, expectedMainSha, branchTip,
+                    $"{wp.Id}: {wp.Title} [work package]");
+                var transaction = new PromotionTransaction
+                {
+                    Kind = TenNinety.PromotionKinds.WorkPackage,
+                    ExecutionId = info.ExecutionId!,
+                    WorkPackageId = wp.Id,
+                    Branch = branch,
+                    ExpectedBaseSha = expectedMainSha,
+                    CandidateSha = branchTip,
+                    PromotionSha = mergeSha,
+                };
+                _promotionStore.Save(transaction);
+                promotionRecorded = true;
+                _audit.Append("WP_PROMOTION_PREPARED", wp.Id,
+                    $"execution={transaction.ExecutionId} " +
+                    $"base={expectedMainSha[..Math.Min(12, expectedMainSha.Length)]} " +
+                    $"candidate={branchTip[..Math.Min(12, branchTip.Length)]} " +
+                    $"promotion={mergeSha[..Math.Min(12, mergeSha.Length)]}");
+                try
+                {
+                    _git.CompleteSquashPromotion(
+                        branch, expectedMainSha, branchTip, mergeSha);
+                }
+                catch (SquashPromotionException ex) when (ex.RecoverySucceeded)
+                {
+                    _audit.Append("WP_PROMOTION_FORWARD_RECOVERED", wp.Id,
+                        Truncate(Sanitise(ex.Message), 500));
+                }
+
+                // Keep the durable transaction while progress is saved. If this save fails,
+                // restore the in-memory ACTIVE facts so an outer finally cannot accidentally
+                // erase the persisted interrupted execution on a one-shot retry.
                 wp.Status = TenNinety.WpStatus.Done;
                 state.CurrentWp = null;
                 state.Attempts.Remove(wp.Id);
                 SyncQueue(state, wp.Id, TenNinety.WpStatus.Done);
-                Persist(state);
+                try
+                {
+                    Persist(state);
+                }
+                catch
+                {
+                    wp.Status = TenNinety.WpStatus.Active;
+                    state.CurrentWp = wp.Id;
+                    state.Attempts[wp.Id] = info;
+                    SyncQueue(state, wp.Id, TenNinety.WpStatus.Active);
+                    throw;
+                }
+
+                _git.DeleteBranchCompareAndSwap(branch, branchTip);
+                _promotionStore.Complete(transaction);
+                promotionRecorded = false;
+                try
+                {
+                    _git.ReleaseSquashPromotion(branchTip, mergeSha);
+                }
+                catch (Exception ex)
+                {
+                    _audit.Append("WP_PROMOTION_REF_CLEANUP_REQUIRED", wp.Id,
+                        Truncate(Sanitise(ex.Message), 500));
+                }
                 _audit.Append("WP_PROMOTED", wp.Id,
                     $"merge={mergeSha[..Math.Min(12, mergeSha.Length)]} " +
                     $"branchTip={branchTip[..Math.Min(12, branchTip.Length)]}");
@@ -298,12 +357,12 @@ public sealed class ExecutionEngine
         }
         catch
         {
-            if (_git.CurrentBranch() == branch && !_git.IsClean() &&
+            if (!promotionRecorded && _git.CurrentBranch() == branch && !_git.IsClean() &&
                 (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock"))
                 CheckpointWork(wp.Id, branch, "fault");
             // Infrastructure/process faults abort the run by owner decision, but the persisted
             // package must remain resumable rather than becoming a stale ACTIVE deadlock.
-            if (wp.Status == TenNinety.WpStatus.Active)
+            if (!promotionRecorded && wp.Status == TenNinety.WpStatus.Active)
             {
                 wp.Status = TenNinety.WpStatus.Pending;
                 state.CurrentWp = null;
@@ -316,7 +375,7 @@ public sealed class ExecutionEngine
         {
             // Return to main only after all work is safely committed. If checkpointing failed,
             // leave the dirty work branch in place rather than carrying partial edits to main.
-            if (_git.CurrentBranch() == branch && _git.IsClean())
+            if (!promotionRecorded && _git.CurrentBranch() == branch && _git.IsClean())
                 _git.CheckoutBranch(TenNinety.MainBranch);
         }
     }
@@ -453,6 +512,7 @@ public sealed class ExecutionEngine
             info = new AttemptInfo();
             state.Attempts[wpId] = info;
         }
+        info.ExecutionId ??= Guid.NewGuid().ToString("N");
         return info;
     }
 
@@ -470,12 +530,6 @@ public sealed class ExecutionEngine
     private void Persist(RuntimeState state) => _stateStore.Save(state);
 
     private void SyncQueue(RuntimeState state, string wpId, string status) => state.QueueStatus[wpId] = status;
-
-    private void TryDeleteBranch(string branch)
-    {
-        try { _git.DeleteBranchSafe(branch, force: true); } // content is squash-merged onto main
-        catch { /* non-fatal */ }
-    }
 
     private void CheckpointWork(string wpId, string branch, string reason)
     {

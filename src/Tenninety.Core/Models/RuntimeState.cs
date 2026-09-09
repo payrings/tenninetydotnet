@@ -59,6 +59,9 @@ public sealed class SandboxRecoveryInfo
 
 public sealed class AttemptInfo
 {
+    [JsonPropertyName("execution_id")]
+    public string? ExecutionId { get; set; }
+
     [JsonPropertyName("count")]
     public int Count { get; set; }
 
@@ -82,4 +85,30 @@ public sealed class AttemptInfo
 
     [JsonPropertyName("advice")]
     public List<string> Advice { get; set; } = new();
+}
+
+/// <summary>Durable intent for one exact squash promotion. This record is removed only after
+/// Git publication, saved progress, and exact candidate-branch cleanup are all complete.</summary>
+public sealed class PromotionTransaction
+{
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = "";
+
+    [JsonPropertyName("execution_id")]
+    public string ExecutionId { get; set; } = "";
+
+    [JsonPropertyName("work_package_id")]
+    public string? WorkPackageId { get; set; }
+
+    [JsonPropertyName("branch")]
+    public string Branch { get; set; } = "";
+
+    [JsonPropertyName("expected_base_sha")]
+    public string ExpectedBaseSha { get; set; } = "";
+
+    [JsonPropertyName("candidate_sha")]
+    public string CandidateSha { get; set; } = "";
+
+    [JsonPropertyName("promotion_sha")]
+    public string PromotionSha { get; set; } = "";
 }

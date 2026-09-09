@@ -17,127 +17,109 @@ namespace Tenninety.Tui;
 /// </summary>
 public static class TuiHost
 {
-    private static string? _banner;
-
     public static async Task<int> RunAsync(
         Workspace ws, Plan plan, RuntimeState state, Orchestrator orchestrator)
     {
-        _banner = null;
+        using var execution = new TuiExecution(
+            orchestrator.RunAsync, orchestrator.Pause, orchestrator.Resume,
+            orchestrator.RequestStop, () => ExecutionControl.ClearAll(ws.Root));
         var tester = new AgentFactory(ws.Config).CreateTester(ws.Git, line => ws.Audit.Append("TESTER", detail: line));
         var revertService = new RevertService(ws.Git, ws.Config, ws.CreateFrontier(), tester, ws.Audit,
             log: line => ws.Audit.Append("REVERT", detail: line));
         var frontier = ws.CreateFrontier();
 
-        var runCts = new CancellationTokenSource();
-        Task<OrchestratorExit> runTask = orchestrator.RunAsync(runCts.Token);
         var quit = false;
-
-        async Task EnsureIdleAsync()
+        using var interactionCts = new CancellationTokenSource();
+        ConsoleCancelEventHandler onCancel = (_, e) =>
         {
-            if (!runTask.IsCompleted)
-            {
-                orchestrator.Pause();
-                _banner = "pausing daemon for safe interaction…";
-                await SafeAwait(runTask);
-            }
-        }
-
-        while (!quit)
-        {
-            Draw(ws, plan, state);
-            if (!Console.KeyAvailable)
-            {
-                await Task.Delay(400);
-                continue;
-            }
-
-            switch (Console.ReadKey(intercept: true).Key)
-            {
-                case ConsoleKey.P:
-                    if (runTask.IsCompleted)
-                    {
-                        runCts.Dispose();
-                        runCts = new CancellationTokenSource();
-                        orchestrator.Resume();
-                        runTask = orchestrator.RunAsync(runCts.Token);
-                        _banner = "resumed";
-                    }
-                    else
-                    {
-                        orchestrator.Pause();
-                        _banner = "pausing…";
-                        Draw(ws, plan, state);
-                        await SafeAwait(runTask);
-                        _banner = "PAUSED — [P] resume · [S] pivot · [R] revert";
-                    }
-                    break;
-
-                case ConsoleKey.S:
-                    await EnsureIdleAsync();
-                    _banner = await LockedPivotFlowAsync(ws, plan, state, frontier);
-                    break;
-
-                case ConsoleKey.R:
-                    await EnsureIdleAsync();
-                    _banner = await RevertFlowAsync(ws, revertService);
-                    break;
-
-                case ConsoleKey.L:
-                    ShowLogs(ws);
-                    break;
-
-                case ConsoleKey.Q:
-                    quit = true;
-                    break;
-            }
-        }
-
-        if (!runTask.IsCompleted)
-        {
-            orchestrator.RequestStop();
-            try
-            {
-                await runTask.WaitAsync(TimeSpan.FromSeconds(15));
-            }
-            catch (TimeoutException)
-            {
-                runCts.Cancel();
-                try { await runTask; } catch { runCts.Dispose(); return 1; }
-            }
-            catch
-            {
-                runCts.Dispose();
-                return 1;
-            }
-        }
+            e.Cancel = true;
+            Volatile.Write(ref quit, true);
+            execution.RequestShutdown();
+            interactionCts.Cancel();
+        };
+        Console.CancelKeyPress += onCancel;
 
         try
         {
-            var code = ExitCode(await runTask);
-            runCts.Dispose();
-            return code;
+            while (!Volatile.Read(ref quit))
+            {
+                await execution.ObserveCompletedAsync();
+                Draw(ws, plan, state, execution);
+                if (!Console.KeyAvailable)
+                {
+                    await Task.Delay(400, interactionCts.Token);
+                    continue;
+                }
+
+                switch (Console.ReadKey(intercept: true).Key)
+                {
+                    case ConsoleKey.P:
+                        if (!execution.IsRunning)
+                            await execution.ResumeAsync();
+                        else
+                        {
+                            var pauseTask = execution.PauseAsync();
+                            Draw(ws, plan, state, execution);
+                            await pauseTask;
+                        }
+                        break;
+
+                    case ConsoleKey.S:
+                        await execution.PauseAsync();
+                        execution.Banner = await LockedPivotFlowAsync(
+                            ws, plan, state, frontier, interactionCts.Token);
+                        break;
+
+                    case ConsoleKey.R:
+                        await execution.PauseAsync();
+                        execution.Banner = await RevertFlowAsync(
+                            ws, revertService, interactionCts.Token);
+                        break;
+
+                    case ConsoleKey.L:
+                        ShowLogs(ws);
+                        break;
+
+                    case ConsoleKey.Q:
+                        Volatile.Write(ref quit, true);
+                        break;
+                }
+            }
         }
-        catch
+        catch (OperationCanceledException) when (interactionCts.IsCancellationRequested)
         {
-            runCts.Dispose();
-            return 1;
+            Volatile.Write(ref quit, true);
         }
+        finally
+        {
+            try { await execution.ShutdownAsync(); }
+            finally
+            {
+                Console.CancelKeyPress -= onCancel;
+            }
+        }
+
+        WriteExecutionStatus(AnsiConsole.Console, execution);
+        return execution.ExitCode;
     }
 
-    /// <summary>Observes a run task so an interactive action can display faults without crashing.</summary>
-    private static async Task SafeAwait(Task<OrchestratorExit> task)
+    internal static void WriteExecutionStatus(IAnsiConsole console, TuiExecution execution)
     {
-        try { await task; }
-        catch (Exception ex)
+        var color = execution.Status switch
         {
-            _banner = Diagnostic($"daemon error: {ex.Message}");
-        }
+            "FAILED" or "DEADLOCKED" or "CANCELLED" => "red",
+            "COMPLETED" => "green",
+            "RUNNING" => "aqua",
+            _ => "yellow",
+        };
+        console.MarkupLine($"\n[b]Execution[/] [{color}]{execution.Status}[/]");
+        if (execution.Banner is not null)
+            console.MarkupLine($"[yellow]{Markup.Escape(Diagnostic(execution.Banner))}[/]");
+        if (execution.LastError is not null)
+            console.MarkupLine($"[red]Last execution failure: {Markup.Escape(execution.LastError)}[/]");
     }
 
-    private static int ExitCode(OrchestratorExit exit) =>
-        exit == OrchestratorExit.Deadlocked ? 4 : exit == OrchestratorExit.Cancelled ? 1 : 0;
-
-    private static void Draw(Workspace ws, Plan plan, RuntimeState state)
+    private static void Draw(Workspace ws, Plan plan, RuntimeState state, TuiExecution execution)
     {
         Console.Clear();
         AnsiConsole.Write(new Rule(
@@ -152,8 +134,7 @@ public static class TuiHost
             ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(ws.SpecPath)))[..8].ToLowerInvariant()
             : "n/a";
         health.AddRow(
-            new Markup($"[b]Mode[/] {Markup.Escape(Diagnostic(state.ExecutionMode, 64))}" +
-                       (state.Paused ? " [red](paused)[/]" : "")),
+            new Markup($"[b]Mode[/] {Markup.Escape(Diagnostic(state.ExecutionMode, 64))}"),
             new Markup($"[b]Provider[/] {Markup.Escape(Diagnostic(ws.Config.ProviderMode, 128))}" +
                        (ws.Config.UseLlamaSwap ? " + llama-swap" : "")),
             new Markup($"[b]Models[/] {Markup.Escape(Diagnostic(ws.Config.LocalModels.Coder, 256))} / " +
@@ -198,8 +179,7 @@ public static class TuiHost
         }
         AnsiConsole.Write(table);
 
-        if (_banner is not null)
-            AnsiConsole.MarkupLine($"\n[yellow]{Markup.Escape(Diagnostic(_banner))}[/]");
+        WriteExecutionStatus(AnsiConsole.Console, execution);
 
         AnsiConsole.MarkupLine(
             "\n[grey][[P]][/] Pause/Resume  [grey][[S]][/] Snapshot & Pivot  [grey][[R]][/] Revert  " +
@@ -207,7 +187,8 @@ public static class TuiHost
     }
 
     private static async Task<string> LockedPivotFlowAsync(
-        Workspace ws, Plan plan, RuntimeState state, IFrontierClient frontier)
+        Workspace ws, Plan plan, RuntimeState state, IFrontierClient frontier,
+        CancellationToken ct)
     {
         IDisposable workspaceLock;
         try
@@ -221,6 +202,13 @@ public static class TuiHost
 
         using (workspaceLock)
         {
+            if (RuntimeGitignoreMigration.CountPromotionJournalsInOtherWorktrees(ws.Git) > 0)
+                return "a linked worktree owns pending promotion recovery evidence; run " +
+                       "'tenninety start' from that worktree before applying a pivot.";
+            if (new PromotionTransactionStore(
+                    Path.Combine(ws.Root, TenNinety.StateDir, TenNinety.PromotionFile)).Exists())
+                return "a promotion recovery transaction is pending; run 'tenninety start' " +
+                       "to reconcile it before applying a pivot.";
             if (ws.Git.CurrentBranch() != TenNinety.MainBranch || !ws.Git.IsClean())
                 return "pivot requires a clean workspace on main.";
 
@@ -238,12 +226,13 @@ public static class TuiHost
                 }
             }
 
-            return await PivotFlowUnderLockAsync(ws, plan, state, frontier);
+            return await PivotFlowUnderLockAsync(ws, plan, state, frontier, ct);
         }
     }
 
     private static async Task<string> PivotFlowUnderLockAsync(
-        Workspace ws, Plan plan, RuntimeState state, IFrontierClient frontier)
+        Workspace ws, Plan plan, RuntimeState state, IFrontierClient frontier,
+        CancellationToken ct)
     {
         Console.Clear();
         AnsiConsole.Write(new Rule("[b]Snapshot & Pivot[/]").RuleStyle("aqua"));
@@ -265,7 +254,11 @@ public static class TuiHost
         PivotProposal proposal;
         try
         {
-            proposal = await frontier.ProposePivotAsync(snapshot);
+            proposal = await frontier.ProposePivotAsync(snapshot, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -305,7 +298,8 @@ public static class TuiHost
         return "Pivot applied. Press [P] to resume execution.";
     }
 
-    private static async Task<string> RevertFlowAsync(Workspace ws, RevertService service)
+    private static async Task<string> RevertFlowAsync(
+        Workspace ws, RevertService service, CancellationToken ct)
     {
         Console.Clear();
         AnsiConsole.Write(new Rule("[b]Revert a promotion[/]").RuleStyle("red"));
@@ -336,7 +330,7 @@ public static class TuiHost
 
         var reason = AnsiConsole.Ask<string>("Reason [optional]:", "");
         AnsiConsole.MarkupLine("\n[dim]Running hotfix flow (frontier guidance → mechanical revert → tests → merge)…[/]");
-        var outcome = await service.RevertAsync(target.Sha, reason, CancellationToken.None);
+        var outcome = await service.RevertAsync(target.Sha, reason, ct);
         return Diagnostic(outcome.Message);
     }
 
@@ -392,5 +386,6 @@ public static class TuiHost
         target.Paused = source.Paused;
         target.StopRequested = source.StopRequested;
         target.SpecHash = source.SpecHash;
+        target.SandboxRecovery = source.SandboxRecovery;
     }
 }

@@ -172,6 +172,15 @@ public sealed class DockerRestoreIntegrationTests : IDisposable
         // executes fully offline and still exercises the complete restricted-restore flow.
         repo.WriteFile("tests/fixture/packages.lock.json",
             "{\n  \"version\": 1,\n  \"dependencies\": {\n    \"net10.0\": {}\n  }\n}\n");
+        // A second explicit project proves the live CLI is invoked once per target rather
+        // than receiving an invalid multi-target argument vector.
+        repo.WriteFile("src/helper/helper.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>" +
+            "<TargetFramework>net10.0</TargetFramework>" +
+            "<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>" +
+            "</PropertyGroup></Project>\n");
+        repo.WriteFile("src/helper/packages.lock.json",
+            "{\n  \"version\": 1,\n  \"dependencies\": {\n    \"net10.0\": {}\n  }\n}\n");
         repo.WriteFile("tests/fixture/Program.cs",
             "using System;\nConsole.WriteLine(\"fixture-tests: 1 passed\");\n");
         repo.Commit("restore fixture");

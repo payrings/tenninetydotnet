@@ -1,6 +1,8 @@
 using Spectre.Console;
 using Tenninety.Core;
+using Tenninety.Core.Models;
 using Tenninety.Core.Security;
+using Tenninety.Core.Stores;
 using Tenninety.Execution;
 
 namespace Tenninety.Cli.Commands;
@@ -10,22 +12,48 @@ public static class StartCommand
 {
     public static async Task<int> Run(bool headless)
     {
-        var ws = Workspace.Load();
-        var plan = ws.LoadPlan();
-        var state = ws.States.Load();
+        DaemonLockLease? initialDaemonLock = DaemonLock.Acquire(Directory.GetCurrentDirectory());
+        try
+        {
+            var ws = Workspace.Load();
+            var pendingPromotion = new PromotionTransactionStore(
+                Path.Combine(ws.Root, TenNinety.StateDir, TenNinety.PromotionFile)).Load();
+            Plan plan;
+            string? recoveryOnlyPlanError = null;
+            try
+            {
+                plan = ws.LoadPlan();
+            }
+            catch (Exception ex) when (pendingPromotion?.Kind == TenNinety.PromotionKinds.Hotfix)
+            {
+                // Hotfix recovery is plan-independent. Do not strand durable evidence merely
+                // because plan.json is absent or damaged; recover and leave planning for later.
+                plan = new Plan { ProjectName = "hotfix recovery" };
+                recoveryOnlyPlanError = Sanitizer.SanitizeDiagnostic(ex.Message, 1000);
+            }
+            var state = ws.States.Load();
 
-        var orchestrator = new Orchestrator(
-            ws.Git, plan, state, ws.Config, ws.CreateFrontier(),
-            ws.States, ws.Audit, log: WriteLog);
+            var orchestrator = new Orchestrator(
+                ws.Git, plan, state, ws.Config, ws.CreateFrontier(),
+                ws.States, ws.Audit, log: WriteLog,
+                initialDaemonLock: initialDaemonLock);
+            initialDaemonLock = null; // ownership transfers to the first RunAsync invocation
 
-        var interactive = !headless && !Console.IsInputRedirected && !Console.IsOutputRedirected;
-        if (interactive)
-            return await Tenninety.Tui.TuiHost.RunAsync(ws, plan, state, orchestrator);
+            var interactive = recoveryOnlyPlanError is null && !headless &&
+                              !Console.IsInputRedirected && !Console.IsOutputRedirected;
+            if (interactive)
+                return await Tenninety.Tui.TuiHost.RunAsync(ws, plan, state, orchestrator);
 
-        return await RunHeadless(orchestrator);
+            return await RunHeadless(orchestrator, recoveryOnlyPlanError);
+        }
+        finally
+        {
+            initialDaemonLock?.Dispose();
+        }
     }
 
-    private static async Task<int> RunHeadless(Orchestrator orchestrator)
+    private static async Task<int> RunHeadless(
+        Orchestrator orchestrator, string? recoveryOnlyPlanError = null)
     {
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -41,6 +69,9 @@ public static class StartCommand
             var exit = await orchestrator.RunAsync(cts.Token);
             return exit switch
             {
+                OrchestratorExit.Completed when recoveryOnlyPlanError is not null => Succeeded(
+                    "Hotfix recovery completed. plan.json remains unavailable: " +
+                    recoveryOnlyPlanError),
                 OrchestratorExit.Completed => Succeeded("All work packages are DONE."),
                 OrchestratorExit.Paused => Succeeded("Daemon paused — run 'tenninety resume' then 'tenninety start'."),
                 OrchestratorExit.Stopped => Succeeded("Daemon stopped — progress saved."),

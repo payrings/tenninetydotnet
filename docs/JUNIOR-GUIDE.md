@@ -316,7 +316,8 @@ Line by line, what happened for EACH work package:
    the Reviewer and Tester checked the result. First number = attempts used since last reset;
    `(x/10)` = budget until the Architect gets involved.
 3. `PASSED – promoted to main` – reviewer said PASS, tests passed, so the branch was merged
-   into `main` (one squashed commit) and deleted. State updated. Next job!
+   into `main` as one prebuilt squashed commit. Recovery evidence stays in place while state is
+   updated and the exact branch is deleted, then the evidence is cleared. Next job!
 
 See it yourself:
 

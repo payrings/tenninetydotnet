@@ -94,7 +94,8 @@ sequenceDiagram
                     F-->>E: RepairAdvice → Advice list · Count ← 0
                 end
             else all PASS
-                E->>G: merge --squash (ONE commit) · branch -D · status DONE
+                E->>G: prepare retained squash object · journal exact identities
+                E->>G: CAS main · save DONE · CAS-delete branch · clear journal/retention refs
             end
         end
         opt Total ≥ max_total_attempts unpromoted
@@ -185,6 +186,10 @@ init ──▶ (author spec.md – see SPEC-AUTHORING) ──▶ plan ──▶ 
 `[P]` pause/resume (resume relaunches the run loop) · `[S]` Snapshot & Pivot (pauses daemon,
 collects spec+plan+audit tail+intent → Frontier KEEP/REWORK/CANCEL diff → confirm-to-apply) ·
 `[R]` Revert (commit picker + reason) · `[L]` audit tail viewer · `[Q]` graceful quit.
+The dashboard observes every completed run task without waiting for input and reports `RUNNING`,
+`COMPLETED`, `PAUSED`, `STOPPED`, `DEADLOCKED`, `CANCELLED`, or `FAILED`. Sanitised execution
+failures remain visible across pause/resume and interaction banners; process exit codes retain the
+same `0`/`1`/`4` meanings above.
 
 **Recommended practice – second-opinion plan review:** before confirming a generated graph,
 paste `plan.json` (+ the original spec) into a *different* frontier model and ask it to
@@ -203,6 +208,7 @@ catches drift cheaply.
 | `.tenninety/plan.json` | yes | execution graph (schema_version `1`); never mutated by the engine |
 | `.tenninety/config.json` | yes | budgets/models/endpoints; explicit out-of-range values are rejected during strict load |
 | `.tenninety/state.json` | **no** | current WP, attempt bookkeeping, `queue_status`, paused/stop flags |
+| `.tenninety/promotion-transaction.json` | **no** | crash-recovery evidence binding one execution to exact base, candidate, and promotion commits; present only while publication/progress/branch cleanup is incomplete |
 | `.tenninety/audit-log.jsonl` | **no** | append-only events; feeds pivots, repair requests, `[L]` view |
 
 **Effective status rule:** renderers display `state.queue_status[id] ?? plan.wp.status`.
@@ -224,10 +230,14 @@ Detection is exact uppercase-token matching on word boundaries – prose mention
 are hard acceptance errors since the blueprint upgrade.
 
 **Audit vocabulary:** `DAEMON_STARTED/STOPPED/EXITED`, `PLAN_GENERATED`,
-`WP_STARTED/PROMOTED/BLOCKED`, `CODER_COMMITTED/FAILED/NO_CHANGE`, `REVIEW_PASSED/FAILED`,
+`WP_STARTED/WP_PROMOTION_PREPARED/WP_PROMOTION_FORWARD_RECOVERED/WP_PROMOTED/WP_BLOCKED`,
+`WP_PROMOTION_REF_CLEANUP_REQUIRED`, `PROMOTION_RECOVERED/PROMOTION_RECOVERY_REQUIRED`,
+`PROMOTION_REF_CLEANUP_REQUIRED`, `CODER_COMMITTED/FAILED/NO_CHANGE`, `REVIEW_PASSED/FAILED`,
 `TESTS_FAILED` (a passing suite is implied by the following `WP_PROMOTED`),
 `ESCALATION_ADVICE`, `PAUSED(_REQUESTED)`, `RESUMED`, `STOP_REQUESTED`,
-`PIVOT_APPLIED`, `QUEUE_DEADLOCKED`, `REVERT_STARTED/PROMOTED/FAILED_TESTS/ERROR`.
+`PIVOT_APPLIED`, `QUEUE_DEADLOCKED`,
+`REVERT_STARTED/REVERT_PROMOTED/REVERT_PROMOTION_RECOVERED/REVERT_FAILED_TESTS/REVERT_ERROR`,
+`REVERT_PROMOTION_REF_CLEANUP_REQUIRED`.
 
 ---
 
@@ -243,7 +253,21 @@ are hard acceptance errors since the blueprint upgrade.
 - **Branch lifecycle.** `work/<ID>` created from `main` (starting anywhere else is refused).
   Promotion is ALWAYS a single squashed commit on main – reverting it reverts the complete
   package even when attempts left many commits. The branch tip is recorded in the audit log
-  before deletion; paused/stopped/blocked runs leave the branch, and resume *reuses* it.
+  before deletion; paused/stopped/blocked runs leave the branch, and resume *reuses* it. Startup
+  first cleans repository-scoped sandbox resources, then returns a clean work branch to `main`
+  only when `state.json` proves it is the exact interrupted package. Dirty or ambiguous branches
+  are retained with an operator-facing error.
+- **Promotion transaction.** The squash commit object is created and verified before Git refs or
+  checkout state change, honoring the repository's effective `commit.gpgsign` policy. Internal
+  refs retain both prepared and candidate objects against Git garbage collection. A durable journal
+  then binds execution ID, expected base, exact candidate, and promotion SHA. `main` moves by
+  compare-and-swap; `DONE` is saved while evidence remains; the candidate branch is deleted only if
+  it still has the recorded tip and is not checked out in any linked worktree. The journal is removed
+  before the retention refs. Startup resumes these steps idempotently, refuses journals owned by a
+  different linked worktree, and never decides from commit subjects, branch absence, or audit
+  messages. A pivot cannot REWORK through pending promotion evidence: run `tenninety start` from the
+  owning worktree to reconcile it first. Hotfix evidence can be recovered even if `plan.json` is
+  temporarily absent or invalid.
 - **Clean-tree invariant.** Orchestrator refuses to run on a dirty tree. This is why the
   runtime-volatile files (`state.json`, `audit-log.jsonl`) are gitignored – they change
   constantly and would otherwise dirty the tree on every write.
@@ -421,6 +445,8 @@ Commit `config.json` changes before `start` – it is tracked, and the tree must
 | --- | --- | --- |
 | `no '.tenninety/' directory found` | ran outside initialized workspace | `cd` to project root or `tenninety init` |
 | `Working tree is not clean` | uncommitted edits (incl. `config.json`) or crashed prior run | commit/stash; engine also self-heals leftovers onto the work branch as a WIP checkpoint |
+| Startup says an interrupted branch has uncommitted work | a crash left user/coder edits that cannot be attributed safely | inspect the named `work/<ID>` branch; commit or otherwise resolve its edits there, then restart; no automatic reset/stash occurred |
+| Startup says an exact promotion transaction cannot be reconciled | `main`, candidate ref, HEAD, index, or worktree conflicts with `.tenninety/promotion-transaction.json` | preserve the journal and branch; inspect the exact SHAs and external changes, resolve them without rewriting published history, then restart |
 | `branch 'work/X' already exists` (older builds) | pre-reuse logic | fixed: current engine reuses the branch |
 | Plan rejected at `plan` | Frontier produced invalid graph (cycle/dupes/missing deps) | tighten spec; retry stronger model; errors listed above table |
 | Queue deadlocked, exit 4 | a BLOCKED WP gates dependents | fix root cause, apply pivot REWORK, or cancel via pivot; `resume` + `start` |

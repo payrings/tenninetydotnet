@@ -152,6 +152,216 @@ public class GitServiceTests : IDisposable
     }
 
     [Fact]
+    public void Signing_failure_during_preparation_leaves_branch_head_index_and_worktree_unchanged()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+        _git.CreateAndCheckoutBranch("work/WP-005");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "signed.txt"), "reviewed\n");
+        var candidate = _git.CommitAll("reviewed candidate")!;
+        var main = _git.FindCommit("main")!.Sha;
+        var index = RunGit("write-tree");
+        var signer = System.IO.Path.Combine(_tmp.Root, ".git", "failing-signer");
+        File.WriteAllText(signer, "#!/bin/sh\nexit 73\n");
+        File.SetUnixFileMode(signer,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        _git.SetLocalConfig("commit.gpgsign", "true");
+        _git.SetLocalConfig("gpg.program", signer);
+
+        Assert.Throws<GitException>(() =>
+            _git.SquashMergeToMain("work/WP-005", "WP-005: signed"));
+
+        Assert.Equal("work/WP-005", _git.CurrentBranch());
+        Assert.Equal(candidate, _git.HeadSha());
+        Assert.Equal(main, _git.FindCommit("main")!.Sha);
+        Assert.Equal(index, RunGit("write-tree"));
+        Assert.Empty(RunGit("status", "--porcelain"));
+        Assert.Equal("reviewed\n", File.ReadAllText(System.IO.Path.Combine(_tmp.Root, "signed.txt")));
+    }
+
+    [Fact]
+    public void Published_promotion_recovers_forward_and_can_be_repeated()
+    {
+        _git.CreateAndCheckoutBranch("work/WP-006");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "recover.txt"), "reviewed\n");
+        var candidate = _git.CommitAll("reviewed candidate")!;
+        var main = _git.FindCommit("main")!.Sha;
+        var promotion = _git.PrepareSquashPromotion(
+            "work/WP-006", main, candidate, "WP-006: recover");
+        _git.SquashPromotionFailpoint = phase =>
+        {
+            if (phase == SquashPromotionPhase.AfterMainCompareAndSwap)
+                throw new IOException("simulated failure after publication");
+        };
+
+        var error = Assert.Throws<SquashPromotionException>(() =>
+            _git.CompleteSquashPromotion("work/WP-006", main, candidate, promotion));
+
+        Assert.True(error.RecoverySucceeded);
+        Assert.Contains("simulated failure after publication", error.Message);
+        Assert.Equal("main", _git.CurrentBranch());
+        Assert.Equal(promotion, _git.HeadSha());
+        Assert.True(_git.IsClean());
+        _git.SquashPromotionFailpoint = null;
+        _git.CompleteSquashPromotion("work/WP-006", main, candidate, promotion);
+        Assert.Equal(promotion, _git.HeadSha());
+        Assert.True(_git.IsClean());
+    }
+
+    [Fact]
+    public void Recovery_failure_reports_both_failures_and_quarantines_exact_partial_state()
+    {
+        _git.CreateAndCheckoutBranch("work/WP-007");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "quarantine.txt"), "reviewed\n");
+        var candidate = _git.CommitAll("reviewed candidate")!;
+        var main = _git.FindCommit("main")!.Sha;
+        var candidateIndex = RunGit("write-tree");
+        var promotion = _git.PrepareSquashPromotion(
+            "work/WP-007", main, candidate, "WP-007: quarantine");
+        _git.SquashPromotionFailpoint = phase =>
+        {
+            if (phase == SquashPromotionPhase.AfterMainCompareAndSwap)
+                throw new IOException("original publication follow-up failure");
+            if (phase == SquashPromotionPhase.BeforeRecovery)
+                throw new UnauthorizedAccessException("recovery failure");
+        };
+
+        var error = Assert.Throws<SquashPromotionException>(() =>
+            _git.CompleteSquashPromotion("work/WP-007", main, candidate, promotion));
+
+        Assert.False(error.RecoverySucceeded);
+        Assert.Contains("original publication follow-up failure", error.Message);
+        Assert.Contains("recovery failure", error.Message);
+        Assert.Equal(promotion, _git.FindCommit("main")!.Sha);
+        Assert.Equal("work/WP-007", _git.CurrentBranch());
+        Assert.Equal(candidate, _git.HeadSha());
+        Assert.Equal(candidateIndex, RunGit("write-tree"));
+        Assert.Empty(RunGit("status", "--porcelain"));
+    }
+
+    [Fact]
+    public void External_work_appearing_after_publication_is_preserved_and_quarantined()
+    {
+        _git.CreateAndCheckoutBranch("work/WP-008");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "candidate.txt"), "reviewed\n");
+        var candidate = _git.CommitAll("reviewed candidate")!;
+        var main = _git.FindCommit("main")!.Sha;
+        var promotion = _git.PrepareSquashPromotion(
+            "work/WP-008", main, candidate, "WP-008: preserve external");
+        _git.SquashPromotionFailpoint = phase =>
+        {
+            if (phase != SquashPromotionPhase.AfterMainCompareAndSwap) return;
+            File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "external-untracked.txt"), "preserve\n");
+            throw new IOException("failure after publication");
+        };
+
+        var error = Assert.Throws<SquashPromotionException>(() =>
+            _git.CompleteSquashPromotion("work/WP-008", main, candidate, promotion));
+
+        Assert.False(error.RecoverySucceeded);
+        Assert.Equal(promotion, _git.FindCommit("main")!.Sha);
+        Assert.Equal("work/WP-008", _git.CurrentBranch());
+        Assert.Equal("preserve\n", File.ReadAllText(
+            System.IO.Path.Combine(_tmp.Root, "external-untracked.txt")));
+        Assert.False(_git.IsClean());
+    }
+
+    [Fact]
+    public void Main_ref_conflict_before_compare_and_swap_is_preserved()
+    {
+        _git.CreateAndCheckoutBranch("work/WP-009");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "candidate.txt"), "reviewed\n");
+        var candidate = _git.CommitAll("reviewed candidate")!;
+        var main = _git.FindCommit("main")!.Sha;
+        var promotion = _git.PrepareSquashPromotion(
+            "work/WP-009", main, candidate, "WP-009: conflict");
+        _git.SquashPromotionFailpoint = phase =>
+        {
+            if (phase == SquashPromotionPhase.BeforeMainCompareAndSwap)
+                _git.UpdateRefCompareAndSwap("refs/heads/main", candidate, main);
+        };
+
+        Assert.Throws<GitException>(() =>
+            _git.CompleteSquashPromotion("work/WP-009", main, candidate, promotion));
+
+        Assert.Equal(candidate, _git.FindCommit("main")!.Sha);
+        Assert.Equal("work/WP-009", _git.CurrentBranch());
+        Assert.Equal(candidate, _git.HeadSha());
+        Assert.True(_git.IsClean());
+    }
+
+    [Fact]
+    public void Prepared_objects_remain_recoverable_after_branch_deletion_and_aggressive_gc()
+    {
+        _git.CreateAndCheckoutBranch("work/WP-010");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "durable.txt"), "reviewed\n");
+        var candidate = _git.CommitAll("reviewed candidate")!;
+        var main = _git.FindCommit("main")!.Sha;
+        var promotion = _git.PrepareSquashPromotion(
+            "work/WP-010", main, candidate, "WP-010: durable recovery");
+
+        Assert.Contains(promotion, RunGit("for-each-ref", "--format=%(objectname)",
+            "refs/tenninety/prepared"));
+        Assert.Contains(candidate, RunGit("for-each-ref", "--format=%(objectname)",
+            "refs/tenninety/candidates"));
+        _git.CompleteSquashPromotion("work/WP-010", main, candidate, promotion);
+        _git.DeleteBranchCompareAndSwap("work/WP-010", candidate);
+        RunGit("reflog", "expire", "--expire=now", "--all");
+        RunGit("gc", "--prune=now");
+
+        _git.CompleteSquashPromotion("work/WP-010", main, candidate, promotion);
+        _git.ReleaseSquashPromotion(candidate, promotion);
+
+        Assert.Empty(RunGit("for-each-ref", "--format=%(refname)", "refs/tenninety"));
+        Assert.Equal(promotion, _git.HeadSha());
+        Assert.True(_git.IsClean());
+    }
+
+    [Fact]
+    public void Publication_refuses_an_unsigned_object_when_signing_becomes_required()
+    {
+        _git.CreateAndCheckoutBranch("work/WP-011");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "policy.txt"), "reviewed\n");
+        var candidate = _git.CommitAll("reviewed candidate")!;
+        var main = _git.FindCommit("main")!.Sha;
+        var promotion = _git.PrepareSquashPromotion(
+            "work/WP-011", main, candidate, "WP-011: policy transition");
+        _git.SetLocalConfig("commit.gpgsign", "true");
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            _git.CompleteSquashPromotion("work/WP-011", main, candidate, promotion));
+
+        Assert.Contains("signed promotion object", error.Message);
+        Assert.Equal(main, _git.FindCommit("main")!.Sha);
+        Assert.Equal("work/WP-011", _git.CurrentBranch());
+        Assert.Equal(candidate, _git.HeadSha());
+        _git.ReleaseSquashPromotion(candidate, promotion);
+    }
+
+    [Fact]
+    public void Compare_and_swap_deletion_preserves_a_branch_checked_out_in_another_worktree()
+    {
+        _git.CreateAndCheckoutBranch("work/WP-012");
+        File.WriteAllText(System.IO.Path.Combine(_tmp.Root, "linked.txt"), "reviewed\n");
+        var candidate = _git.CommitAll("reviewed candidate")!;
+        _git.CheckoutBranch("main");
+        using var linkedParent = new TempDir();
+        var linkedPath = System.IO.Path.Combine(linkedParent.Root, "checkout");
+        RunGit("worktree", "add", linkedPath, "work/WP-012");
+        try
+        {
+            var error = Assert.Throws<InvalidOperationException>(() =>
+                _git.DeleteBranchCompareAndSwap("work/WP-012", candidate));
+
+            Assert.Contains("another worktree", error.Message);
+            Assert.True(_git.BranchExists("work/WP-012"));
+        }
+        finally
+        {
+            RunGit("worktree", "remove", "--force", linkedPath);
+        }
+    }
+
+    [Fact]
     public void Bounded_diff_returns_a_small_patch_exactly()
     {
         _git.CreateAndCheckoutBranch("work/small-diff");

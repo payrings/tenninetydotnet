@@ -158,6 +158,176 @@ public sealed class RestoreFlowTests : IDisposable
         Assert.Empty(Directory.GetFileSystemEntries(_managedRoot.Root));
     }
 
+    [Fact]
+    public async Task Multiple_projects_without_a_solution_restore_once_each_in_ordinal_order()
+    {
+        WriteProject("src/App.csproj");
+        var candidate = _git.CommitAll("add second project")!;
+        var timeline = new List<string>();
+        var runtime = new RoleRuntime(timeline);
+        var gate = Gate(runtime, timeline, out _);
+
+        var result = await gate.RunTestsAsync(Context(candidate));
+
+        Assert.True(result.Passed, result.OutputTail);
+        var commands = runtime.Sessions[0].Commands;
+        Assert.Equal(2, commands.Count);
+        Assert.Equal(
+            ["/workspace/src/App.csproj", "/workspace/tests.csproj"],
+            commands.Select(RestoreTarget));
+        Assert.All(commands, AssertOneRestoreTarget);
+    }
+
+    [Fact]
+    public async Task Multiple_solutions_without_projects_restore_once_each()
+    {
+        File.Delete(Path.Combine(_repo.Root, "tests.csproj"));
+        File.Delete(Path.Combine(_repo.Root, "packages.lock.json"));
+        File.WriteAllText(Path.Combine(_repo.Root, "B.slnx"), "<Solution />\n");
+        File.WriteAllText(Path.Combine(_repo.Root, "A.sln"), "\n");
+        var candidate = _git.CommitAll("solutions only")!;
+        var timeline = new List<string>();
+        var runtime = new RoleRuntime(timeline);
+        var gate = Gate(runtime, timeline, out _);
+
+        var result = await gate.RunTestsAsync(Context(candidate));
+
+        Assert.False(result.Passed);
+        Assert.Contains("no test project", result.OutputTail);
+        var commands = runtime.Sessions[0].Commands;
+        Assert.Equal(["/workspace/A.sln", "/workspace/B.slnx"],
+            commands.Select(RestoreTarget));
+        Assert.All(commands, AssertOneRestoreTarget);
+    }
+
+    [Fact]
+    public async Task One_solution_is_the_only_restore_target()
+    {
+        WriteProject("src/App.csproj");
+        File.WriteAllText(Path.Combine(_repo.Root, "tenninety.slnx"), "<Solution />\n");
+        var candidate = _git.CommitAll("add canonical solution")!;
+        var timeline = new List<string>();
+        var runtime = SuccessfulRuntime(timeline);
+        var gate = Gate(runtime, timeline, out _);
+
+        var result = await gate.RunTestsAsync(Context(candidate));
+
+        Assert.True(result.Passed, result.OutputTail);
+        var command = Assert.Single(runtime.Sessions[0].Commands);
+        Assert.Equal("/workspace/tenninety.slnx", RestoreTarget(command));
+        AssertOneRestoreTarget(command);
+    }
+
+    [Fact]
+    public async Task Failure_on_a_later_target_stops_before_tester_and_names_the_target()
+    {
+        WriteProject("src/App.csproj");
+        var candidate = _git.CommitAll("add second project")!;
+        var timeline = new List<string>();
+        var runtime = new RoleRuntime(timeline)
+        {
+            Factory = spec =>
+            {
+                var session = Session(spec, timeline);
+                if (spec.Role == SandboxRole.Restore)
+                    session.Then(RecordingSandboxSession.Ok())
+                        .Then(RecordingSandboxSession.Fail(7));
+                return session;
+            },
+        };
+        var gate = Gate(runtime, timeline, out _);
+
+        var result = await gate.RunTestsAsync(Context(candidate));
+
+        Assert.False(result.Passed);
+        Assert.Contains("target 2/2", result.OutputTail);
+        Assert.Equal(2, runtime.Sessions[0].Commands.Count);
+        Assert.All(runtime.Sessions[0].Commands, AssertOneRestoreTarget);
+        Assert.Equal([SandboxRole.Restore], runtime.Specs.Select(spec => spec.Role));
+        Assert.Contains("restore:dispose", timeline);
+    }
+
+    [Fact]
+    public async Task Restore_removal_failure_retains_the_failing_target_diagnostic()
+    {
+        WriteProject("src/App.csproj");
+        var candidate = _git.CommitAll("add second project")!;
+        var timeline = new List<string>();
+        var runtime = new RoleRuntime(timeline)
+        {
+            Factory = spec =>
+            {
+                var session = Session(spec, timeline);
+                if (spec.Role == SandboxRole.Restore)
+                {
+                    session.Then(RecordingSandboxSession.Ok())
+                        .Then(RecordingSandboxSession.Fail(7));
+                    session.ThrowOnDispose = true;
+                }
+                return session;
+            },
+        };
+        var gate = Gate(runtime, timeline, out _);
+
+        var error = await Assert.ThrowsAsync<TesterInfrastructureException>(() =>
+            gate.RunTestsAsync(Context(candidate)));
+
+        Assert.Contains("target 2/2", error.Message);
+        Assert.Contains("exited 7", error.Message);
+        Assert.Contains("could not be proven removed", error.Message);
+        Assert.Equal([SandboxRole.Restore], runtime.Specs.Select(spec => spec.Role));
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_on_a_later_target_stops_and_cleans_up()
+    {
+        WriteProject("src/App.csproj");
+        var candidate = _git.CommitAll("add second project")!;
+        var timeline = new List<string>();
+        using var cancellation = new CancellationTokenSource();
+        var restoreCalls = 0;
+        var runtime = SuccessfulRuntime(timeline, command =>
+        {
+            if (++restoreCalls == 2) cancellation.Cancel();
+        });
+        var gate = Gate(runtime, timeline, out _);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            gate.RunTestsAsync(Context(candidate), cancellation.Token));
+
+        Assert.Equal(2, runtime.Sessions[0].Commands.Count);
+        Assert.All(runtime.Sessions[0].Commands, AssertOneRestoreTarget);
+        Assert.Contains("restore:dispose", timeline);
+        Assert.Empty(Directory.GetFileSystemEntries(_managedRoot.Root));
+    }
+
+    [Fact]
+    public async Task Restore_targets_share_one_timeout_budget()
+    {
+        WriteProject("src/App.csproj");
+        var candidate = _git.CommitAll("add second project")!;
+        _config.Sandbox.Roles.Tester.Restore.TimeoutSeconds = 10;
+        var timeline = new List<string>();
+        var runtime = SuccessfulRuntime(timeline);
+        var gate = Gate(runtime, timeline, out _);
+        var elapsed = new Queue<TimeSpan>(
+            [TimeSpan.Zero, TimeSpan.FromSeconds(6),
+             TimeSpan.FromSeconds(6), TimeSpan.FromSeconds(11)]);
+        gate.RestoreElapsedOverride = () => elapsed.Dequeue();
+
+        var error = await Assert.ThrowsAsync<TesterInfrastructureException>(() =>
+            gate.RunTestsAsync(Context(candidate)));
+
+        Assert.Contains("shared timeout budget exhausted", error.Message);
+        var commands = runtime.Sessions[0].Commands;
+        Assert.Equal(2, commands.Count);
+        Assert.Equal(TimeSpan.FromSeconds(10), commands[0].Timeout);
+        Assert.Equal(TimeSpan.FromSeconds(4), commands[1].Timeout);
+        Assert.All(commands, AssertOneRestoreTarget);
+        Assert.Contains("restore:dispose", timeline);
+        Assert.Equal([SandboxRole.Restore], runtime.Specs.Select(spec => spec.Role));
+    }
+
     public void Dispose()
     {
         _repo.Dispose();
@@ -218,12 +388,59 @@ public sealed class RestoreFlowTests : IDisposable
         File.WriteAllText(path, content);
     }
 
-    private TesterRunContext Context() => new()
+    private TesterRunContext Context(string? candidateSha = null) => new()
     {
-        Candidate = new CandidateRevision("main", _candidateSha, _candidateSha),
+        Candidate = new CandidateRevision(
+            "main", candidateSha ?? _candidateSha, candidateSha ?? _candidateSha),
         WorkPackageId = "WP-001",
         Attempt = 1,
     };
+
+    private void WriteProject(string relative)
+    {
+        var project = Path.Combine(_repo.Root,
+            relative.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(project)!);
+        File.WriteAllText(project,
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>" +
+            "<TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n");
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(project)!, "packages.lock.json"),
+            "{\n  \"version\": 1,\n  \"dependencies\": {\n    \"net10.0\": {}\n  }\n}\n");
+    }
+
+    private RoleRuntime SuccessfulRuntime(
+        List<string> timeline, Action<SandboxCommand>? onRestore = null) => new(timeline)
+    {
+        Factory = spec =>
+        {
+            var session = Session(spec, timeline);
+            if (spec.Role == SandboxRole.Restore)
+                session.OnRun = command =>
+                {
+                    onRestore?.Invoke(command);
+                    WriteDerived(spec, ".tenninety/restore-packages/pkg/data.bin", "package");
+                    WriteDerived(spec, "obj/project.assets.json", "assets");
+                };
+            return session;
+        },
+    };
+
+    private static string RestoreTarget(SandboxCommand command) =>
+        Assert.Single(command.Arguments, argument =>
+            argument.StartsWith("/workspace/", StringComparison.Ordinal) &&
+            (argument.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
+             argument.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase) ||
+             argument.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase) ||
+             argument.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) ||
+             argument.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)));
+
+    private static void AssertOneRestoreTarget(SandboxCommand command)
+    {
+        Assert.Equal("/usr/bin/dotnet", command.Executable);
+        Assert.Contains("restore", command.Arguments);
+        Assert.Contains("--locked-mode", command.Arguments);
+        _ = RestoreTarget(command);
+    }
 
     private void ConfigureRestore(SandboxRestoreConfig restore)
     {

@@ -41,8 +41,8 @@ namespace Tenninety.Execution.Testing;
 ///    property names) whose root object carries a supported numeric format version and whose
 ///    target/dependency structure has the non-null fields emitted for each dependency type;
 ///  - restore TARGETS are selected explicitly (one canonical solution; otherwise every
-///    project, or bounded solutions when no projects exist) so the fixed restore command
-///    never depends on the working directory's implicit solution inference.
+///    project, or bounded solutions when no projects exist). Each selected target gets its
+///    own fixed restore command; none depends on implicit working-directory inference.
 /// </summary>
 public static class RestorePrerequisiteValidator
 {
@@ -175,7 +175,7 @@ public static class RestorePrerequisiteValidator
     /// <summary>Deterministic explicit restore targets: exactly one discovered solution file
     /// wins (it is the canonical restore root); with multiple solutions, every discovered
     /// project is restored, or every solution when there are no projects. Container-relative,
-    /// ordinal-sorted, never a working-directory inference.</summary>
+    /// ordinal-sorted, one command per target, never a working-directory inference.</summary>
     private static IReadOnlyList<string> SelectRestoreTargets(
         string root, List<string> solutions, List<string> projects)
     {

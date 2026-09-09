@@ -460,6 +460,85 @@ public class RevertServiceTests
     }
 
     [Fact]
+    public async Task Revert_migrates_older_runtime_ignores_before_writing_recovery_evidence()
+    {
+        using var tmp = new TempDir();
+        var git = new GitService(tmp.Root);
+        git.Init();
+        Directory.CreateDirectory(tmp.Path(".tenninety"));
+        File.WriteAllText(tmp.Path(".tenninety/.gitignore"),
+            "state.json\naudit-log.jsonl\n");
+        File.WriteAllText(tmp.Path("README.md"), "initial");
+        git.CommitAll("initial");
+        File.WriteAllText(tmp.Path("feature.txt"), "promoted change");
+        git.CommitAll("WP-001: feature [work package]");
+        var target = git.HeadSha();
+        var service = new RevertService(
+            git, new TenNinetyConfig(), new MockFrontierClient(), new ScriptedTester(0),
+            new AuditLog(tmp.Path(".tenninety/audit-log.jsonl")));
+
+        var outcome = await service.RevertAsync(target, "bad promotion");
+
+        Assert.True(outcome.Success, outcome.Message);
+        Assert.True(git.IsClean());
+        Assert.Contains(git.RecentCommits(5),
+            commit => commit.Subject == "tenninety: update runtime ignores");
+        var ignore = File.ReadAllLines(tmp.Path(".tenninety/.gitignore"));
+        Assert.All(RuntimeGitignoreMigration.RequiredLines, line => Assert.Contains(line, ignore));
+        Assert.False(new PromotionTransactionStore(
+            tmp.Path(".tenninety/promotion-transaction.json")).Exists());
+    }
+
+    [Fact]
+    public async Task Hotfix_promotion_signing_failure_leaves_main_clean_and_branch_for_inspection()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+        string? signer = null;
+        var (service, git, dir) = MakeRevertFixture(g =>
+            new SigningPolicyTester(g, path => signer = path));
+        using (dir)
+        {
+            var mainBefore = git.HeadSha();
+
+            var outcome = await service.RevertAsync(mainBefore, "exercise failed signer");
+
+            Assert.False(outcome.Success);
+            Assert.NotNull(signer);
+            Assert.Equal(mainBefore, git.FindCommit("main")!.Sha);
+            Assert.Equal("main", git.CurrentBranch());
+            Assert.True(git.IsClean());
+            Assert.NotNull(outcome.BranchLeftBehind);
+            Assert.True(git.BranchExists(outcome.BranchLeftBehind!));
+            Assert.False(new PromotionTransactionStore(
+                dir.Path(".tenninety/promotion-transaction.json")).Exists());
+        }
+    }
+
+    private sealed class SigningPolicyTester(GitService git, Action<string> signerCreated)
+        : ITesterAgent
+    {
+        public Task<TestRunResult> RunTestsAsync(
+            TesterRunContext ctx, CancellationToken ct = default)
+        {
+            if (OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException();
+            var signer = Path.Combine(git.RepoPath, ".git", "failing-hotfix-signer");
+            File.WriteAllText(signer, "#!/bin/sh\nexit 71\n");
+            File.SetUnixFileMode(signer,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            git.SetLocalConfig("commit.gpgsign", "true");
+            git.SetLocalConfig("gpg.program", signer);
+            signerCreated(signer);
+            return Task.FromResult(new TestRunResult
+            {
+                Passed = true,
+                ExitCode = 0,
+                CandidateSha = ctx.Candidate.CommitSha,
+            });
+        }
+    }
+
+    [Fact]
     public async Task Revert_refuses_a_pass_bound_to_a_wrong_or_missing_candidate_sha()
     {
         foreach (var forced in new[] { new string('f', 40), "" })

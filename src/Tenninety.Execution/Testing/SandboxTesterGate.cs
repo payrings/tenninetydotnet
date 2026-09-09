@@ -153,6 +153,10 @@ public sealed class SandboxTesterGate : ITesterAgent
     /// recording protects the cleanup for root-initialization failures.</summary>
     internal Action<string>? OwnedRootInitializationHook { get; set; }
 
+    /// <summary>Deterministic elapsed-time seam for the shared Restore command budget.
+    /// Production uses a fresh monotonic stopwatch for each Restore session.</summary>
+    internal Func<TimeSpan>? RestoreElapsedOverride { get; set; }
+
     private sealed record CleanupEvidence(
         IReadOnlyList<string> Failures,
         string? RetainedWorkspace,
@@ -559,42 +563,94 @@ public sealed class SandboxTesterGate : ITesterAgent
         state.Session = await runtime.CreateAsync(spec, ct);
         state.Ownership?.SetContainer(state.Session.Info.ContainerId);
 
-        state.Stage = "restricted-restore-execution";
-        // The restore TARGETS come from the bounded structural prerequisite scan (the single
-        // discovered solution, or every discovered project, container-relative and
-        // ordinal-sorted): the fixed restore command never relies on the working directory's
-        // implicit solution inference. Locked mode is the authoritative check that each
-        // committed lock file is CURRENT for its project; a stale lock fails the restore.
-        var result = await state.Session.RunAsync(new SandboxCommand
+        // dotnet restore accepts exactly ONE project/solution per invocation. Keep the
+        // prerequisite scan's ordinal order and share one monotonic budget across commands;
+        // command-reported durations are not trusted for budget accounting.
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var elapsed = RestoreElapsedOverride ?? (() => stopwatch.Elapsed);
+        string? failure = null;
+        var indeterminate = false;
+        for (var i = 0; i < restoreTargets.Count; i++)
         {
-            Executable = "/usr/bin/dotnet",
-            Arguments =
-            [
-                "restore",
-                "--locked-mode",
-                "--configfile", controlConfig,
-                "--packages", SandboxPolicy.RestorePackagesContainerPath,
-                "--nologo",
-                .. restoreTargets,
-            ],
-            WorkingDirectory = SandboxPolicy.ContainerWorkspacePath,
-            Timeout = TimeSpan.FromSeconds(restore.TimeoutSeconds),
-            MaxOutputBytes = 4L * 1024 * 1024,
-        }, ct);
+            var target = restoreTargets[i];
+            // Candidate filenames may contain secrets or terminal controls. Identify the
+            // exact target without publishing path text, even on session exceptions.
+            var targetHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(target)))[..12];
+            var targetLabel = $"target {i + 1}/{restoreTargets.Count} (path-sha256 {targetHash})";
+            state.Stage = "restricted-restore-execution " + targetLabel;
+            ct.ThrowIfCancellationRequested();
+            var remaining = spec.Timeout - elapsed();
+            if (remaining <= TimeSpan.Zero)
+            {
+                failure = "Restore shared timeout budget was exhausted before " + targetLabel;
+                indeterminate = true;
+                break;
+            }
+
+            SandboxCommandResult result;
+            try
+            {
+                result = await state.Session.RunAsync(new SandboxCommand
+                {
+                    Executable = "/usr/bin/dotnet",
+                    Arguments =
+                    [
+                        "restore",
+                        "--locked-mode",
+                        "--configfile", controlConfig,
+                        "--packages", SandboxPolicy.RestorePackagesContainerPath,
+                        "--nologo",
+                        target,
+                    ],
+                    WorkingDirectory = SandboxPolicy.ContainerWorkspacePath,
+                    Timeout = remaining,
+                    MaxOutputBytes = 4L * 1024 * 1024,
+                }, ct);
+            }
+            catch (Exception ex)
+            {
+                throw PublicTesterFailure(
+                    "Restore " + targetLabel + " failed with a session infrastructure error (" +
+                    ex.GetType().Name + "); the result is indeterminate; no Tester container is started.");
+            }
+
+            ct.ThrowIfCancellationRequested();
+            var reason = result.TimedOut ? "command timeout"
+                : result.Cancelled ? "infrastructure cancellation"
+                : result.OomKilled ? "out of memory"
+                : result.OutputTruncated ? "output truncation"
+                : result.SyntheticInfrastructureFailure ? "no definitive exit code"
+                : elapsed() >= spec.Timeout ? "shared timeout budget exhausted"
+                : null;
+            if (reason is not null)
+            {
+                failure = "Restore " + targetLabel + " ended without a complete definitive result (" + reason + ")";
+                indeterminate = true;
+                break;
+            }
+            if (result.ExitCode != 0)
+            {
+                failure = $"restricted Restore exited {result.ExitCode} for {targetLabel}; the candidate cannot be tested";
+                break;
+            }
+        }
 
         state.Stage = "restore-container-removal";
         var removalFailure = await RemoveCurrentSessionAsync(state);
         if (removalFailure is not null)
+        {
+            var commandFailure = failure is null ? "" : failure + "; additionally, ";
             throw PublicTesterFailure(
+                commandFailure +
                 "the Restore container could not be proven removed before integrity " +
                 "validation; the workspace is retained: " + removalFailure);
+        }
 
-        if (result.TimedOut || result.Cancelled || result.OomKilled ||
-            result.OutputTruncated || result.SyntheticInfrastructureFailure)
-            throw PublicTesterFailure(
-                "Restore ended without a complete definitive result; no Tester container is started.");
-        if (result.ExitCode != 0)
-            return $"restricted Restore exited {result.ExitCode}; the candidate cannot be tested";
+        if (indeterminate)
+            throw PublicTesterFailure(failure + "; no Tester container is started.");
+        if (failure is not null)
+            return failure;
 
         state.Stage = "post-restore-integrity-validation";
         var maxDerivedBytes = checked((long)restore.MaxDerivedMb * 1024 * 1024);

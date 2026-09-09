@@ -145,6 +145,34 @@ public class HardeningTests
         Assert.Equal("tenninety: update runtime ignores", git.RecentCommits(1).Single().Subject);
     }
 
+    [Fact]
+    public async Task Overridden_promotion_ignore_rules_refuse_execution_before_journaling()
+    {
+        using var tmp = new TempDir();
+        var git = new GitService(tmp.Root);
+        git.Init();
+        Directory.CreateDirectory(tmp.Path(".tenninety"));
+        File.WriteAllText(tmp.Path(".tenninety/.gitignore"),
+            RuntimeGitignoreMigration.Contents +
+            "!promotion-transaction.json\n!promotion-transaction.json.tmp*\n" +
+            "!promotion-transaction.json.lock\n");
+        File.WriteAllText(tmp.Path("README.md"), "demo");
+        git.CommitPaths([".tenninety/.gitignore", "README.md"], "initial");
+        var state = new RuntimeState();
+        var orchestrator = new Orchestrator(
+            git, new Plan { ProjectName = "ignore override" }, state,
+            new TenNinetyConfig(), new MockFrontierClient(),
+            new StateStore(tmp.Path(".tenninety/state.json")),
+            new AuditLog(tmp.Path(".tenninety/audit-log.jsonl")));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            orchestrator.RunAsync(CancellationToken.None));
+
+        Assert.Contains("not effectively ignored", error.Message);
+        Assert.False(new PromotionTransactionStore(
+            tmp.Path(".tenninety/promotion-transaction.json")).Exists());
+    }
+
     private static Orchestrator MakeOrchestrator(
         TempDir tmp, Git.GitService git, Plan plan, RuntimeState state)
     {

@@ -7,11 +7,18 @@ public static class TenNinety
     public const string SpecFile = "spec.md";
     public const string PlanFile = "plan.json";
     public const string StateFile = "state.json";
+    public const string PromotionFile = "promotion-transaction.json";
     public const string ConfigFile = "config.json";
     public const string AuditFile = "audit-log.jsonl";
     public const string WorkBranchPrefix = "work/";
     public const string HotfixBranchPrefix = "hotfix/";
     public const string MainBranch = "main";
+
+    public static class PromotionKinds
+    {
+        public const string WorkPackage = "work-package";
+        public const string Hotfix = "hotfix";
+    }
 
     public static class WpStatus
     {

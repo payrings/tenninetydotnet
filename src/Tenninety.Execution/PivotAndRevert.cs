@@ -229,6 +229,49 @@ public sealed class RevertService
         if (!_git.IsClean())
             return new RevertOutcome { Success = false, Message = "working tree is not clean; refusing to revert." };
 
+        var otherWorktreePromotions =
+            RuntimeGitignoreMigration.CountPromotionJournalsInOtherWorktrees(_git);
+        if (otherWorktreePromotions > 0)
+            return new RevertOutcome
+            {
+                Success = false,
+                Message = $"{otherWorktreePromotions} linked worktree promotion " +
+                          "transaction(s) require recovery; refusing to revert here.",
+            };
+
+        var runtimeIgnore = $"{TenNinety.StateDir}/.gitignore";
+        try
+        {
+            // A repository-level rule such as `.tenninety/` already protects every journal
+            // artifact; do not try to force a nested ignore file into that repository.
+            if (!RuntimeGitignoreMigration.PromotionArtifactsAreIgnored(_git) &&
+                RuntimeGitignoreMigration.Ensure(_git.RepoPath))
+                _git.CommitPaths([runtimeIgnore], "tenninety: update runtime ignores");
+        }
+        catch (Exception ex)
+        {
+            return new RevertOutcome
+            {
+                Success = false,
+                Message = Diagnostic(
+                    $"revert could not prepare the runtime recovery journal: {ex.Message}"),
+            };
+        }
+        if (!RuntimeGitignoreMigration.PromotionArtifactsAreIgnored(_git))
+            return new RevertOutcome
+            {
+                Success = false,
+                Message = "promotion recovery journal files are not effectively ignored; " +
+                          "remove overriding ignore negations or ignore .tenninety/ before reverting.",
+            };
+        if (!_git.IsClean())
+            return new RevertOutcome
+            {
+                Success = false,
+                Message = "runtime-ignore migration did not leave a clean main checkout; " +
+                          "refusing to revert.",
+            };
+
         var expectedMainSha = _git.HeadSha();
 
         if (!_git.IsAncestorOfMain(commit.Sha))
@@ -239,6 +282,15 @@ public sealed class RevertService
             };
 
         var branch = $"{TenNinety.HotfixBranchPrefix}revert-{commit.Sha[..8]}";
+        var promotionStore = new PromotionTransactionStore(
+            Path.Combine(_git.RepoPath, TenNinety.StateDir, TenNinety.PromotionFile));
+        if (promotionStore.Exists())
+            return new RevertOutcome
+            {
+                Success = false,
+                Message = "a promotion recovery transaction is pending; run 'tenninety start' " +
+                          "before beginning another revert.",
+            };
         if (_git.BranchExists(branch))
             return new RevertOutcome
             {
@@ -290,6 +342,7 @@ public sealed class RevertService
 
         // Coder role: apply the mechanical revert on a hotfix branch.
         _git.CreateAndCheckoutBranch(branch);
+        PromotionTransaction? promotion = null;
         try
         {
             _git.RevertCommitNoEdit(commit.Sha);
@@ -338,15 +391,52 @@ public sealed class RevertService
                 throw new InvalidOperationException(
                     "test command changed the mechanical revert or main; refusing unreviewed promotion.");
 
-            var mergeSha = _git.SquashMergeToMain(branch, $"Revert \"{commit.Subject}\" [hotfix]");
-            try { _git.DeleteBranchSafe(branch, force: true); } catch { /* non-fatal */ }
+            var mergeSha = _git.PrepareSquashPromotion(
+                branch, expectedMainSha, expectedHotfixSha,
+                $"Revert \"{commit.Subject}\" [hotfix]");
+            var preparedPromotion = new PromotionTransaction
+            {
+                Kind = TenNinety.PromotionKinds.Hotfix,
+                ExecutionId = Guid.NewGuid().ToString("N"),
+                Branch = branch,
+                ExpectedBaseSha = expectedMainSha,
+                CandidateSha = expectedHotfixSha,
+                PromotionSha = mergeSha,
+            };
+            promotionStore.Save(preparedPromotion);
+            promotion = preparedPromotion;
+            try
+            {
+                _git.CompleteSquashPromotion(
+                    branch, expectedMainSha, expectedHotfixSha, mergeSha);
+            }
+            catch (SquashPromotionException ex) when (ex.RecoverySucceeded)
+            {
+                _audit.Append("REVERT_PROMOTION_RECOVERED", detail:
+                    mergeSha + " " + Diagnostic(ex.Message));
+            }
+            _git.DeleteBranchCompareAndSwap(branch, expectedHotfixSha);
+            promotionStore.Complete(promotion);
+            promotion = null;
+            try
+            {
+                _git.ReleaseSquashPromotion(expectedHotfixSha, mergeSha);
+            }
+            catch (Exception ex)
+            {
+                _audit.Append("REVERT_PROMOTION_REF_CLEANUP_REQUIRED", detail:
+                    Diagnostic(ex.Message));
+            }
             _audit.Append("REVERT_PROMOTED", detail: mergeSha);
             Log($"revert promoted to main ({mergeSha[..12]})");
             return new RevertOutcome { Success = true, Message = $"reverted {commit.Sha[..12]} via {mergeSha[..12]}." };
         }
         catch (Exception ex)
         {
-            try { _git.CheckoutBranch(TenNinety.MainBranch); } catch { /* already on main */ }
+            // Once durable evidence exists, leave every partial state for exact startup
+            // reconciliation. Before that point a clean hotfix checkout can safely return.
+            if (promotion is null)
+                try { _git.CheckoutBranch(TenNinety.MainBranch); } catch { /* retained below */ }
             _audit.Append("REVERT_ERROR", detail: Diagnostic(ex.Message));
             return new RevertOutcome
             {

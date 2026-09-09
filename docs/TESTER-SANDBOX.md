@@ -192,8 +192,12 @@ acceptance-ID and proxy controls.
   failure.
 - The restore command selects bounded targets EXPLICITLY (the single discovered solution file;
   otherwise every discovered project, or every solution when no projects were discovered;
-  container-relative and ordinal-sorted). It never relies on the container working directory's
-  implicit solution inference.
+  container-relative and ordinal-sorted). Each target is passed to its own structured
+  `dotnet restore` invocation because the CLI accepts one project or solution target. All
+  invocations share the one configured Restore timeout; failure, cancellation, timeout,
+  truncation, or an indeterminate result stops the sequence. Diagnostics identify the failing
+  target by ordinal and a bounded path digest without publishing candidate path text. Restore
+  never relies on the container working directory's implicit solution inference.
 - Restore always runs the FIXED `dotnet restore --locked-mode` command. Locked mode requires a
   lock file for every restored project and can never introduce a newly selected package: the
   lock closure is produced and reviewed by an operator-controlled process, never by Restore.
@@ -448,6 +452,18 @@ fresh Reviewer → fresh Tester with exact candidate SHA propagation.
   It removes workspaces only when the journal proves they are direct `attempt-*` children of the
   recorded non-overlapping managed root. Unrelated containers, directories, and siblings are not
   discovered by prefix/timestamp scans and are never deleted.
+- Scoped sandbox recovery runs before branch validation. A clean checked-out `work/<ID>` is
+  returned to `main` only when `state.json` identifies that exact interrupted package and its
+  attempt state; attempts remain available for resume. Dirty known work branches, unrelated
+  branches, detached HEADs, and ambiguous state are preserved after sandbox cleanup and produce
+  an actionable startup error instead of an automatic reset, stash, or commit.
+- Squash publication uses `.tenninety/promotion-transaction.json`. The journal binds one execution
+  ID to the exact base, candidate branch tip, and prepared promotion commit before `main` moves.
+  Startup may finish only that exact compare-and-swap publication, save `DONE`, and delete only
+  the still-matching candidate branch. The journal remains until all three steps are complete;
+  repeated recovery is idempotent. Conflicting refs, index/worktree changes, a changed candidate,
+  or mismatched REWORK execution identity are quarantined for operator inspection. Completion is
+  never inferred from a subject line, branch absence, or audit text.
 - Any malformed journal, failed inventory, failed removal, unexpected path type, or unresolved
   workspace is persisted as `SandboxRecoveryInfo` quarantine and scheduling is refused. Recovery
   retries on the next start; `tenninety status` reports its facts.

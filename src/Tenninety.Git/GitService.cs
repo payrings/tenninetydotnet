@@ -24,6 +24,8 @@ public interface IGitService
     void Init();
     bool IsClean();
     bool IsPathClean(string relativePath);
+    bool IsPathIgnored(string relativePath) => false;
+    IReadOnlyList<string> WorktreePaths() => [RepoPath];
     string CurrentBranch();
     /// <summary>Branch HEAD symbolically points at, or null when detached; also valid on an
     /// unborn branch (no commit yet).</summary>
@@ -39,6 +41,23 @@ public interface IGitService
     string? CommitPaths(IEnumerable<string> relativePaths, string message);
     /// <summary>Squash-merges a work branch into main as ONE identifiable commit; returns the new sha.</summary>
     string SquashMergeToMain(string branch, string message);
+    /// <summary>Creates and verifies the exact promotion object BEFORE changing any ref or
+    /// checkout, honoring repository identity and commit.gpgsign. Requires the clean checked-out
+    /// work branch at expectedCandidateSha, descending from main at expectedBaseSha. Persist
+    /// the returned SHA with these inputs before calling CompleteSquashPromotion.</summary>
+    string PrepareSquashPromotion(string branch, string expectedBaseSha, string expectedCandidateSha,
+        string message) => throw new NotSupportedException("squash promotion preparation is not implemented.");
+    /// <summary>Publishes the prepared object using CAS, then completes the checkout without
+    /// deleting the work branch. Repeatable with the SAME inputs after interruption, including
+    /// when main already equals promotionSha. Never rewinds main; ambiguous state is preserved.</summary>
+    void CompleteSquashPromotion(string branch, string expectedBaseSha, string expectedCandidateSha,
+        string promotionSha) => throw new NotSupportedException("squash promotion completion is not implemented.");
+    /// <summary>Removes the internal refs retaining the prepared promotion and candidate
+    /// objects. Call only after durable transaction evidence has been removed.</summary>
+    void ReleaseSquashPromotion(string expectedCandidateSha, string promotionSha) { }
+    /// <summary>Deletes the branch only if it still identifies the exact expected candidate.</summary>
+    void DeleteBranchCompareAndSwap(string branch, string expectedSha) =>
+        throw new NotSupportedException("compare-and-swap branch deletion is not implemented.");
     /// <summary>Bounded unified patch of branch vs main (head+tail elided).</summary>
     string DiffPatchAgainstMain(string branch, int maxChars = 20000);
     string HeadSha();
@@ -192,6 +211,40 @@ public sealed record HashedIngestion(string ObjectSha, byte[] InspectedPrefix, l
 public sealed class GitOutputLimitExceededException(long maxBytes)
     : InvalidOperationException($"git output exceeded the configured {maxBytes}-byte read cap.");
 
+/// <summary>A publication/checkout failure. The caller must retain its durable promotion
+/// record, even if forward recovery succeeded. A failed recovery quarantines the preserved
+/// repository for operator inspection; neither failure is discarded.</summary>
+public sealed class SquashPromotionException : InvalidOperationException
+{
+    public string PromotionSha { get; }
+    public Exception OriginalException { get; }
+    public Exception? RecoveryException { get; }
+    public bool RecoverySucceeded => RecoveryException is null;
+
+    internal SquashPromotionException(string sha, Exception original, Exception? recovery)
+        : base(recovery is null
+            ? $"squash promotion {sha} failed: {original.Message}; forward recovery completed. " +
+              "Retain the promotion record and repeat completion before cleanup."
+            : $"squash promotion {sha} failed: {original.Message}; recovery failed: {recovery.Message}. " +
+              "Repository quarantined, unsafe for retry; refs, index and worktree were preserved.",
+            recovery is null ? original : new AggregateException(original, recovery))
+    {
+        PromotionSha = sha;
+        OriginalException = original;
+        RecoveryException = recovery;
+    }
+}
+
+internal enum SquashPromotionPhase
+{
+    AfterCommitObject,
+    BeforeMainCompareAndSwap,
+    AfterMainCompareAndSwap,
+    BeforeCheckout,
+    AfterCheckout,
+    BeforeRecovery,
+}
+
 public sealed class GitService : IGitService
 {
     private const string DiffTruncationMarker =
@@ -248,6 +301,8 @@ public sealed class GitService : IGitService
     }
 
     private readonly bool _isolated;
+
+    internal Action<SquashPromotionPhase>? SquashPromotionFailpoint { get; set; }
 
     public string RepoPath { get; }
 
@@ -338,6 +393,16 @@ public sealed class GitService : IGitService
 
     public bool IsPathClean(string relativePath) =>
         Run("status", "--porcelain", "--", relativePath).Output.Trim().Length == 0;
+
+    public bool IsPathIgnored(string relativePath) =>
+        TryRun("check-ignore", "--quiet", "--", relativePath).ExitCode == 0;
+
+    public IReadOnlyList<string> WorktreePaths() =>
+        Run("worktree", "list", "--porcelain", "-z").Output
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Where(entry => entry.StartsWith("worktree ", StringComparison.Ordinal))
+            .Select(entry => Path.GetFullPath(entry[9..]))
+            .ToArray();
 
     public string CurrentBranch() => Run("rev-parse", "--abbrev-ref", "HEAD").Output.Trim();
 
@@ -457,17 +522,386 @@ public sealed class GitService : IGitService
     /// </summary>
     public string SquashMergeToMain(string branch, string message)
     {
-        if (!IsClean())
-            throw new InvalidOperationException("work branch must be clean before promotion.");
-        CheckoutBranch(TenNinety.MainBranch);
-        var result = TryRun("merge", "--squash", branch);
-        if (result.ExitCode != 0)
-            throw new GitException($"merge --squash {branch}", result.ExitCode, result.Stderr);
-        // The squash merge already populated the index. Commit that reviewed index exactly;
-        // never run `git add -A` here, which could capture post-review untracked files.
-        var sha = CommitStaged(message)
-            ?? throw new InvalidOperationException($"squash merge of '{branch}' produced no changes.");
+        var baseSha = PromotionRef(TenNinety.MainBranch);
+        var candidateSha = PromotionRef(branch);
+        var sha = PrepareSquashPromotion(branch, baseSha, candidateSha, message);
+        var completed = false;
+        try
+        {
+            CompleteSquashPromotion(branch, baseSha, candidateSha, sha);
+            completed = true;
+        }
+        catch (SquashPromotionException ex) when (ex.RecoverySucceeded)
+        {
+            // The exact prepared commit is published and the checkout was recovered. Callers
+            // without a durable journal (legacy API) can safely treat this as completed.
+            completed = true;
+        }
+        finally
+        {
+            if (completed) ReleaseSquashPromotion(candidateSha, sha);
+        }
         return sha;
+    }
+
+    public string PrepareSquashPromotion(string branch, string expectedBaseSha,
+        string expectedCandidateSha, string message)
+    {
+        ValidateTrustedMessage(message);
+        ValidateSquashInputs(branch, expectedBaseSha, expectedCandidateSha, requireBranch: true);
+        RequireCleanPromotionCheckout(branch, expectedBaseSha, expectedCandidateSha);
+        var tree = CreateSquashTree(expectedBaseSha, expectedCandidateSha);
+        var sign = PromotionSigningEnabled();
+        var sha = Run(NoReplace("commit-tree", tree, "-p", expectedBaseSha,
+            sign ? "-S" : "--no-gpg-sign", "-m", message)).Output.Trim();
+        SquashPromotionFailpoint?.Invoke(SquashPromotionPhase.AfterCommitObject);
+        VerifySquashObject(sha, expectedBaseSha, tree, requireSignature: sign);
+        ValidateSquashInputs(branch, expectedBaseSha, expectedCandidateSha, requireBranch: true);
+        RequireCleanPromotionCheckout(branch, expectedBaseSha, expectedCandidateSha);
+        if (PromotionSigningEnabled() != sign)
+            throw new InvalidOperationException("commit.gpgsign changed while preparing the promotion.");
+        AnchorSquashPromotion(expectedCandidateSha, sha);
+        return sha;
+    }
+
+    public void CompleteSquashPromotion(string branch, string expectedBaseSha,
+        string expectedCandidateSha, string promotionSha)
+    {
+        var main = PromotionRef(TenNinety.MainBranch);
+        var candidateRef = PromotionRefOrNull(branch);
+        var branchExists = candidateRef is not null;
+        if (candidateRef is not null && candidateRef != expectedCandidateSha)
+            throw new InvalidOperationException(
+                "the candidate branch changed during squash promotion; it was preserved for inspection.");
+        if (!branchExists && main != promotionSha)
+            throw new InvalidOperationException(
+                "the candidate branch is absent before the exact promotion was published.");
+        ValidateSquashInputs(branch, expectedBaseSha, expectedCandidateSha, requireBranch: branchExists);
+        var tree = CreateSquashTree(expectedBaseSha, expectedCandidateSha);
+        VerifySquashObject(
+            promotionSha, expectedBaseSha, tree,
+            requireSignature: PromotionSigningEnabled());
+        var published = main == promotionSha;
+        try
+        {
+            if (!published)
+            {
+                if (main != expectedBaseSha)
+                    throw new InvalidOperationException(
+                        "main changed after promotion preparation; no history was rewritten.");
+                RequireCleanPromotionCheckout(branch, expectedBaseSha, expectedCandidateSha);
+                SquashPromotionFailpoint?.Invoke(SquashPromotionPhase.BeforeMainCompareAndSwap);
+                UpdateMainAndVerifyCandidate(
+                    branch, expectedBaseSha, expectedCandidateSha, promotionSha);
+                published = true;
+                SquashPromotionFailpoint?.Invoke(SquashPromotionPhase.AfterMainCompareAndSwap);
+            }
+            FinishCheckout(recovering: false);
+        }
+        catch (Exception original)
+        {
+            // A Git process can publish and then fail to report success. Inspect exact refs
+            // in recovery instead of ever undoing a possibly published commit.
+            if (!published)
+            {
+                try { published = PromotionRef(TenNinety.MainBranch) == promotionSha; }
+                catch (Exception recovery) { throw new SquashPromotionException(promotionSha, original, recovery); }
+            }
+            if (!published) throw;
+            try
+            {
+                SquashPromotionFailpoint?.Invoke(SquashPromotionPhase.BeforeRecovery);
+                FinishCheckout(recovering: true);
+            }
+            catch (Exception recovery)
+            {
+                throw new SquashPromotionException(promotionSha, original, recovery);
+            }
+            throw new SquashPromotionException(promotionSha, original, null);
+        }
+
+        void FinishCheckout(bool recovering)
+        {
+            if (PromotionRef(TenNinety.MainBranch) != promotionSha)
+                throw new InvalidOperationException(
+                    "main no longer identifies the prepared promotion; repository quarantined.");
+            var currentCandidate = PromotionRefOrNull(branch);
+            if (currentCandidate is not null && currentCandidate != expectedCandidateSha)
+                throw new InvalidOperationException(
+                    "the candidate branch changed after publication; repository quarantined.");
+
+            var headBranch = SymbolicHeadBranch();
+            if (headBranch == branch)
+            {
+                RequireIndexAndWorktree(expectedCandidateSha);
+                if (!recovering) SquashPromotionFailpoint?.Invoke(SquashPromotionPhase.BeforeCheckout);
+                Run("checkout", "--no-overwrite-ignore", TenNinety.MainBranch);
+            }
+            else if (headBranch == TenNinety.MainBranch)
+            {
+                var indexTree = WriteTree();
+                var promotionTree = ResolveTreeOfCommit(promotionSha);
+                if (indexTree == promotionTree)
+                {
+                    RequireWorktreeMatchesIndex();
+                }
+                else if (indexTree == ResolveTreeOfCommit(expectedBaseSha))
+                {
+                    // A process can die immediately after the main CAS, leaving HEAD on the
+                    // new commit while index/worktree still exactly match the recorded base.
+                    // That exact state is operation-owned. Any other partial state is retained.
+                    RequireWorktreeMatchesIndex();
+                    if (!recovering) SquashPromotionFailpoint?.Invoke(SquashPromotionPhase.BeforeCheckout);
+                    Run("read-tree", "-m", "-u", promotionSha);
+                }
+                else
+                    throw new InvalidOperationException(
+                        "the main index is neither the recorded base nor promotion tree; " +
+                        "external or partial changes were preserved.");
+            }
+            else
+                throw new InvalidOperationException(
+                    "HEAD is on an unrelated branch or detached; it was preserved for inspection.");
+
+            if (!recovering) SquashPromotionFailpoint?.Invoke(SquashPromotionPhase.AfterCheckout);
+            if (SymbolicHeadBranch() != TenNinety.MainBranch || HeadSha() != promotionSha ||
+                WriteTree() != ResolveTreeOfCommit(promotionSha))
+                throw new InvalidOperationException(
+                    "the promotion checkout did not reach the exact prepared commit.");
+            RequireWorktreeMatchesIndex();
+        }
+    }
+
+    public void DeleteBranchCompareAndSwap(string branch, string expectedSha)
+    {
+        Run("check-ref-format", $"refs/heads/{branch}");
+        RequirePromotionOid(expectedSha);
+        var current = PromotionRefOrNull(branch);
+        if (current is null) return;
+        if (current != expectedSha)
+            throw new InvalidOperationException(
+                $"branch '{branch}' changed after promotion; it was not deleted.");
+        if (SymbolicHeadBranch() == branch)
+            throw new InvalidOperationException(
+                $"branch '{branch}' is still checked out; it was not deleted.");
+        if (Run("worktree", "list", "--porcelain", "-z").Output
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Any(entry => entry == $"branch refs/heads/{branch}"))
+            throw new InvalidOperationException(
+                $"branch '{branch}' is checked out in another worktree; it was not deleted.");
+        Run("update-ref", "-d", $"refs/heads/{branch}", expectedSha);
+        if (PromotionRefOrNull(branch) is not null)
+            throw new InvalidOperationException(
+                $"branch '{branch}' deletion could not be proven.");
+    }
+
+    public void ReleaseSquashPromotion(string expectedCandidateSha, string promotionSha)
+    {
+        RequirePromotionOid(expectedCandidateSha);
+        RequirePromotionOid(promotionSha);
+        var promotionRef = PromotionAnchorRef("prepared", promotionSha);
+        var candidateRef = PromotionAnchorRef("candidates", promotionSha);
+        var currentPromotion = ExactRefOrNull(promotionRef);
+        var currentCandidate = ExactRefOrNull(candidateRef);
+        if (currentPromotion is not null && currentPromotion != promotionSha)
+            throw new InvalidOperationException("the internal promotion retention ref changed; it was preserved.");
+        if (currentCandidate is not null && currentCandidate != expectedCandidateSha)
+            throw new InvalidOperationException("the internal candidate retention ref changed; it was preserved.");
+        if (currentPromotion is null && currentCandidate is null) return;
+
+        var commands = new StringBuilder("start\n");
+        if (currentPromotion is not null)
+            commands.Append($"delete {promotionRef} {promotionSha}\n");
+        if (currentCandidate is not null)
+            commands.Append($"delete {candidateRef} {expectedCandidateSha}\n");
+        commands.Append("prepare\ncommit\n");
+        RunWithInput(["update-ref", "--stdin"], commands.ToString());
+        if (ExactRefOrNull(promotionRef) is not null || ExactRefOrNull(candidateRef) is not null)
+            throw new InvalidOperationException("internal promotion retention refs could not be removed.");
+    }
+
+    private void ValidateSquashInputs(
+        string branch, string baseSha, string candidateSha, bool requireBranch)
+    {
+        Run("check-ref-format", $"refs/heads/{branch}");
+        if (branch == TenNinety.MainBranch)
+            throw new InvalidOperationException("the squash work branch must not be main.");
+        RequirePromotionOid(baseSha);
+        RequirePromotionOid(candidateSha);
+        RequireCommitObject(baseSha);
+        RequireCommitObject(candidateSha);
+        if (requireBranch && PromotionRef(branch) != candidateSha)
+            throw new InvalidOperationException("the candidate branch no longer identifies the reviewed commit.");
+    }
+
+    private static void RequirePromotionOid(string sha)
+    {
+        if (sha.Length is not (40 or 64) || !sha.All(Uri.IsHexDigit))
+            throw new InvalidOperationException("promotion requires exact full commit object IDs.");
+    }
+
+    private string PromotionRef(string branch)
+    {
+        Run("check-ref-format", $"refs/heads/{branch}");
+        if (TryRun("symbolic-ref", "--quiet", $"refs/heads/{branch}").ExitCode == 0)
+            throw new InvalidOperationException($"promotion branch '{branch}' must not be a symbolic ref.");
+        return Run(NoReplace("rev-parse", "--verify", $"refs/heads/{branch}")).Output.Trim();
+    }
+
+    private string? PromotionRefOrNull(string branch)
+    {
+        Run("check-ref-format", $"refs/heads/{branch}");
+        if (TryRun("symbolic-ref", "--quiet", $"refs/heads/{branch}").ExitCode == 0)
+            throw new InvalidOperationException($"promotion branch '{branch}' must not be a symbolic ref.");
+        var result = TryRun(NoReplace("rev-parse", "--verify", $"refs/heads/{branch}"));
+        return result.ExitCode == 0 ? result.Output.Trim() : null;
+    }
+
+    private string CreateSquashTree(string baseSha, string candidateSha)
+    {
+        var result = TryRun(NoReplace("merge-tree", "--write-tree", baseSha, candidateSha));
+        if (result.ExitCode != 0)
+            throw new GitException(
+                $"merge-tree --write-tree {baseSha} {candidateSha}", result.ExitCode, result.Stderr);
+        var tree = result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+        RequirePromotionOid(tree);
+        if (tree == ResolveTreeOfCommit(baseSha))
+            throw new InvalidOperationException("squash promotion produced no changes.");
+        return tree;
+    }
+
+    private bool PromotionSigningEnabled()
+    {
+        var result = TryRun("config", "--type=bool", "--get", "commit.gpgsign");
+        if (result.ExitCode == 1) return false;
+        if (result.ExitCode != 0)
+            throw new GitException("config --type=bool --get commit.gpgsign", result.ExitCode, result.Stderr);
+        return result.Output.Trim() == "true";
+    }
+
+    private void VerifySquashObject(
+        string sha, string baseSha, string tree, bool requireSignature)
+    {
+        RequirePromotionOid(sha);
+        RequireCommitObject(sha);
+        // Inspect raw headers, not revision walking: grafts/replacements must not hide an
+        // extra parent, and signature continuation lines are not commit headers.
+        var headers = Run(NoReplace("cat-file", "commit", sha)).Output.Split("\n\n", 2)[0].Split('\n');
+        if (!headers.Where(l => l.StartsWith("parent ", StringComparison.Ordinal))
+                .SequenceEqual([$"parent {baseSha}"]) ||
+            !headers.Where(l => l.StartsWith("tree ", StringComparison.Ordinal))
+                .SequenceEqual([$"tree {tree}"]))
+            throw new InvalidOperationException("promotion commit does not have the exact candidate tree and single base parent.");
+        if (requireSignature && !headers.Any(l => l.StartsWith("gpgsig ", StringComparison.Ordinal)))
+            throw new InvalidOperationException(
+                "commit.gpgsign requires a signed promotion object; refusing publication.");
+    }
+
+    private void AnchorSquashPromotion(string candidateSha, string promotionSha)
+    {
+        var promotionRef = PromotionAnchorRef("prepared", promotionSha);
+        var candidateRef = PromotionAnchorRef("candidates", promotionSha);
+        var currentPromotion = ExactRefOrNull(promotionRef);
+        var currentCandidate = ExactRefOrNull(candidateRef);
+        if (currentPromotion == promotionSha && currentCandidate == candidateSha) return;
+        if (currentPromotion is not null || currentCandidate is not null)
+            throw new InvalidOperationException(
+                "internal promotion retention refs conflict with the prepared objects.");
+
+        var zero = new string('0', promotionSha.Length);
+        var commands = "start\n" +
+                       $"update {promotionRef} {promotionSha} {zero}\n" +
+                       $"update {candidateRef} {candidateSha} {zero}\n" +
+                       "prepare\ncommit\n";
+        RunWithInput(["update-ref", "--stdin"], commands);
+        if (ExactRefOrNull(promotionRef) != promotionSha ||
+            ExactRefOrNull(candidateRef) != candidateSha)
+            throw new InvalidOperationException(
+                "prepared promotion objects could not be retained for crash recovery.");
+    }
+
+    private static string PromotionAnchorRef(string kind, string promotionSha) =>
+        $"refs/tenninety/{kind}/{promotionSha}";
+
+    private string? ExactRefOrNull(string refName)
+    {
+        if (TryRun("symbolic-ref", "--quiet", refName).ExitCode == 0)
+            throw new InvalidOperationException(
+                $"internal promotion ref '{refName}' must not be symbolic.");
+        var result = TryRun(NoReplace("rev-parse", "--verify", refName));
+        return result.ExitCode == 0 ? result.Output.Trim() : null;
+    }
+
+    private void RequireCleanPromotionCheckout(string branch, string baseSha, string candidateSha)
+    {
+        if (PromotionRef(TenNinety.MainBranch) != baseSha || PromotionRef(branch) != candidateSha)
+            throw new InvalidOperationException("main or candidate ref changed during squash promotion.");
+        var headBranch = SymbolicHeadBranch();
+        if (headBranch != branch && headBranch != TenNinety.MainBranch)
+            throw new InvalidOperationException("HEAD branch changed; promotion requires its work branch or the completed main checkout.");
+        var expectedHead = headBranch == branch ? candidateSha : baseSha;
+        if (HeadSha() != expectedHead)
+            throw new InvalidOperationException("HEAD commit changed during squash promotion.");
+        RequireIndexAndWorktree(expectedHead);
+        var topLevel = RepositoryTopLevel();
+        string? worktree = null;
+        foreach (var entry in Run("worktree", "list", "--porcelain", "-z").Output.Split('\0'))
+        {
+            if (entry.StartsWith("worktree ", StringComparison.Ordinal)) worktree = entry[9..];
+            if (entry == $"branch refs/heads/{TenNinety.MainBranch}" && worktree != topLevel)
+                throw new InvalidOperationException("main is checked out in another worktree; refusing to change its ref.");
+        }
+    }
+
+    private void RequireIndexAndWorktree(string expectedCommit)
+    {
+        var entries = Run("ls-files", "-v", "-z").Output
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        if (entries.Any(entry => entry[0] != 'H') ||
+            WriteTree() != ResolveTreeOfCommit(expectedCommit))
+            throw new InvalidOperationException(
+                "promotion index does not exactly match the recorded checkout; it was preserved.");
+        RequireWorktreeMatchesIndex();
+    }
+
+    private void RequireWorktreeMatchesIndex()
+    {
+        var worktree = TryRun("diff", "--quiet", "--ignore-submodules=none", "--");
+        if (worktree.ExitCode is not 0 and not 1)
+            throw new GitException("diff --quiet --ignore-submodules=none", worktree.ExitCode, worktree.Stderr);
+        if (worktree.ExitCode != 0 ||
+            Run("ls-files", "--others", "--exclude-standard", "-z").Output.Length != 0)
+            throw new InvalidOperationException(
+                "promotion worktree contains external or partial changes; they were preserved.");
+    }
+
+    private void UpdateMainAndVerifyCandidate(
+        string branch, string baseSha, string candidateSha, string promotionSha)
+    {
+        var commands = "start\n" +
+                       $"update refs/heads/{TenNinety.MainBranch} {promotionSha} {baseSha}\n" +
+                       $"verify refs/heads/{branch} {candidateSha}\n" +
+                       "prepare\ncommit\n";
+        RunWithInput(["update-ref", "--stdin"], commands);
+    }
+
+    private void RunWithInput(string[] args, string input)
+    {
+        using var proc = System.Diagnostics.Process.Start(BuildGitStartInfo(args))
+            ?? throw new InvalidOperationException("failed to start git process.");
+        var stdout = proc.StandardOutput.ReadToEndAsync();
+        var stderr = proc.StandardError.ReadToEndAsync();
+        proc.StandardInput.Write(input);
+        proc.StandardInput.Close();
+        if (!proc.WaitForExit((int)TimeSpan.FromMinutes(2).TotalMilliseconds))
+        {
+            KillAndReap(proc);
+            throw new TimeoutException($"git command timed out: {string.Join(' ', args)}");
+        }
+        _ = stdout.GetAwaiter().GetResult();
+        var error = stderr.GetAwaiter().GetResult();
+        if (proc.ExitCode != 0)
+            throw new GitException(string.Join(' ', args), proc.ExitCode, error);
     }
 
     public string HeadSha() => Run("rev-parse", "HEAD").Output.Trim();

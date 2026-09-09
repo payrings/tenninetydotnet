@@ -164,7 +164,11 @@ Every gate in the pipeline is mechanically enforced rather than requested:
 - Plans are validated (strict DAG, unique ids, atomic directives, layer ordering) at
   acceptance time and again after every pivot.
 - Promotions are single squashed commits on `main`; history is never rewritten –
-  undos go through `git revert`.
+  undos go through `git revert`. A durable promotion transaction binds the execution, expected
+  base, reviewed candidate and prepared promotion commit until `main`, saved progress and exact
+  candidate-branch cleanup all agree. Internal refs retain the prepared objects against Git garbage
+  collection until the transaction is complete, so process-crash recovery never relies on commit
+  messages, reflogs, or object-pruning grace periods.
 - Work packages execute on disposable branches and promote as ONE squashed commit –
   reverting a package is exact. A stuck job is quarantined as BLOCKED and a human is called
   instead of the queue inventing a way forward. In live mode the mechanical gate fails
@@ -178,7 +182,9 @@ Every gate in the pipeline is mechanically enforced rather than requested:
 - Every attempt is recorded in `.tenninety/sandbox-resources.json` before container creation.
   Startup recovery runs under the daemon lock, inventories only this instance/repository label
   scope, deletes only journal-proven direct-child workspaces, and refuses execution if cleanup
-  remains quarantined. `tenninety status` reports persisted recovery facts.
+  remains quarantined. This scoped cleanup runs even when a crash left a work branch checked out;
+  only a clean branch matched to persisted interrupted state is reconciled automatically, while
+  dirty or unrelated branches are preserved. `tenninety status` reports persisted recovery facts.
 
 The container boundary is defense in depth, not a substitute for a patched least-privilege Docker
 deployment. An explicit `sandbox.mode=unsafe-host` selects the legacy host path and is prominently
