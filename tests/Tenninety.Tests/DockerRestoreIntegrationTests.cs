@@ -162,7 +162,11 @@ public sealed class DockerRestoreIntegrationTests : IDisposable
     private TestGitRepo FixtureRepo()
     {
         var repo = new TestGitRepo();
-        repo.WriteFile(".gitignore", ".tenninety/\n");
+        repo.WriteFile(".gitignore",
+            ".tenninety/*\n!.tenninety/.gitignore\n!.tenninety/config.json\n");
+        repo.WriteFile(".tenninety/.gitignore",
+            Tenninety.Execution.RuntimeGitignoreMigration.Contents);
+        repo.WriteFile(".tenninety/config.json", "{}\n");
         repo.WriteFile("tests/fixture/fixture.csproj",
             "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>" +
             "<OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>" +

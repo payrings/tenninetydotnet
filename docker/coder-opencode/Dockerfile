@@ -8,9 +8,9 @@
 #   - no credentials, keys, host paths or host configuration are baked in;
 #   - /workspace is the working directory (the only writable bind at runtime).
 #
-# Pinning (NOT bit-for-bit reproducibility): the base image is pinned by digest and the
-# tool version by an exact pin, but the tool's transitive dependencies are unlocked and the
-# base repositories are live, so image content is NOT guaranteed identical across builds.
+# Pinning (NOT bit-for-bit reproducibility): the base image is pinned by digest, OpenCode and
+# its platform optional packages are exact-version pins, but the Debian repositories are live,
+# so image content is NOT guaranteed identical across builds.
 # Rebuild deliberately, verify with the build script, and record the resulting local image
 # ID (sha256:...) in .tenninety/config.json (sandbox.roles.coder.image).
 FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5

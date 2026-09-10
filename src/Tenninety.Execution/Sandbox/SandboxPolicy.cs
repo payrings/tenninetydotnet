@@ -68,7 +68,10 @@ public static class SandboxPolicy
 
     private static readonly FrozenSet<string> CoderEnvironmentKeys =
         CommonEnvironmentKeys.Concat(
-            ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENCODE_CONFIG_CONTENT"])
+            ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE",
+             "OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG",
+             "OPENCODE_DISABLE_EXTERNAL_SKILLS", "OPENCODE_DISABLE_CLAUDE_CODE",
+             "OPENCODE_PURE"])
             .ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> ReviewerEnvironmentKeys =

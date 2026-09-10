@@ -203,6 +203,139 @@ public class ExecutionEngineTests
         Assert.Equal("main", h.Git.CurrentBranch()); // never stranded on the work branch
     }
 
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    public async Task Persisted_exhausted_total_budget_blocks_before_granting_an_attempt(
+        int persistedTotal)
+    {
+        using var h = new EngineHarness(maxAttempts: 2, maxTotal: 4);
+        var wp = h.Plan.WorkPackages[0];
+        h.State.Attempts[wp.Id] = new AttemptInfo
+        {
+            Count = 1,
+            Total = persistedTotal,
+            ExecutionId = new string('a', 32),
+        };
+        h.States.Save(h.State);
+        var resumed = h.States.Load();
+        var frontier = new CapturingRepairFrontier();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, frontier, h.Coder,
+            new FailIfCalledReviewer(), new FailIfCalledTester(),
+            h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(wp, resumed, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Blocked, outcome);
+        Assert.Empty(h.Coder.Contexts);
+        Assert.Equal(0, frontier.Calls);
+        Assert.Equal(persistedTotal, h.States.Load().Attempts[wp.Id].Total);
+        Assert.Equal(TenNinety.WpStatus.Blocked, h.States.Load().QueueStatus[wp.Id]);
+        Assert.DoesNotContain(h.Audit.ReadTail(100), e =>
+            e.Event is "REVIEW_PASSED" or "TESTS_PASSED" or "WP_PROMOTION_PREPARED" or "WP_PROMOTED");
+        Assert.Single(h.Git.RecentCommits(10));
+        Assert.Equal("main", h.Git.CurrentBranch());
+    }
+
+    [Fact]
+    public async Task Persisted_phase_threshold_gets_frontier_advice_before_the_next_coder()
+    {
+        using var h = new EngineHarness(maxAttempts: 3, maxTotal: 8);
+        var wp = h.Plan.WorkPackages[0];
+        h.State.Attempts[wp.Id] = new AttemptInfo
+        {
+            Count = 3,
+            Total = 3,
+            ExecutionId = new string('b', 32),
+        };
+        h.States.Save(h.State);
+        var frontier = new CapturingRepairFrontier();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, frontier, h.Coder,
+            new ScriptedReviewer(0), new ScriptedTester(0),
+            h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(
+            wp, h.States.Load(), CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Done, outcome);
+        Assert.Equal(1, frontier.Calls);
+        var context = Assert.Single(h.Coder.Contexts);
+        Assert.Equal(1, context.Attempt);
+        Assert.Contains("remove the rejected sensitive path", context.Advice);
+        Assert.Single(h.Audit.ReadTail(100), e => e.Event == "ESCALATION_ADVICE");
+    }
+
+    [Fact]
+    public async Task Repeated_frontier_outage_at_a_persisted_boundary_never_consumes_an_attempt()
+    {
+        using var h = new EngineHarness(maxAttempts: 2, maxTotal: 6);
+        var wp = h.Plan.WorkPackages[0];
+        h.State.Attempts[wp.Id] = new AttemptInfo
+        {
+            Count = 2,
+            Total = 2,
+            ExecutionId = new string('c', 32),
+        };
+        h.States.Save(h.State);
+        var unavailable = new CapturingRepairFrontier(throwAdvice: true);
+
+        for (var restart = 0; restart < 2; restart++)
+        {
+            var engine = new ExecutionEngine(
+                h.Git, h.Config, unavailable, h.Coder,
+                new FailIfCalledReviewer(), new FailIfCalledTester(),
+                h.States, h.Audit);
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                engine.ExecuteWpAsync(wp, h.States.Load(), CancellationToken.None));
+
+            var persisted = h.States.Load();
+            Assert.Equal(2, persisted.Attempts[wp.Id].Count);
+            Assert.Equal(2, persisted.Attempts[wp.Id].Total);
+            Assert.Equal(TenNinety.WpStatus.Pending, persisted.QueueStatus[wp.Id]);
+            Assert.Empty(h.Coder.Contexts);
+        }
+
+        var available = new CapturingRepairFrontier();
+        var recovered = await new ExecutionEngine(
+            h.Git, h.Config, available, h.Coder,
+            new ScriptedReviewer(0), new ScriptedTester(0),
+            h.States, h.Audit).ExecuteWpAsync(
+                wp, h.States.Load(), CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Done, recovered);
+        Assert.Equal(2, unavailable.Calls);
+        Assert.Equal(1, available.Calls);
+        Assert.Single(h.Coder.Contexts);
+        Assert.NotEmpty(h.Coder.Contexts[0].Advice);
+    }
+
+    [Fact]
+    public async Task Escalation_reset_grants_exactly_one_full_new_local_phase()
+    {
+        using var h = new EngineHarness(maxAttempts: 2, maxTotal: 10);
+        var wp = h.Plan.WorkPackages[0];
+        h.State.Attempts[wp.Id] = new AttemptInfo
+        {
+            Count = 2,
+            Total = 2,
+            ExecutionId = new string('d', 32),
+        };
+        var frontier = new CapturingRepairFrontier();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, frontier, h.Coder,
+            new ScriptedReviewer(failAttempts: 2), new ScriptedTester(0),
+            h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(wp, h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Done, outcome);
+        Assert.Equal([1, 2, 1], h.Coder.Contexts.Select(context => context.Attempt));
+        Assert.Equal(2, frontier.Calls);
+        Assert.Equal(2, h.Audit.ReadTail(100).Count(e => e.Event == "ESCALATION_ADVICE"));
+    }
+
     [Fact]
     public async Task Pause_between_attempts_saves_state_and_reports_paused()
     {
@@ -603,9 +736,10 @@ public class ExecutionEngineTests
         }
     }
 
-    private sealed class CapturingRepairFrontier : IFrontierClient
+    private sealed class CapturingRepairFrontier(bool throwAdvice = false) : IFrontierClient
     {
         public RepairRequest? Request { get; private set; }
+        public int Calls { get; private set; }
 
         public Task<Plan> GeneratePlanAsync(
             string sanitizedSpecMarkdown, CancellationToken ct = default) =>
@@ -614,7 +748,10 @@ public class ExecutionEngineTests
         public Task<RepairAdvice> GetRepairAdviceAsync(
             RepairRequest request, CancellationToken ct = default)
         {
+            Calls++;
             Request = request;
+            if (throwAdvice)
+                throw new InvalidOperationException("frontier repair service unavailable");
             return Task.FromResult(new RepairAdvice
             {
                 Analysis = "remove the rejected sensitive path",
@@ -633,6 +770,20 @@ public class ExecutionEngineTests
                 Analysis = "unused",
                 MechanicalRevertSufficient = false,
             });
+    }
+
+    private sealed class FailIfCalledReviewer : IReviewerAgent
+    {
+        public Task<ReviewResult> ReviewAsync(
+            ReviewerRunContext ctx, CancellationToken ct = default) =>
+            throw new InvalidOperationException("reviewer must not be called");
+    }
+
+    private sealed class FailIfCalledTester : ITesterAgent
+    {
+        public Task<TestRunResult> RunTestsAsync(
+            TesterRunContext ctx, CancellationToken ct = default) =>
+            throw new InvalidOperationException("tester must not be called");
     }
 
     private sealed class CancellingMutatingReviewer(

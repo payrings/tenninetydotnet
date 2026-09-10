@@ -27,6 +27,7 @@ public sealed class CandidateWorkspace
         string sourcePath,
         string trustedIngestionPath,
         string baselineTreeOid,
+        IReadOnlyList<GitTreeEntry> baselineEntries,
         SandboxRole role,
         string runId,
         string attemptId)
@@ -36,6 +37,7 @@ public sealed class CandidateWorkspace
         SourcePath = sourcePath;
         TrustedIngestionPath = trustedIngestionPath;
         BaselineTreeOid = baselineTreeOid;
+        BaselineEntries = baselineEntries.ToList().AsReadOnly();
         Role = role;
         RunId = runId;
         AttemptId = attemptId;
@@ -50,6 +52,9 @@ public sealed class CandidateWorkspace
     public string TrustedIngestionPath { get; }
     /// <summary>Git tree OID of the exact candidate commit the source was materialized from.</summary>
     public string BaselineTreeOid { get; }
+    /// <summary>Validated tracked paths from the exact candidate tree. Kept internal so trusted
+    /// role gates can enforce tool-specific launch policy without re-reading mutable files.</summary>
+    internal IReadOnlyList<GitTreeEntry> BaselineEntries { get; }
     public SandboxRole Role { get; }
     /// <summary>Non-secret run identity.</summary>
     public string RunId { get; }

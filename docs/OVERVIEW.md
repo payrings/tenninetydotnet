@@ -99,7 +99,10 @@ Containerized OpenCode does not depend on inaccessible host/user configuration: 
 serializes a one-provider `OPENCODE_CONFIG_CONTENT` document using
 `@ai-sdk/openai-compatible`, the effective container endpoint, the exact configured
 `provider/model`, and the literal `{env:OPENAI_API_KEY}` reference. The real key remains only in
-the closed Coder environment.
+the closed Coder environment. Because pinned 1.18.29 cannot reliably suppress every candidate
+plugin/instruction discovery path during `run`, candidates containing known project OpenCode
+control-plane paths fail closed before a container is created; see `TESTER-SANDBOX.md` for the
+exact version-specific path set.
 
 ## llama-swap – two models on one card
 

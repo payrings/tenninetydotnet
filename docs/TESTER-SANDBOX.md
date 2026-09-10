@@ -36,10 +36,10 @@ The script prints `ID: sha256:<64 hex>` per image — paste them into
 `sandbox.roles.coder.image` (the image matching your `"coder_agent"`), `roles.reviewer.image`
 and `roles.tester.image`. Digest-pinned registry references are equally valid; mutable tags are
 rejected. Base images are pinned by digest and top-level tool versions by exact pin. This is
-NOT bit-for-bit reproducibility: the live apt repositories and the unlocked transitive
-npm/Python dependency closure mean image content is not guaranteed identical across builds —
-rebuild deliberately and record the resulting local image ID. Nothing is pulled or built at
-runtime.
+NOT bit-for-bit reproducibility: live package repositories and tool-specific installation
+closures can change rebuild output. OpenCode 1.18.29 and its platform optional packages are
+exact-version npm pins, but its image still uses live Debian repositories. Rebuild deliberately
+and record the resulting local image ID. Nothing is pulled or built at runtime.
 
 ## OpenCode coder configuration (pinned container)
 
@@ -56,6 +56,23 @@ For `"coder_agent": "opencode"`, trusted code strictly splits the explicit
 `OPENCODE_CONFIG_CONTENT` exists only in the Coder role's closed environment allowlist. The
 finished image also includes Git, which OpenCode needs for repository-aware operation, and the
 image build script verifies both executables.
+
+Candidate repository files remain mounted unchanged as `/workspace`, but they are not accepted
+as OpenCode control-plane configuration. For pinned 1.18.29, trusted code passes the explicit
+global `--pure` switch and fixes `OPENCODE_DISABLE_PROJECT_CONFIG=true`,
+`OPENCODE_DISABLE_EXTERNAL_SKILLS=true`, `OPENCODE_DISABLE_CLAUDE_CODE=true`, and
+`OPENCODE_PURE=true` as defense in depth. Exact-image testing confirms those controls suppress
+hostile resolved project JSON and skills, but also confirms that a project plugin sentinel can
+still execute during `run`; they are therefore not the security boundary.
+
+The enforced boundary is fail closed: before container creation Tenninety inspects the exact
+committed candidate path manifest and rejects every pinned-version project resource known to be
+automatically discoverable: root `opencode.json[c]`, the root `.opencode` path/subtree,
+`AGENTS.md`, `CLAUDE.md`, or `CONTEXT.md` at any depth, and root
+`.agents/skills/**/SKILL.md` or `.claude/skills/**/SKILL.md`. The diagnostic names the bounded
+offending paths and the pin. No candidate file is hidden, rewritten, or deleted; tracked contents
+remain unchanged, and Aider/Pi are unaffected. This compatibility limitation and path set must be
+re-verified before changing the OpenCode pin.
 
 ## Pi coder configuration (pinned container)
 
@@ -204,7 +221,10 @@ acceptance-ID and proxy controls.
 - After the prerequisites hold, Tenninety captures a no-follow baseline, generates a trusted
   `NuGet.Config` containing only `approved_feeds`, and runs the fixed restore command in a
   separate `SandboxRole.Restore` container. The configured proxy environment is fixed by
-  trusted code. Candidate NuGet configuration and arbitrary restore arguments are ignored.
+  trusted code. Candidate NuGet configuration and arbitrary restore arguments are ignored. If
+  `.tenninety` already belongs to the candidate baseline, its exact owner, identity, type, mode,
+  and contents remain protected; only the new `restore-control` subtree is owner-only. If the
+  parent is absent, Tenninety creates it as owner-only trusted control infrastructure.
 - The Restore container is removed before post-Restore integrity validation. Only bounded derived
   regular files/directories may appear; source mutations, redirects, special files, excessive
   depth/count/size, quota overflow, or incomplete capture fail closed. A fresh `network=none`

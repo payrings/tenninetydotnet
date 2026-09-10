@@ -117,6 +117,12 @@ public sealed class ExecutionEngine
                 if (state.Paused || state.StopRequested || ct.IsCancellationRequested)
                     return HandleInterruption(wp, state);
 
+                // Persisted counters are lifecycle boundaries, not merely diagnostics. Resolve
+                // a due total block or phase escalation before granting another coder attempt.
+                if (AttemptThresholdIsDue(info) &&
+                    await HandleThresholdAsync(wp, state, info, ct))
+                    return WpOutcome.Blocked;
+
                 checked
                 {
                     info.Count++;
@@ -512,6 +518,9 @@ public sealed class ExecutionEngine
 
         return false;
     }
+
+    private bool AttemptThresholdIsDue(AttemptInfo info) =>
+        info.Total >= _config.MaxTotalAttempts || info.Count >= info.Max;
 
     private static void ReleaseInfrastructureAttempt(AttemptInfo info)
     {

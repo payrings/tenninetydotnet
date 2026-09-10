@@ -886,6 +886,7 @@ public class SandboxAbstractionTests : IDisposable
             "/tmp/tenninety/run1/WP-001/attempt-3-coder/source",
             "/tmp/tenninety/run1/WP-001/attempt-3-coder/ingestion",
             "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            [],
             SandboxRole.Coder, "run1", "attempt-3-coder");
 
         Assert.Equal(revision, workspace.Revision);

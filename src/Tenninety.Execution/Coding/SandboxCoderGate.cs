@@ -133,6 +133,14 @@ public sealed class SandboxCoderGate : ICoderAgent
         {
             var failedStage = state.Stage;
             await DeleteWorkspaceAndDisposeTransportAsync(state);
+            if (primary is OpenCodeCandidateConfigurationException unsafeProject)
+                return new CoderResult
+                {
+                    Outcome = CoderOutcome.PolicyRejected,
+                    Summary = "OpenCode launch was rejected by the trusted candidate policy",
+                    FilesTouched = [],
+                    FailureReasons = [Bound(unsafeProject.Message)],
+                };
             if (primary is CoderInfrastructureException controlled) throw controlled;
             throw Failure(failedStage, primary);
         }
@@ -255,6 +263,11 @@ public sealed class SandboxCoderGate : ICoderAgent
         state.Stage = "coder tool planning";
         var plan = CoderToolPlan.Create(_config, ctx);
         var workspace = state.Workspace;
+        if (plan.Tool == "opencode")
+        {
+            state.Stage = "OpenCode candidate control-plane validation";
+            OpenCodeCandidatePolicy.Validate(workspace.BaselineEntries);
+        }
         var role = _config.Sandbox.Roles.Coder;
         var spec = new SandboxSpec
         {

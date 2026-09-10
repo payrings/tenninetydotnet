@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Tenninety.Core.Models;
 using Tenninety.Execution.Testing;
 
 namespace Tenninety.Tests;
@@ -42,6 +43,37 @@ public sealed class RestoreIntegrityValidatorTests : IDisposable
             _validator.VerifyPostRestore(baseline, control, Limits(), default));
 
         Assert.Contains("existing candidate", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Existing_candidate_mode_or_identity_changes_remain_rejected(bool replaceEntry)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var candidate = Directory.CreateDirectory(Path.Combine(_root.Root, ".tenninety")).FullName;
+        File.WriteAllText(Path.Combine(candidate, "config.json"), "{}\n");
+        File.SetUnixFileMode(candidate, (UnixFileMode)493);
+        var baseline = _validator.CaptureBaseline(
+            _root.Root, 16 * 1024 * 1024, 1000, 32, default);
+        SandboxTesterGate.CreateRestoreControl(
+            _root.Root, new SandboxRestoreConfig(), baseline);
+        var control = _validator.CaptureTrustedControl(
+            baseline, 16 * 1024 * 1024, 1008, 32, default);
+
+        if (replaceEntry)
+        {
+            File.Delete(Path.Combine(candidate, "config.json"));
+            File.WriteAllText(Path.Combine(candidate, "config.json"), "{}\n");
+        }
+        else
+        {
+            File.SetUnixFileMode(candidate, (UnixFileMode)448);
+        }
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _validator.VerifyPostRestore(baseline, control, Limits(), default));
+        Assert.Contains("type/security metadata", ex.Message);
     }
 
     [Fact]

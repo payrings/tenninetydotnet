@@ -111,6 +111,7 @@ public sealed class CandidateWorkspaceFactory
                 validatedSource.Value,
                 ingestionPath,
                 materialized.TreeOid,
+                materialized.Entries,
                 request.Role,
                 request.RunId,
                 request.AttemptId);

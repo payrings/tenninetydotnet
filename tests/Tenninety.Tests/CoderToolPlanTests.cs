@@ -8,6 +8,14 @@ namespace Tenninety.Tests;
 
 public sealed class CoderToolPlanTests
 {
+    private static readonly string[] OpenCodeIsolationKeys =
+    [
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+        "OPENCODE_DISABLE_CLAUDE_CODE",
+        "OPENCODE_PURE",
+    ];
+
     private static CoderRunContext Context() => new()
     {
         Candidate = new CandidateRevision(
@@ -153,6 +161,7 @@ public sealed class CoderToolPlanTests
         var plan = CoderToolPlan.Create(config, Context());
 
         Assert.Equal("local/coder", ValueAfter(plan.Arguments, "--model"));
+        Assert.Equal("--pure", plan.Arguments[0]);
         var json = plan.Environment["OPENCODE_CONFIG_CONTENT"];
         Assert.True(json.Length <= SandboxPolicy.MaxEnvironmentValueLength);
         Assert.DoesNotContain(plan.Environment["OPENAI_API_KEY"], json, StringComparison.Ordinal);
@@ -168,6 +177,17 @@ public sealed class CoderToolPlanTests
         var models = provider.GetProperty("models");
         Assert.Equal(["coder"], models.EnumerateObject().Select(property => property.Name));
         Assert.Equal("coder", models.GetProperty("coder").GetProperty("name").GetString());
+        Assert.All(OpenCodeIsolationKeys, key => Assert.Equal("true", plan.Environment[key]));
+    }
+
+    [Theory]
+    [InlineData("aider")]
+    [InlineData("pi")]
+    public void OpenCode_project_isolation_flags_are_not_exposed_to_other_tools(string tool)
+    {
+        var plan = CoderToolPlan.Create(Config(tool), Context());
+
+        Assert.All(OpenCodeIsolationKeys, key => Assert.DoesNotContain(key, plan.Environment));
     }
 
     [Theory]
@@ -203,14 +223,16 @@ public sealed class CoderToolPlanTests
     [Fact]
     public void OpenCode_inline_provider_is_only_exposed_to_the_coder_role()
     {
-        Assert.Contains("OPENCODE_CONFIG_CONTENT",
-            SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Coder));
-        Assert.DoesNotContain("OPENCODE_CONFIG_CONTENT",
-            SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Reviewer));
-        Assert.DoesNotContain("OPENCODE_CONFIG_CONTENT",
-            SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Tester));
-        Assert.DoesNotContain("OPENCODE_CONFIG_CONTENT",
-            SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Restore));
+        foreach (var key in OpenCodeIsolationKeys.Prepend("OPENCODE_CONFIG_CONTENT"))
+        {
+            Assert.Contains(key, SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Coder));
+            Assert.DoesNotContain(key,
+                SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Reviewer));
+            Assert.DoesNotContain(key,
+                SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Tester));
+            Assert.DoesNotContain(key,
+                SandboxPolicy.PermittedEnvironmentKeys(SandboxRole.Restore));
+        }
     }
 
     [Theory]

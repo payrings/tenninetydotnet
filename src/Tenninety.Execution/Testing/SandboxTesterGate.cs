@@ -510,7 +510,7 @@ public sealed class SandboxTesterGate : ITesterAgent
             ct);
 
         state.Stage = "restore-control-preparation";
-        var controlConfig = CreateRestoreControl(workspace.SourcePath, restore);
+        var controlConfig = CreateRestoreControl(workspace.SourcePath, restore, baseline);
         var control = validator.CaptureTrustedControl(
             baseline,
             checked(workspaceLimit + 1_048_576),
@@ -672,8 +672,10 @@ public sealed class SandboxTesterGate : ITesterAgent
         return null;
     }
 
-    private static string CreateRestoreControl(
-        string workspaceRoot, SandboxRestoreConfig restore)
+    internal static string CreateRestoreControl(
+        string workspaceRoot,
+        SandboxRestoreConfig restore,
+        RestoreIntegrityValidator.Manifest baseline)
     {
         // The host-side mirror of SandboxPolicy.RestorePackagesContainerPath: the Restore
         // container writes packages here (mounted at /workspace) and the fresh offline Tester
@@ -685,12 +687,20 @@ public sealed class SandboxTesterGate : ITesterAgent
             throw new InvalidOperationException(
                 "the candidate collides with a reserved Restore package/control root.");
 
+        var candidateOwnsParent = baseline.Entries.TryGetValue(
+            ".tenninety", out var candidateParent);
+        if (candidateOwnsParent && !candidateParent!.IsDirectory)
+            throw new InvalidOperationException(
+                "the candidate .tenninety path is not a directory; Restore control cannot be created.");
+
         Directory.CreateDirectory(control);
         if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
         {
-            var tenninetyDirectory = Path.Combine(workspaceRoot, ".tenninety");
-            File.SetUnixFileMode(tenninetyDirectory,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            // Candidate-owned parent metadata remains part of the immutable baseline. Only a
+            // parent created as trusted control infrastructure receives the owner-only mode.
+            if (!candidateOwnsParent)
+                File.SetUnixFileMode(Path.Combine(workspaceRoot, ".tenninety"),
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             File.SetUnixFileMode(control,
                 UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }

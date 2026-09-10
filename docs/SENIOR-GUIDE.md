@@ -354,7 +354,11 @@ configuration. Trusted code serializes OpenCode's inline provider in
 endpoint through `@ai-sdk/openai-compatible`; its `apiKey` is the literal
 `{env:OPENAI_API_KEY}` reference, never the key. Trusted code similarly generates Pi's supported
 `~/.pi/agent/models.json` inside the bounded tmpfs home, pointing at the effective endpoint with
-the configured `pi.model`.
+the configured `pi.model`. For pinned OpenCode 1.18.29, fixed flags and `--pure` are defense in
+depth but do not reliably suppress every project plugin path during `run`. Tenninety therefore
+rejects the exact candidate manifest before container creation when it contains a known
+automatically discoverable OpenCode config/plugin/agent/tool/skill/instruction path; the precise
+version-specific set is documented in `TESTER-SANDBOX.md`.
 
 Framework secrets are env-var only: `TENNINETY_FRONTIER_API_KEY` (Frontier calls) and optional
 `TENNINETY_LOCAL_API_KEY` (framework Reviewer plus aider, translated to `OPENAI_API_KEY`).

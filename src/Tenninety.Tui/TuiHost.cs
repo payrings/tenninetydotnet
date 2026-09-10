@@ -317,21 +317,83 @@ public static class TuiHost
 
         var selection = AnsiConsole.Prompt(new TextPrompt<string>("[b]Commit to revert (sha or index):[/]")
             .DefaultValue("0"));
-        GitCommit target;
-        if (selection.Length > 0 && selection.All(char.IsDigit) && int.Parse(selection) < commits.Count)
-            target = commits[int.Parse(selection)];
-        else
+        return await ResolveAndRevertAsync(selection, commits, async (target, token) =>
         {
-            var found = commits.FirstOrDefault(c => c.Sha.StartsWith(selection, StringComparison.OrdinalIgnoreCase));
-            if (found is null)
-                return Diagnostic($"commit '{selection}' not among recent commits.");
-            target = found;
+            var reason = AnsiConsole.Ask<string>("Reason [optional]:", "");
+            AnsiConsole.MarkupLine("\n[dim]Running hotfix flow (frontier guidance → mechanical revert → tests → merge)…[/]");
+            var outcome = await service.RevertAsync(target.Sha, reason, token);
+            return Diagnostic(outcome.Message);
+        }, ct);
+    }
+
+    internal static bool TryResolveRevertSelection(
+        string selection,
+        IReadOnlyList<GitCommit> commits,
+        out GitCommit? target,
+        out string error)
+    {
+        target = null;
+        error = "";
+        if (string.IsNullOrWhiteSpace(selection))
+        {
+            error = "commit selection cannot be blank.";
+            return false;
         }
 
-        var reason = AnsiConsole.Ask<string>("Reason [optional]:", "");
-        AnsiConsole.MarkupLine("\n[dim]Running hotfix flow (frontier guidance → mechanical revert → tests → merge)…[/]");
-        var outcome = await service.RevertAsync(target.Sha, reason, ct);
-        return Diagnostic(outcome.Message);
+        // A full SHA remains exact even when all 40 characters happen to be decimal digits.
+        var exact = selection.Length == 40
+            ? commits.FirstOrDefault(c =>
+                string.Equals(c.Sha, selection, StringComparison.OrdinalIgnoreCase))
+            : null;
+        if (exact is not null)
+        {
+            target = exact;
+            return true;
+        }
+
+        if (selection.All(c => c is >= '0' and <= '9'))
+        {
+            if (!int.TryParse(selection, out var index) || index < 0 || index >= commits.Count)
+            {
+                error = $"commit index '{selection}' is outside the displayed range.";
+                return false;
+            }
+            target = commits[index];
+            return true;
+        }
+
+        if (selection.Length > 40 ||
+            !selection.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F'))
+        {
+            error = "commit SHA must contain 1 to 40 ASCII hexadecimal characters.";
+            return false;
+        }
+
+        var matches = commits
+            .Where(c => c.Sha.StartsWith(selection, StringComparison.OrdinalIgnoreCase))
+            .Take(2)
+            .ToList();
+        if (matches.Count == 1)
+        {
+            target = matches[0];
+            return true;
+        }
+
+        error = matches.Count == 0
+            ? $"commit '{selection}' not among recent commits."
+            : $"commit prefix '{selection}' is ambiguous among recent commits.";
+        return false;
+    }
+
+    internal static async Task<string> ResolveAndRevertAsync(
+        string selection,
+        IReadOnlyList<GitCommit> commits,
+        Func<GitCommit, CancellationToken, Task<string>> revert,
+        CancellationToken ct)
+    {
+        if (!TryResolveRevertSelection(selection, commits, out var target, out var error))
+            return Diagnostic(error);
+        return await revert(target!, ct);
     }
 
     private static void ShowLogs(Workspace ws)

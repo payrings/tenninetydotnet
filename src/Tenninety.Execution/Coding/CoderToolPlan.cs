@@ -121,10 +121,14 @@ public sealed record CoderToolPlan(
             new Dictionary<string, string>(environment, StringComparer.Ordinal)
             {
                 ["OPENCODE_CONFIG_CONTENT"] = BuildOpenCodeConfig(providerId, modelId, endpoint),
+                ["OPENCODE_DISABLE_PROJECT_CONFIG"] = "true",
+                ["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "true",
+                ["OPENCODE_DISABLE_CLAUDE_CODE"] = "true",
+                ["OPENCODE_PURE"] = "true",
             });
         var args = new List<string>
         {
-            "run", "--auto", "--model", config.OpenCode.Model, instruction,
+            "--pure", "run", "--auto", "--model", config.OpenCode.Model, instruction,
         };
         RejectExtraArguments(config.OpenCode.ExtraArgs, "opencode");
         return new CoderToolPlan(

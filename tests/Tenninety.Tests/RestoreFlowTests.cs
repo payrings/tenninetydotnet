@@ -18,7 +18,12 @@ public sealed class RestoreFlowTests : IDisposable
     {
         _git = new GitService(_repo.Root);
         _git.Init();
-        File.WriteAllText(Path.Combine(_repo.Root, ".gitignore"), ".tenninety/\n");
+        File.WriteAllText(Path.Combine(_repo.Root, ".gitignore"),
+            ".tenninety/*\n!.tenninety/.gitignore\n!.tenninety/config.json\n");
+        Directory.CreateDirectory(Path.Combine(_repo.Root, ".tenninety"));
+        File.WriteAllText(Path.Combine(_repo.Root, ".tenninety", ".gitignore"),
+            Tenninety.Execution.RuntimeGitignoreMigration.Contents);
+        File.WriteAllText(Path.Combine(_repo.Root, ".tenninety", "config.json"), "{}\n");
         File.WriteAllText(Path.Combine(_repo.Root, "tests.csproj"),
             "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup>" +
             "<PackageReference Include=\"xunit\" Version=\"2.9.3\" />" +
@@ -63,6 +68,7 @@ public sealed class RestoreFlowTests : IDisposable
         var timeline = new List<string>();
         var runtime = new RoleRuntime(timeline);
         string? controlXml = null;
+        UnixFileMode? candidateParentMode = null;
         runtime.Factory = spec =>
         {
             var session = Session(spec, timeline);
@@ -73,6 +79,9 @@ public sealed class RestoreFlowTests : IDisposable
                     controlXml = File.ReadAllText(Path.Combine(
                         spec.HostWorkspacePath!.Value,
                         ".tenninety", "restore-control", "NuGet.Config"));
+                    if (OperatingSystem.IsLinux())
+                        candidateParentMode = File.GetUnixFileMode(Path.Combine(
+                            spec.HostWorkspacePath.Value, ".tenninety"));
                     WriteDerived(spec, ".tenninety/restore-packages/pkg/data.bin", "package");
                     WriteDerived(spec, "obj/project.assets.json", "assets");
                 };
@@ -104,10 +113,73 @@ public sealed class RestoreFlowTests : IDisposable
         Assert.Contains("https://packages.example.test/v3/index.json", controlXml);
         Assert.Contains("https://mirror.example.test/v3/index.json", controlXml);
         Assert.DoesNotContain("api.nuget.org", controlXml);
+        if (OperatingSystem.IsLinux())
+            Assert.Equal((UnixFileMode)493, candidateParentMode); // committed parent materializes as 0755
         Assert.True(transport.Disposed);
         Assert.Equal("candidate\n", File.ReadAllText(Path.Combine(_repo.Root, "source.txt")));
+        Assert.Equal("{}\n", File.ReadAllText(
+            Path.Combine(_repo.Root, ".tenninety", "config.json")));
         Assert.Equal(_candidateSha, _git.HeadSha());
         Assert.Empty(Directory.GetFileSystemEntries(_managedRoot.Root));
+    }
+
+    [Fact]
+    public async Task Restore_without_a_candidate_tenninety_parent_still_reaches_tester()
+    {
+        File.Delete(Path.Combine(_repo.Root, ".tenninety", "config.json"));
+        File.Delete(Path.Combine(_repo.Root, ".tenninety", ".gitignore"));
+        var candidate = _git.CommitAll("remove candidate metadata")!;
+        var timeline = new List<string>();
+        var runtime = SuccessfulRuntime(timeline);
+        var gate = Gate(runtime, timeline, out _);
+
+        var result = await gate.RunTestsAsync(Context(candidate));
+
+        Assert.True(result.Passed, result.OutputTail);
+        Assert.Equal([SandboxRole.Restore, SandboxRole.Tester],
+            runtime.Specs.Select(spec => spec.Role));
+        Assert.Empty(Directory.GetFileSystemEntries(_managedRoot.Root));
+    }
+
+    [Theory]
+    [InlineData(448)] // 0700
+    [InlineData(493)] // 0755
+    public void Existing_candidate_parent_mode_is_preserved_while_control_is_owner_only(
+        int parentMode)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var root = new TempDir();
+        var parent = Directory.CreateDirectory(Path.Combine(root.Root, ".tenninety")).FullName;
+        File.WriteAllText(Path.Combine(parent, "config.json"), "{}\n");
+        File.SetUnixFileMode(parent, (UnixFileMode)parentMode);
+        var validator = new RestoreIntegrityValidator();
+        var baseline = validator.CaptureBaseline(
+            root.Root, 1024 * 1024, 100, 16, default);
+
+        SandboxTesterGate.CreateRestoreControl(
+            root.Root, _config.Sandbox.Roles.Tester.Restore, baseline);
+
+        Assert.Equal((UnixFileMode)parentMode, File.GetUnixFileMode(parent));
+        Assert.Equal((UnixFileMode)448, File.GetUnixFileMode(
+            Path.Combine(parent, "restore-control")));
+        Assert.Equal((UnixFileMode)384, File.GetUnixFileMode(
+            Path.Combine(parent, "restore-control", "NuGet.Config")));
+    }
+
+    [Fact]
+    public void Newly_created_control_parent_is_owner_only()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var root = new TempDir();
+        var validator = new RestoreIntegrityValidator();
+        var baseline = validator.CaptureBaseline(
+            root.Root, 1024 * 1024, 100, 16, default);
+
+        SandboxTesterGate.CreateRestoreControl(
+            root.Root, _config.Sandbox.Roles.Tester.Restore, baseline);
+
+        Assert.Equal((UnixFileMode)448, File.GetUnixFileMode(
+            Path.Combine(root.Root, ".tenninety")));
     }
 
     [Fact]
@@ -410,20 +482,20 @@ public sealed class RestoreFlowTests : IDisposable
 
     private RoleRuntime SuccessfulRuntime(
         List<string> timeline, Action<SandboxCommand>? onRestore = null) => new(timeline)
-    {
-        Factory = spec =>
         {
-            var session = Session(spec, timeline);
-            if (spec.Role == SandboxRole.Restore)
-                session.OnRun = command =>
-                {
-                    onRestore?.Invoke(command);
-                    WriteDerived(spec, ".tenninety/restore-packages/pkg/data.bin", "package");
-                    WriteDerived(spec, "obj/project.assets.json", "assets");
-                };
-            return session;
-        },
-    };
+            Factory = spec =>
+            {
+                var session = Session(spec, timeline);
+                if (spec.Role == SandboxRole.Restore)
+                    session.OnRun = command =>
+                    {
+                        onRestore?.Invoke(command);
+                        WriteDerived(spec, ".tenninety/restore-packages/pkg/data.bin", "package");
+                        WriteDerived(spec, "obj/project.assets.json", "assets");
+                    };
+                return session;
+            },
+        };
 
     private static string RestoreTarget(SandboxCommand command) =>
         Assert.Single(command.Arguments, argument =>

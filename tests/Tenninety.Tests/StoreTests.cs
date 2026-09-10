@@ -233,6 +233,109 @@ public class StoreRoundTripTests
         Assert.DoesNotContain('\0', entry.Detail);
         Assert.DoesNotContain('\u0085', entry.Detail);
     }
+
+    [Fact]
+    public void Audit_tail_returns_exact_requested_suffix_in_chronological_order()
+    {
+        using var tmp = new TempDir();
+        var audit = new AuditLog(tmp.Path("audit-log.jsonl"));
+        for (var i = 0; i < 8; i++) audit.Append("EVENT-" + i);
+
+        var entries = audit.ReadTail(3);
+
+        Assert.Equal(["EVENT-5", "EVENT-6", "EVENT-7"],
+            entries.Select(entry => entry.Event));
+    }
+
+    [Fact]
+    public void Audit_tail_reads_a_small_suffix_of_a_large_file()
+    {
+        using var tmp = new TempDir();
+        var path = tmp.Path("audit-log.jsonl");
+        var lines = Enumerable.Range(0, 20_000)
+            .Select(index => AuditJson("EVENT-" + index, new string('x', 80)));
+        File.WriteAllText(path, string.Join('\n', lines) + "\n",
+            new System.Text.UTF8Encoding(false));
+
+        var entries = new AuditLog(path).ReadTail(2);
+
+        Assert.Equal(["EVENT-19998", "EVENT-19999"],
+            entries.Select(entry => entry.Event));
+    }
+
+    [Fact]
+    public void Audit_tail_supports_crlf_and_an_unterminated_final_record()
+    {
+        using var tmp = new TempDir();
+        var path = tmp.Path("audit-log.jsonl");
+        File.WriteAllText(path,
+            AuditJson("FIRST") + "\r\n" + AuditJson("SECOND") + "\r\n" +
+            AuditJson("THIRD"),
+            new System.Text.UTF8Encoding(false));
+
+        var entries = new AuditLog(path).ReadTail(3);
+
+        Assert.Equal(["FIRST", "SECOND", "THIRD"],
+            entries.Select(entry => entry.Event));
+    }
+
+    [Fact]
+    public void Malformed_unterminated_tail_record_keeps_the_sanitized_unparseable_shape()
+    {
+        using var tmp = new TempDir();
+        const string secret = "supersecretvalue123";
+        var path = tmp.Path("audit-log.jsonl");
+        File.WriteAllText(path,
+            AuditJson("FIRST") + "\napiKey=" + secret + "\u001b[31m",
+            new System.Text.UTF8Encoding(false));
+
+        var entries = new AuditLog(path).ReadTail(2);
+
+        Assert.Equal("FIRST", entries[0].Event);
+        Assert.Equal("UNPARSEABLE", entries[1].Event);
+        Assert.DoesNotContain(secret, entries[1].Detail);
+        Assert.Contains("[REDACTED]", entries[1].Detail);
+        Assert.DoesNotContain('\u001b', entries[1].Detail);
+    }
+
+    [Fact]
+    public void Giant_corrupt_record_is_withheld_and_stops_before_unbounded_scanning()
+    {
+        using var tmp = new TempDir();
+        var path = tmp.Path("audit-log.jsonl");
+        File.WriteAllText(path,
+            new string('x', AuditLog.MaxRecordBytes * 32) + "\n" + AuditJson("LATEST"),
+            new System.Text.UTF8Encoding(false));
+
+        var entries = new AuditLog(path).ReadTail(2);
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal("UNPARSEABLE", entries[0].Event);
+        Assert.Contains($"{AuditLog.MaxRecordBytes}-byte limit", entries[0].Detail);
+        Assert.Contains("content withheld", entries[0].Detail);
+        Assert.Equal("LATEST", entries[1].Event);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void Nonpositive_audit_tail_count_is_deterministically_empty(int count)
+    {
+        using var tmp = new TempDir();
+        var path = tmp.Path("audit-log.jsonl");
+        File.WriteAllText(path, new string('x', AuditLog.MaxRecordBytes * 2));
+
+        Assert.Empty(new AuditLog(path).ReadTail(count));
+    }
+
+    private static string AuditJson(string eventName, string detail = "") =>
+        Json.SerializeCompact(new AuditEvent
+        {
+            Timestamp = "2026-01-01T00:00:00.0000000+00:00",
+            Event = eventName,
+            Detail = detail,
+        });
 }
 
 public sealed class TempDir : IDisposable
