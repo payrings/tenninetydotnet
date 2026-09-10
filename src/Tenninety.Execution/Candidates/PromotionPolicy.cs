@@ -7,7 +7,26 @@ namespace Tenninety.Execution.Candidates;
 /// <summary>Typed ordinary candidate rejection produced by the trusted promotion policy.</summary>
 public sealed class CandidatePolicyRejectedException : Exception
 {
-    public CandidatePolicyRejectedException(string message) : base(message) { }
+    internal CandidatePolicyRejectedException(
+        IReadOnlyList<string> reasons, int totalReasonCount)
+        : base(BuildMessage(reasons, totalReasonCount))
+    {
+        Reasons = reasons;
+        TotalReasonCount = totalReasonCount;
+    }
+
+    public IReadOnlyList<string> Reasons { get; }
+    public int TotalReasonCount { get; }
+
+    private static string BuildMessage(IReadOnlyList<string> reasons, int totalReasonCount)
+    {
+        var omitted = totalReasonCount > reasons.Count
+            ? $" | {totalReasonCount - reasons.Count} additional violations omitted."
+            : "";
+        return Sanitizer.SanitizeDiagnostic(
+            "the candidate patch was rejected by the promotion policy: " +
+            string.Join(" | ", reasons) + omitted, 4000);
+    }
 }
 
 /// <summary>Options for the candidate promotion policy; all fail closed.</summary>
@@ -77,10 +96,18 @@ public static class PromotionPolicy
         ArgumentNullException.ThrowIfNull(changes);
         ArgumentNullException.ThrowIfNull(targetEntries);
         options.Validate();
+        const int maxPublishedReasons = 5;
         var reasons = new List<string>();
+        var totalReasonCount = 0;
+        void Reject(string reason)
+        {
+            totalReasonCount++;
+            if (reasons.Count < maxPublishedReasons)
+                reasons.Add(Sanitizer.SanitizeDiagnostic(reason, 800));
+        }
 
         if (changes.Count > options.MaxChangedFiles)
-            reasons.Add(
+            Reject(
                 $"the candidate changes {changes.Count} files, exceeding the configured " +
                 $"maximum of {options.MaxChangedFiles}.");
 
@@ -90,22 +117,22 @@ public static class PromotionPolicy
             var path = change.NormalizedPath;
             if (IsAlwaysRejectedPath(path))
             {
-                reasons.Add($"'{path}' is a protected Tenninety/git metadata path.");
+                Reject($"'{path}' is a protected Tenninety/git metadata path.");
                 continue;
             }
             if (!RepositoryPathPolicy.IsSafeTreePath(path))
             {
-                reasons.Add($"'{path}' is not a safe repository-relative path.");
+                Reject($"'{path}' is not a safe repository-relative path.");
                 continue;
             }
             if (Sanitizer.IsExcludedFile(path))
             {
-                reasons.Add($"'{path}' is a secret-shaped filename.");
+                Reject($"'{path}' is a secret-shaped filename.");
                 continue;
             }
             if (IsSensitivePath(path) && !allowlist.Contains(path))
             {
-                reasons.Add(
+                Reject(
                     $"'{path}' is a sensitive path and is not listed in the human " +
                     "allowlist (sandbox.promotion.allow_sensitive_paths).");
                 continue;
@@ -116,24 +143,22 @@ public static class PromotionPolicy
                 {
                     // Unreachable given the scanner cross-checks, but fail closed with a
                     // controlled error instead of a bare KeyNotFoundException.
-                    reasons.Add(
+                    Reject(
                         $"'{path}' has no target-tree entry to verify; the change cannot be " +
                         "trusted.");
                     continue;
                 }
                 if (target.ContentMayContainSecret)
                 {
-                    reasons.Add(
+                    Reject(
                         $"'{path}' contains likely secret material in its exact ingested bytes " +
                         "(content scan).");
                 }
             }
         }
 
-        if (reasons.Count > 0)
-            throw new CandidatePolicyRejectedException(
-                "the candidate patch was rejected by the promotion policy: " +
-                string.Join(" | ", reasons));
+        if (totalReasonCount > 0)
+            throw new CandidatePolicyRejectedException(reasons, totalReasonCount);
     }
 
     /// <summary>Protected metadata that may never be promoted — and can never be allowlisted —

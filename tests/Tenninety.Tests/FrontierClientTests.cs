@@ -90,30 +90,206 @@ public class FrontierClientTests
         Assert.DoesNotContain(secret, ex.Message);
     }
 
+    [Fact]
+    public async Task Body_stall_hits_the_request_deadline_and_disposes_without_a_leaked_read()
+    {
+        var stream = new BlockingReadStream();
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream),
+        }, token => stream.SendToken = token);
+        var client = CreateClient(handler, TimeSpan.FromMilliseconds(100));
+
+        var error = await Assert.ThrowsAsync<FrontierCallException>(() =>
+            client.ProposePivotAsync(new PivotRequest("spec", "plan", "intent", "audit"))
+                .WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Contains("timed out", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.IsAssignableFrom<OperationCanceledException>(error.InnerException);
+        await stream.ReadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(stream.SendToken.CanBeCanceled);
+        Assert.True(stream.ReadToken.CanBeCanceled);
+        Assert.True(stream.Disposed);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_is_not_classified_as_a_frontier_timeout()
+    {
+        var stream = new BlockingReadStream();
+        var client = CreateClient(new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream),
+        }), TimeSpan.FromSeconds(5));
+        using var caller = new CancellationTokenSource();
+        var request = client.ProposePivotAsync(
+            new PivotRequest("spec", "plan", "intent", "audit"), caller.Token);
+        await stream.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        caller.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => request.WaitAsync(TimeSpan.FromSeconds(5)));
+        await stream.ReadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(stream.Disposed);
+    }
+
+    [Fact]
+    public async Task Normal_response_completes_with_the_injected_request_deadline()
+    {
+        var client = CreateClient(new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                Envelope("{\"analysis\":\"ok\",\"steps\":[],\"mechanical_revert_sufficient\":false}"),
+                Encoding.UTF8, "application/json"),
+        }), TimeSpan.FromSeconds(1));
+
+        var result = await client.ProposeRevertAsync(
+            new RevertRequest("commit", "diff", "reason"));
+
+        Assert.Equal("ok", result.Analysis);
+        Assert.False(result.MechanicalRevertSufficient);
+    }
+
+    [Fact]
+    public async Task Oversized_response_keeps_the_size_error_and_disposes_content()
+    {
+        var content = new DeclaredOversizedContent();
+        var client = CreateClient(new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = content,
+        }), TimeSpan.FromSeconds(1));
+
+        var error = await Assert.ThrowsAsync<FrontierCallException>(() =>
+            client.ProposePivotAsync(new PivotRequest("spec", "plan", "intent", "audit")));
+
+        Assert.Equal("frontier response exceeded the 4 MiB limit.", error.Message);
+        Assert.False(content.StreamRequested);
+        Assert.True(content.Disposed);
+    }
+
     private static HttpFrontierClient CreateClient(string content) =>
         CreateClient(new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(Envelope(content), Encoding.UTF8, "application/json"),
         }));
 
-    private static HttpFrontierClient CreateClient(HttpMessageHandler handler) =>
-        new(new HttpClient(handler), new TenNinetyConfig
+    private static HttpFrontierClient CreateClient(
+        HttpMessageHandler handler, TimeSpan? requestTimeout = null)
+    {
+        var config = new TenNinetyConfig
         {
             ProviderMode = "aider",
             FrontierEndpoint = "http://frontier.test/v1",
             FrontierModel = "test-frontier",
-        });
+        };
+        var http = new HttpClient(handler);
+        return requestTimeout is { } timeout
+            ? new HttpFrontierClient(http, config, timeout)
+            : new HttpFrontierClient(http, config);
+    }
 
     private static string Envelope(string content) => JsonSerializer.Serialize(new
     {
         choices = new[] { new { message = new { role = "assistant", content } } },
     });
 
-    private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> respond)
+    private sealed class StubHandler(
+        Func<HttpRequestMessage, HttpResponseMessage> respond,
+        Action<CancellationToken>? observeToken = null)
         : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(respond(request));
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            observeToken?.Invoke(cancellationToken);
+            return Task.FromResult(respond(request));
+        }
+    }
+
+    private sealed class BlockingReadStream : Stream
+    {
+        public TaskCompletionSource ReadStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReadCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public CancellationToken SendToken { get; set; }
+        public CancellationToken ReadToken { get; private set; }
+        public bool Disposed { get; private set; }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            new(WaitForCancellationAsync(cancellationToken));
+
+        public override Task<int> ReadAsync(
+            byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            WaitForCancellationAsync(cancellationToken);
+
+        private async Task<int> WaitForCancellationAsync(CancellationToken cancellationToken)
+        {
+            ReadToken = cancellationToken;
+            ReadStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return 0;
+            }
+            finally
+            {
+                ReadCompleted.TrySetResult();
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            base.Dispose(disposing);
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class DeclaredOversizedContent : HttpContent
+    {
+        public bool StreamRequested { get; private set; }
+        public bool Disposed { get; private set; }
+
+        public DeclaredOversizedContent() =>
+            Headers.ContentLength = 4L * 1024 * 1024 + 1;
+
+        protected override Task SerializeToStreamAsync(
+            Stream stream, TransportContext? context)
+        {
+            StreamRequested = true;
+            throw new InvalidOperationException("oversized content must not be read");
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 4L * 1024 * 1024 + 1;
+            return true;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            base.Dispose(disposing);
+        }
     }
 }

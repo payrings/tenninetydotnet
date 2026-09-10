@@ -81,7 +81,7 @@ public abstract class CliCoderAgentBase : ICoderAgent
                     $"{Executable} exited {proc.ExitCode}: {Truncate(Sanitise(output))}");
             return new CoderResult
             {
-                ProducedChanges = true,
+                Outcome = CoderOutcome.ChangesProduced,
                 Summary = $"{Executable}: implement {ctx.WorkPackage.Id}",
             };
         }

@@ -71,6 +71,10 @@ public sealed class ExecutionEngine
             ?? throw new InvalidOperationException("main has no commit to use as a work-package base.");
 
         var resumingBranch = _git.BranchExists(branch);
+        var candidateBackedByExecution = resumingBranch &&
+            state.Attempts.TryGetValue(wp.Id, out var interruptedAttempt) &&
+            interruptedAttempt.ExecutionId is { } executionId &&
+            IsExecutionId(executionId);
         var promotionRecorded = false;
         if (resumingBranch)
             _git.CheckoutBranch(branch);
@@ -155,24 +159,77 @@ public sealed class ExecutionEngine
                 }
 
                 EnsureBranchAndBaseUnchanged(branch, expectedMainSha, "coder");
-                var sha = code.CommitSha;
-                if (sha is null &&
-                    (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock"))
-                    sha = _git.CommitAll(
-                        $"{wp.Id}: {Diagnostic(code.Summary, 80)} [attempt {info.Total}]");
-                if (sha is null || !code.ProducesRealChange)
+                if (code is null || code.FilesTouched is null || code.FailureReasons is null)
+                    throw CoderContractFailure(
+                        info, state, wp, "the coder returned an incomplete result contract.");
+                string sha;
+                if (code.Outcome == CoderOutcome.ChangesProduced)
                 {
-                    RecordFailure(info, TenNinety.FailureTypes.Coder,
-                        "no file changes were produced by the coder.");
-                    _audit.Append("CODER_NO_CHANGE", wp.Id);
-                    if (await HandleThresholdAsync(wp, state, info, ct)) return WpOutcome.Blocked;
+                    var producedSha = code.CommitSha;
+                    if (producedSha is null &&
+                        (_config.Sandbox.IsUnsafeHost || _config.NormalizedProviderMode == "mock"))
+                        producedSha = _git.CommitAll(
+                            $"{wp.Id}: {Diagnostic(code.Summary, 80)} [attempt {info.Total}]");
+                    if (producedSha is null)
+                    {
+                        RecordFailure(info, TenNinety.FailureTypes.Coder,
+                            "no file changes were produced by the coder.");
+                        _audit.Append("CODER_NO_CHANGE", wp.Id);
+                        if (await HandleThresholdAsync(wp, state, info, ct))
+                            return WpOutcome.Blocked;
+                        continue;
+                    }
+                    sha = producedSha;
+                    candidateBackedByExecution = true;
+                }
+                else if (code.Outcome == CoderOutcome.NoChanges)
+                {
+                    EnsureSuccessfulNoOp(code, coderBase, branch, expectedMainSha, info, state, wp);
+                    if (!candidateBackedByExecution || !CandidateTreeDiffersFromMain(coderBase))
+                    {
+                        RecordFailure(info, TenNinety.FailureTypes.Coder,
+                            "no file changes were produced by the coder.");
+                        _audit.Append("CODER_NO_CHANGE", wp.Id);
+                        if (await HandleThresholdAsync(wp, state, info, ct))
+                            return WpOutcome.Blocked;
+                        continue;
+                    }
+                    sha = coderBase.CommitSha;
+                    _audit.Append("CODER_CANDIDATE_REUSED", wp.Id,
+                        sha[..Math.Min(12, sha.Length)]);
+                    Log($"[{wp.Id}] coder made no additional changes; rerunning all gates " +
+                        "for the existing exact candidate");
+                }
+                else if (code.Outcome is CoderOutcome.CommandFailed or CoderOutcome.PolicyRejected)
+                {
+                    EnsureFailedCoderLeftCandidateUnchanged(
+                        code, coderBase, branch, expectedMainSha, info, state, wp);
+                    var policyRejected = code.Outcome == CoderOutcome.PolicyRejected;
+                    var fallback = policyRejected
+                        ? "the coder candidate was rejected by trusted promotion policy."
+                        : "the coder command returned a definitive nonzero exit.";
+                    var reasons = RecordCoderOutcomeFailure(info, code, fallback);
+                    _audit.Append(policyRejected ? "CODER_POLICY_REJECTED" : "CODER_FAILED", wp.Id,
+                        Truncate(string.Join(" | ", reasons), 500));
+                    Log($"[{wp.Id}] {(policyRejected ? "coder policy rejection" : "coder command failure")}: " +
+                        reasons[0]);
+                    if (await HandleThresholdAsync(wp, state, info, ct))
+                        return WpOutcome.Blocked;
                     continue;
                 }
+                else
+                {
+                    throw CoderContractFailure(
+                        info, state, wp, "the coder returned an unknown outcome.");
+                }
+
                 if (!string.Equals(_git.HeadSha(), sha, StringComparison.Ordinal))
                     throw new InvalidOperationException(
                         "the coder result commit does not equal the authoritative work-branch HEAD.");
                 EnsureBranchAndBaseUnchanged(branch, expectedMainSha, "coder commit", requireClean: true);
-                _audit.Append("CODER_COMMITTED", wp.Id, $"{sha[..Math.Min(12, sha.Length)]} {code.FilesTouched.Count} files");
+                if (code.Outcome == CoderOutcome.ChangesProduced)
+                    _audit.Append("CODER_COMMITTED", wp.Id,
+                        $"{sha[..Math.Min(12, sha.Length)]} {code.FilesTouched.Count} files");
 
                 if (PollControl(state, wp) is { } afterCoder) return afterCoder;
 
@@ -426,7 +483,7 @@ public sealed class ExecutionEngine
         {
             Log($"[{wp.Id}] escalating to Frontier for repair advice…");
             var request = new RepairRequest(
-                wp, info.Total, info.Feedback,
+                wp, info.Total, info.Feedback.TakeLast(20).ToList(),
                 info.Advice.LastOrDefault(),
                 string.Join("\n", _audit.ReadTail(10).Select(e => $"{e.Timestamp} {e.Event} {e.Detail}")),
                 SafeDiff(wp.Id));
@@ -490,7 +547,7 @@ public sealed class ExecutionEngine
             WorkPackage = wp,
             Global = _global,
             Attempt = Math.Max(1, info.Count),
-            Feedback = info.Feedback,
+            Feedback = info.Feedback.TakeLast(20).ToList(),
             Advice = info.Advice,
         };
 
@@ -501,7 +558,7 @@ public sealed class ExecutionEngine
             WorkPackage = wp,
             Global = _global,
             Attempt = Math.Max(1, info.Count),
-            Feedback = info.Feedback,
+            Feedback = info.Feedback.TakeLast(20).ToList(),
             Advice = info.Advice,
         };
 
@@ -516,6 +573,9 @@ public sealed class ExecutionEngine
         return info;
     }
 
+    private static bool IsExecutionId(string value) =>
+        value.Length == 32 && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
     private static void RecordFailure(AttemptInfo info, string type, string reason)
     {
         reason = Diagnostic(reason);
@@ -524,8 +584,68 @@ public sealed class ExecutionEngine
         RecordFeedback(info, type, reason);
     }
 
-    private static void RecordFeedback(AttemptInfo info, string type, string reason) =>
+    private static void RecordFeedback(AttemptInfo info, string type, string reason)
+    {
         info.Feedback.Add(Diagnostic($"[{type}] {reason}"));
+        if (info.Feedback.Count > 20)
+            info.Feedback.RemoveRange(0, info.Feedback.Count - 20);
+    }
+
+    private static IReadOnlyList<string> RecordCoderOutcomeFailure(
+        AttemptInfo info, CoderResult result, string fallback)
+    {
+        var reasons = (result.FailureReasons ?? [])
+            .Take(5)
+            .Select(reason => Diagnostic(reason, 1000))
+            .Where(reason => !string.IsNullOrWhiteSpace(reason))
+            .ToList();
+        if (reasons.Count == 0)
+            reasons.Add(Diagnostic(fallback, 1000));
+        info.LastFailureType = TenNinety.FailureTypes.Coder;
+        info.LastFailureReasons = reasons;
+        foreach (var reason in reasons)
+            RecordFeedback(info, TenNinety.FailureTypes.Coder, reason);
+        return reasons;
+    }
+
+    private void EnsureSuccessfulNoOp(
+        CoderResult result, CandidateRevision coderBase, string branch, string expectedMainSha,
+        AttemptInfo info, RuntimeState state, WorkPackage wp)
+    {
+        if (result.CommitSha is not null || result.FilesTouched.Count > 0 ||
+            _git.CurrentBranch() != branch || _git.HeadSha() != coderBase.CommitSha ||
+            _git.FindCommit(TenNinety.MainBranch)?.Sha != expectedMainSha || !_git.IsClean())
+            throw CoderContractFailure(
+                info, state, wp,
+                "a successful no-op coder result did not leave the exact candidate unchanged.");
+    }
+
+    private void EnsureFailedCoderLeftCandidateUnchanged(
+        CoderResult result, CandidateRevision coderBase, string branch, string expectedMainSha,
+        AttemptInfo info, RuntimeState state, WorkPackage wp)
+    {
+        if (result.CommitSha is not null || result.FilesTouched.Count > 0 ||
+            _git.CurrentBranch() != branch || _git.HeadSha() != coderBase.CommitSha ||
+            _git.FindCommit(TenNinety.MainBranch)?.Sha != expectedMainSha || !_git.IsClean())
+            throw CoderContractFailure(
+                info, state, wp,
+                "a failed coder result attempted to change the authoritative candidate.");
+    }
+
+    private bool CandidateTreeDiffersFromMain(CandidateRevision candidate) =>
+        !string.Equals(
+            _git.ResolveTreeOfCommit(candidate.CommitSha),
+            _git.ResolveTreeOfCommit(candidate.MainBaseSha),
+            StringComparison.Ordinal);
+
+    private CoderInfrastructureException CoderContractFailure(
+        AttemptInfo info, RuntimeState state, WorkPackage wp, string message)
+    {
+        ReleaseInfrastructureAttempt(info);
+        Persist(state);
+        _audit.Append("CODER_FAILED", wp.Id, "invalid coder result contract");
+        return new CoderInfrastructureException(message);
+    }
 
     private void Persist(RuntimeState state) => _stateStore.Save(state);
 
@@ -574,13 +694,4 @@ public sealed class ExecutionEngine
     }
 
     private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
-}
-
-/// <summary>C# 14 extension members: an extension property on <see cref="CoderResult"/>.</summary>
-internal static class CoderResultExtensions
-{
-    extension(CoderResult result)
-    {
-        public bool ProducesRealChange => result.ProducedChanges || result.FilesTouched.Count > 0;
-    }
 }

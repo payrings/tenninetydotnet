@@ -22,11 +22,25 @@ public sealed class HttpFrontierClient : IFrontierClient
     private const int MaxResponseBytes = 4 * 1024 * 1024;
     private readonly HttpClient _http;
     private readonly TenNinetyConfig _config;
+    private readonly TimeSpan _requestTimeout;
 
     public HttpFrontierClient(HttpClient http, TenNinetyConfig config)
+        : this(http, config, TimeSpan.FromMinutes(config.AttemptTimeoutMinutes))
     {
-        _http = http;
-        _config = config;
+    }
+
+    internal HttpFrontierClient(
+        HttpClient http, TenNinetyConfig config, TimeSpan requestTimeout)
+    {
+        _http = http ?? throw new ArgumentNullException(nameof(http));
+        _config = config ?? throw new ArgumentNullException(nameof(config));
+        if (requestTimeout <= TimeSpan.Zero || requestTimeout.TotalMilliseconds > int.MaxValue)
+            throw new ArgumentOutOfRangeException(
+                nameof(requestTimeout), "the Frontier request timeout must be finite and positive.");
+        _requestTimeout = requestTimeout;
+        // ResponseHeadersRead ends HttpClient's own timeout at header receipt. One linked
+        // deadline below owns both headers and streaming-body reads instead.
+        _http.Timeout = Timeout.InfiniteTimeSpan;
         var key = Environment.GetEnvironmentVariable(config.FrontierApiKeyEnv);
         if (!string.IsNullOrEmpty(key))
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", key);
@@ -89,41 +103,53 @@ public sealed class HttpFrontierClient : IFrontierClient
         {
             Content = new StringContent(Json.Serialize(payload), Encoding.UTF8, "application/json"),
         };
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-        var responseBody = await ReadBoundedAsync(response.Content, ct);
-        if (!response.IsSuccessStatusCode)
-            throw new FrontierCallException(
-                $"frontier call failed ({(int)response.StatusCode}): " +
-                FrontierDiagnostics.Build(responseBody));
-
-        ChatCompletionResponse? completion;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(_requestTimeout);
         try
         {
-            completion = System.Text.Json.JsonSerializer.Deserialize<ChatCompletionResponse>(responseBody, Json.Options);
-        }
-        catch (System.Text.Json.JsonException ex)
-        {
-            // Remote-body diagnostics are centralized: sanitized AND bounded BEFORE they can
-            // reach logs or the terminal — redaction first (so bounding cannot strip a
-            // secret's identifying prefix while keeping its value), then control-character
-            // stripping, then the bound.
-            throw new FrontierCallException(
-                "frontier returned non-JSON body: " + FrontierDiagnostics.Build(responseBody), ex);
-        }
-        if (completion is null)
-            throw new FrontierCallException("frontier returned an empty completion.");
-        var messageContent = completion.Choices.FirstOrDefault()?.Message.Content
-            ?? throw new FrontierCallException("frontier completion had no message content.");
+            using var response = await _http.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            var responseBody = await ReadBoundedAsync(response.Content, deadline.Token);
+            if (!response.IsSuccessStatusCode)
+                throw new FrontierCallException(
+                    $"frontier call failed ({(int)response.StatusCode}): " +
+                    FrontierDiagnostics.Build(responseBody));
 
-        try
-        {
-            return parse(JsonExtractor.ExtractFirstJsonObject(messageContent));
+            ChatCompletionResponse? completion;
+            try
+            {
+                completion = System.Text.Json.JsonSerializer.Deserialize<ChatCompletionResponse>(responseBody, Json.Options);
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                // Remote-body diagnostics are centralized: sanitized AND bounded BEFORE they can
+                // reach logs or the terminal — redaction first (so bounding cannot strip a
+                // secret's identifying prefix while keeping its value), then control-character
+                // stripping, then the bound.
+                throw new FrontierCallException(
+                    "frontier returned non-JSON body: " + FrontierDiagnostics.Build(responseBody), ex);
+            }
+            if (completion is null)
+                throw new FrontierCallException("frontier returned an empty completion.");
+            var messageContent = completion.Choices.FirstOrDefault()?.Message.Content
+                ?? throw new FrontierCallException("frontier completion had no message content.");
+
+            try
+            {
+                return parse(JsonExtractor.ExtractFirstJsonObject(messageContent));
+            }
+            catch (Exception ex) when (ex is not FrontierCallException)
+            {
+                throw new FrontierCallException(
+                    "failed to parse frontier JSON response: " +
+                    FrontierDiagnostics.Build(ex.Message), ex);
+            }
         }
-        catch (Exception ex) when (ex is not FrontierCallException)
+        catch (OperationCanceledException ex) when (
+            deadline.IsCancellationRequested && !ct.IsCancellationRequested)
         {
             throw new FrontierCallException(
-                "failed to parse frontier JSON response: " +
-                FrontierDiagnostics.Build(ex.Message), ex);
+                $"frontier call timed out after {_requestTimeout.TotalSeconds:0.###} seconds.", ex);
         }
     }
 
@@ -154,7 +180,10 @@ public sealed class HttpFrontierClient : IFrontierClient
     }
 
     private static string JoinUrl(string baseUrl, string path) =>
-        baseUrl.TrimEnd('/') + "/" + path.TrimStart('/'); private static async Task<string> ReadBoundedAsync(HttpContent content, CancellationToken ct)
+        baseUrl.TrimEnd('/') + "/" + path.TrimStart('/');
+
+    private static async Task<string> ReadBoundedAsync(
+        HttpContent content, CancellationToken ct)
     {
         if (content.Headers.ContentLength is > MaxResponseBytes)
             throw new FrontierCallException(

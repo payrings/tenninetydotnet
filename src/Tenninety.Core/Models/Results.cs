@@ -31,12 +31,23 @@ public sealed class TestRunResult
     public string? RestoreOutputSha256 { get; init; }
 }
 
+public enum CoderOutcome
+{
+    Unspecified,
+    ChangesProduced,
+    NoChanges,
+    CommandFailed,
+    PolicyRejected,
+}
+
 public sealed class CoderResult
 {
-    public bool ProducedChanges { get; init; }
+    public required CoderOutcome Outcome { get; init; }
+    public bool ProducedChanges => Outcome == CoderOutcome.ChangesProduced;
     public string? CommitSha { get; init; }
     public string Summary { get; init; } = "";
     public List<string> FilesTouched { get; init; } = new();
+    public List<string> FailureReasons { get; init; } = new();
 }
 
 /// <summary>Frontier repair advice returned on attempt-10 escalation (Part IV.3).</summary>

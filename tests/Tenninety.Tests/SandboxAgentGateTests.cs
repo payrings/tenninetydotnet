@@ -101,21 +101,61 @@ public sealed class SandboxAgentGateTests : IDisposable
     }
 
     [Fact]
-    public async Task Policy_rejection_is_an_ordinary_no_change_result_after_cleanup()
+    public async Task Policy_rejection_reports_bounded_redacted_reasons_after_cleanup()
     {
+        const string secret = "supersecretvalue123";
         var timeline = new List<string>();
         var runtime = new SandboxTesterGateTests.RecordingRuntime();
         runtime.SessionFactory = spec => Session(spec, timeline, _ =>
         {
-            var path = Path.Combine(spec.HostWorkspacePath!.Value, "id_rsa");
-            File.WriteAllText(path, "candidate controlled\n");
+            File.WriteAllText(
+                Path.Combine(spec.HostWorkspacePath!.Value, "global.json"), "{}\n");
+            var hostileDirectory = Directory.CreateDirectory(
+                Path.Combine(spec.HostWorkspacePath.Value, ".github"));
+            File.WriteAllText(
+                Path.Combine(hostileDirectory.FullName, "apiKey=" + secret + ".yml"),
+                "candidate controlled\n");
         });
         var gate = CoderGate(runtime, timeline, out var transport);
 
         var result = await gate.ImplementAsync(CoderContext());
 
+        Assert.Equal(CoderOutcome.PolicyRejected, result.Outcome);
         Assert.False(result.ProducedChanges);
+        Assert.Contains(result.FailureReasons,
+            reason => reason.Contains("global.json") && reason.Contains("sensitive path"));
+        Assert.All(result.FailureReasons, reason => Assert.True(reason.Length <= 2000));
+        Assert.DoesNotContain(secret, string.Join("\n", result.FailureReasons));
         Assert.Equal(_mainSha, _git.HeadSha());
+        Assert.Equal(["stop", "dispose", "delete", "transport-dispose"], timeline);
+        Assert.True(transport.Disposed);
+        Assert.Empty(Directory.GetFileSystemEntries(_managedRoot.Root));
+    }
+
+    [Fact]
+    public async Task Definitive_nonzero_coder_exit_is_not_reported_as_no_change()
+    {
+        const string secret = "supersecretvalue123";
+        var timeline = new List<string>();
+        var runtime = new SandboxTesterGateTests.RecordingRuntime();
+        runtime.SessionFactory = spec =>
+        {
+            var session = Session(spec, timeline, _ => { });
+            session.Then(RecordingSandboxSession.Fail(
+                7, stdout: "apiKey=" + secret + "\u001b[31m" + new string('x', 4000)));
+            return session;
+        };
+        var gate = CoderGate(runtime, timeline, out var transport);
+
+        var result = await gate.ImplementAsync(CoderContext());
+
+        Assert.Equal(CoderOutcome.CommandFailed, result.Outcome);
+        var reason = Assert.Single(result.FailureReasons);
+        Assert.Contains("definitive code 7", reason);
+        Assert.DoesNotContain("no file changes", reason);
+        Assert.DoesNotContain(secret, reason);
+        Assert.DoesNotContain('\u001b', reason);
+        Assert.True(reason.Length <= 2000);
         Assert.Equal(["stop", "dispose", "delete", "transport-dispose"], timeline);
         Assert.True(transport.Disposed);
         Assert.Empty(Directory.GetFileSystemEntries(_managedRoot.Root));

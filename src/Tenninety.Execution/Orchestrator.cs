@@ -64,14 +64,7 @@ public sealed class Orchestrator
         // freshly loaded plan with persisted queue statuses so an interrupted-and-restarted run
         // never re-executes completed work. Only TERMINAL statuses are trusted from disk – a
         // stale ACTIVE entry (hard crash mid-job) falls back to PENDING so the job can resume.
-        foreach (var wp in plan.WorkPackages)
-        {
-            if (!state.QueueStatus.TryGetValue(wp.Id, out var status)) continue;
-            if (status is TenNinety.WpStatus.Done
-                     or TenNinety.WpStatus.Blocked
-                     or TenNinety.WpStatus.Cancelled)
-                wp.Status = status;
-        }
+        HydrateTerminalStatuses(plan, state);
     }
 
     public async Task<OrchestratorExit> RunAsync(CancellationToken ct)
@@ -80,6 +73,31 @@ public sealed class Orchestrator
         // closing the stale-snapshot race. Direct callers and later TUI resumes acquire here.
         using var daemonLock = Interlocked.Exchange(ref _initialDaemonLock, null) ??
                                DaemonLock.Acquire(_git.RepoPath);
+        return await RunUnderLeaseAsync(daemonLock, ct);
+    }
+
+    /// <summary>Atomically resumes a stopped dashboard: the daemon lease is acquired before
+    /// persisted plan/state or control markers are touched, refreshed objects remain the same
+    /// instances observed by the TUI, and the lease is retained through startup and execution.</summary>
+    public async Task<OrchestratorExit> ResumeAsync(CancellationToken ct)
+    {
+        using var daemonLock = DaemonLock.Acquire(_git.RepoPath);
+        RefreshWorkspaceUnderLease(daemonLock);
+        ExecutionControl.ClearAll(_git.RepoPath);
+        _state.Paused = false;
+        _state.StopRequested = false;
+        // Do not synchronize queue statuses before recovery. A persisted ACTIVE/current_wp/
+        // execution_id tuple is exact interrupted-execution evidence used during startup.
+        _stateStore.Save(_state);
+        _audit.Append("RESUMED");
+        Log("resumed");
+        return await RunUnderLeaseAsync(daemonLock, ct);
+    }
+
+    private async Task<OrchestratorExit> RunUnderLeaseAsync(
+        DaemonLockLease daemonLock, CancellationToken ct)
+    {
+        daemonLock.ThrowIfNotLiveFor(_git.RepoPath);
         // Recovery owns the daemon lock but does not require a clean/main checkout. A crashed
         // job commonly leaves its work branch selected, and scoped Docker resources must be
         // cleaned before any branch rejection can stop startup.
@@ -229,14 +247,22 @@ public sealed class Orchestrator
         Log("pause requested");
     }
 
-    public void Resume()
+    /// <summary>Clears completion-race markers only when no other daemon owns the repository.
+    /// An old dashboard must never consume requests belonging to a newer active run.</summary>
+    public void ClearControlRequestsIfIdle()
     {
-        ExecutionControl.ClearAll(_git.RepoPath);
-        _state.Paused = false;
-        _state.StopRequested = false;
-        Persist();
-        _audit.Append("RESUMED");
-        Log("resumed");
+        DaemonLockLease daemonLock;
+        try
+        {
+            daemonLock = DaemonLock.Acquire(_git.RepoPath);
+        }
+        catch (InvalidOperationException ex) when (ex.InnerException is IOException)
+        {
+            return;
+        }
+
+        using (daemonLock)
+            ExecutionControl.ClearAll(_git.RepoPath);
     }
 
     public void RequestStop()
@@ -446,6 +472,55 @@ public sealed class Orchestrator
     {
         foreach (var wp in _plan.WorkPackages)
             _state.QueueStatus[wp.Id] = wp.Status;
+    }
+
+    private void RefreshWorkspaceUnderLease(DaemonLockLease daemonLock)
+    {
+        daemonLock.ThrowIfNotLiveFor(_git.RepoPath);
+        var refreshedPlan = new PlanStore(Path.Combine(
+            _git.RepoPath, TenNinety.StateDir, TenNinety.PlanFile)).Load();
+        var validation = PlanValidator.Validate(refreshedPlan);
+        if (!validation.IsValid)
+            throw new InvalidOperationException(
+                "plan.json is invalid: " + string.Join("; ", validation.Errors));
+        var refreshedState = _stateStore.Load();
+
+        CopyPlan(refreshedPlan, _plan);
+        CopyState(refreshedState, _state);
+        HydrateTerminalStatuses(_plan, _state);
+    }
+
+    private static void HydrateTerminalStatuses(Plan plan, RuntimeState state)
+    {
+        foreach (var wp in plan.WorkPackages)
+        {
+            if (!state.QueueStatus.TryGetValue(wp.Id, out var status)) continue;
+            if (status is TenNinety.WpStatus.Done
+                     or TenNinety.WpStatus.Blocked
+                     or TenNinety.WpStatus.Cancelled)
+                wp.Status = status;
+        }
+    }
+
+    private static void CopyPlan(Plan source, Plan target)
+    {
+        target.SchemaVersion = source.SchemaVersion;
+        target.ProjectName = source.ProjectName;
+        target.GlobalContext = source.GlobalContext;
+        target.ArchitectureMap = source.ArchitectureMap;
+        target.WorkPackages = source.WorkPackages;
+    }
+
+    private static void CopyState(RuntimeState source, RuntimeState target)
+    {
+        target.CurrentWp = source.CurrentWp;
+        target.ExecutionMode = source.ExecutionMode;
+        target.Attempts = source.Attempts;
+        target.QueueStatus = source.QueueStatus;
+        target.Paused = source.Paused;
+        target.StopRequested = source.StopRequested;
+        target.SpecHash = source.SpecHash;
+        target.SandboxRecovery = source.SandboxRecovery;
     }
 
     private void Log(string message) => _log?.Invoke(

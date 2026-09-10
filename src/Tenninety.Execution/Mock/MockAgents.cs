@@ -58,7 +58,7 @@ public sealed class MockCoderAgent : ICoderAgent
         var summary = $"attempt {ctx.Attempt}: materialized directives for {ctx.WorkPackage.Id}";
         return Task.FromResult(new CoderResult
         {
-            ProducedChanges = true,
+            Outcome = CoderOutcome.ChangesProduced,
             Summary = summary,
             FilesTouched = new List<string> { Path.GetRelativePath(repoPath, file) },
         });

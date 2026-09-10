@@ -30,7 +30,7 @@ public sealed class SpyCoder : ICoderAgent
         File.WriteAllText(file, $"attempt {ctx.Attempt}\n");
         return Task.FromResult(new CoderResult
         {
-            ProducedChanges = true,
+            Outcome = CoderOutcome.ChangesProduced,
             Summary = "spy change",
             CommitSha = _git?.CommitAll($"{ctx.WorkPackage.Id}: spy change [attempt {ctx.Attempt}]"),
         });
@@ -418,6 +418,69 @@ public class ExecutionEngineTests
         AssertDiagnosticSafe(audit.Detail, secret, AuditLog.MaxDetailChars);
     }
 
+    [Fact]
+    public async Task Policy_rejection_feedback_reaches_retry_state_and_frontier_safely()
+    {
+        using var h = new EngineHarness(maxAttempts: 1, maxTotal: 3);
+        const string secret = "supersecretvalue123";
+        var frontier = new CapturingRepairFrontier();
+        var coder = new PolicyThenChangeCoder(h.Dir.Root, h.States, secret);
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, frontier, coder,
+            new ScriptedReviewer(0), new ScriptedTester(0), h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(
+            h.Plan.WorkPackages[0], h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Done, outcome);
+        Assert.Equal(2, coder.Contexts.Count);
+        var retryFeedback = coder.Contexts[1].Feedback;
+        Assert.Equal(5, retryFeedback.Count);
+        Assert.Contains(retryFeedback,
+            reason => reason.Contains("policy rejection") && reason.Contains("global.json"));
+        Assert.DoesNotContain(retryFeedback,
+            reason => reason.Contains("no file changes", StringComparison.OrdinalIgnoreCase));
+        AssertDiagnosticsSafeAndBounded(retryFeedback, secret, 1100);
+
+        var persisted = Assert.IsType<AttemptInfo>(coder.PersistedBeforeRetry);
+        Assert.Equal(TenNinety.FailureTypes.Coder, persisted.LastFailureType);
+        Assert.Equal(5, persisted.LastFailureReasons.Count);
+        AssertDiagnosticsSafeAndBounded(persisted.LastFailureReasons, secret, 1000);
+        var repair = Assert.IsType<RepairRequest>(frontier.Request);
+        Assert.Equal(retryFeedback, repair.Feedback);
+        AssertDiagnosticsSafeAndBounded(repair.Feedback, secret, 1100);
+        Assert.Contains(h.Audit.ReadTail(100), e => e.Event == "CODER_POLICY_REJECTED");
+        Assert.DoesNotContain(h.Audit.ReadTail(100), e => e.Event == "CODER_NO_CHANGE");
+        Assert.Single(h.Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");
+    }
+
+    [Fact]
+    public async Task Definitive_coder_exit_has_distinct_persisted_feedback()
+    {
+        using var h = new EngineHarness(maxAttempts: 1, maxTotal: 1);
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(),
+            new FixedResultCoder(new CoderResult
+            {
+                Outcome = CoderOutcome.CommandFailed,
+                Summary = "tool failed",
+                FailureReasons = ["coder command exited with definitive code 7."],
+            }),
+            new ScriptedReviewer(0), new ScriptedTester(0), h.States, h.Audit);
+
+        var outcome = await engine.ExecuteWpAsync(
+            h.Plan.WorkPackages[0], h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Blocked, outcome);
+        var attempt = h.States.Load().Attempts["WP-001"];
+        Assert.Contains(attempt.Feedback, reason => reason.Contains("definitive code 7"));
+        Assert.DoesNotContain(attempt.Feedback, reason => reason.Contains("no file changes"));
+        Assert.Contains(h.Audit.ReadTail(20), e => e.Event == "CODER_FAILED");
+        Assert.DoesNotContain(h.Audit.ReadTail(20), e => e.Event == "CODER_NO_CHANGE");
+        Assert.DoesNotContain(h.Audit.ReadTail(20), e => e.Event == "REVIEW_PASSED");
+        Assert.DoesNotContain(h.Audit.ReadTail(20), e => e.Event == "WP_PROMOTED");
+    }
+
     private static void AssertDiagnosticSafe(string value, string secret, int maxChars)
     {
         Assert.True(value.Length <= maxChars);
@@ -426,6 +489,13 @@ public class ExecutionEngineTests
         Assert.DoesNotContain('\r', value);
         Assert.DoesNotContain('\0', value);
         Assert.DoesNotContain('\u0085', value);
+    }
+
+    private static void AssertDiagnosticsSafeAndBounded(
+        IEnumerable<string> values, string secret, int maxChars)
+    {
+        foreach (var value in values)
+            AssertDiagnosticSafe(value, secret, maxChars);
     }
 
     [Fact]
@@ -492,6 +562,79 @@ public class ExecutionEngineTests
             throw new InvalidOperationException(message);
     }
 
+    private sealed class FixedResultCoder(CoderResult result) : ICoderAgent
+    {
+        public Task<CoderResult> ImplementAsync(
+            CoderRunContext ctx, CancellationToken ct = default) => Task.FromResult(result);
+    }
+
+    private sealed class PolicyThenChangeCoder(
+        string repoPath, StateStore states, string secret) : ICoderAgent
+    {
+        public List<CoderRunContext> Contexts { get; } = [];
+        public AttemptInfo? PersistedBeforeRetry { get; private set; }
+
+        public Task<CoderResult> ImplementAsync(
+            CoderRunContext ctx, CancellationToken ct = default)
+        {
+            Contexts.Add(ctx);
+            if (Contexts.Count == 1)
+            {
+                var hostile = "policy rejection: 'global.json' is sensitive; apiKey=" + secret +
+                              "\u001b[31m\r\0\u0085" + new string('x', 5000);
+                return Task.FromResult(new CoderResult
+                {
+                    Outcome = CoderOutcome.PolicyRejected,
+                    Summary = "trusted policy rejection",
+                    FailureReasons = Enumerable.Range(0, 8)
+                        .Select(index => hostile + index)
+                        .ToList(),
+                });
+            }
+
+            PersistedBeforeRetry = states.Load().Attempts[ctx.WorkPackage.Id];
+            File.WriteAllText(Path.Combine(repoPath, "policy-fixed.txt"), "safe\n");
+            return Task.FromResult(new CoderResult
+            {
+                Outcome = CoderOutcome.ChangesProduced,
+                Summary = "removed the rejected sensitive change",
+                FilesTouched = ["policy-fixed.txt"],
+            });
+        }
+    }
+
+    private sealed class CapturingRepairFrontier : IFrontierClient
+    {
+        public RepairRequest? Request { get; private set; }
+
+        public Task<Plan> GeneratePlanAsync(
+            string sanitizedSpecMarkdown, CancellationToken ct = default) =>
+            Task.FromResult(new Plan { ProjectName = "unused" });
+
+        public Task<RepairAdvice> GetRepairAdviceAsync(
+            RepairRequest request, CancellationToken ct = default)
+        {
+            Request = request;
+            return Task.FromResult(new RepairAdvice
+            {
+                Analysis = "remove the rejected sensitive path",
+                Advice = ["keep sensitive files out of the candidate"],
+            });
+        }
+
+        public Task<PivotProposal> ProposePivotAsync(
+            PivotRequest request, CancellationToken ct = default) =>
+            Task.FromResult(new PivotProposal());
+
+        public Task<RevertGuidance> ProposeRevertAsync(
+            RevertRequest request, CancellationToken ct = default) =>
+            Task.FromResult(new RevertGuidance
+            {
+                Analysis = "unused",
+                MechanicalRevertSufficient = false,
+            });
+    }
+
     private sealed class CancellingMutatingReviewer(
         string repoPath, CancellationTokenSource cancellation) : IReviewerAgent
     {
@@ -524,13 +667,97 @@ public class ExecutionEngineTests
         {
             File.WriteAllText(System.IO.Path.Combine(repoPath, "partial.txt"), "partial");
             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
-            return new CoderResult();
+            return new CoderResult { Outcome = CoderOutcome.NoChanges };
         }
     }
 }
 
 public class BranchLifecycleRegressionTests
 {
+    [Fact]
+    public async Task Pause_after_coder_commit_resumes_the_exact_candidate_through_all_gates()
+    {
+        using var h = new EngineHarness(maxAttempts: 3, maxTotal: 5);
+        var coder = new CommitThenNoOpCoder(h.Dir.Root, pauseAfterFirstChange: true);
+        var reviewer = new CountingPassingReviewer();
+        var tester = new CountingPassingTester();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), coder, reviewer, tester,
+            h.States, h.Audit);
+        var wp = h.Plan.WorkPackages[0];
+
+        var paused = await engine.ExecuteWpAsync(wp, h.State, CancellationToken.None);
+        Assert.Equal(WpOutcome.Paused, paused);
+        Assert.True(h.Git.BranchExists("work/WP-001"));
+        Assert.Empty(reviewer.Candidates);
+        Assert.Empty(tester.Candidates);
+
+        h.State.Paused = false;
+        var completed = await engine.ExecuteWpAsync(wp, h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Done, completed);
+        Assert.Equal(2, coder.Contexts.Count);
+        Assert.Single(reviewer.Candidates);
+        Assert.Single(tester.Candidates);
+        Assert.Equal(reviewer.Candidates[0], tester.Candidates[0]);
+        Assert.Single(h.Audit.ReadTail(100), e => e.Event == "CODER_COMMITTED");
+        Assert.Single(h.Audit.ReadTail(100), e => e.Event == "CODER_CANDIDATE_REUSED");
+        Assert.Single(h.Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");
+        Assert.Equal(2, h.Git.RecentCommits(10).Count);
+    }
+
+    [Fact]
+    public async Task Tester_infrastructure_retry_can_reuse_unchanged_committed_candidate()
+    {
+        using var h = new EngineHarness(maxAttempts: 3, maxTotal: 5);
+        var coder = new CommitThenNoOpCoder(h.Dir.Root, pauseAfterFirstChange: false);
+        var reviewer = new CountingPassingReviewer();
+        var tester = new InfrastructureThenPassingTester();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), coder, reviewer, tester,
+            h.States, h.Audit);
+        var wp = h.Plan.WorkPackages[0];
+
+        await Assert.ThrowsAsync<TesterInfrastructureException>(
+            () => engine.ExecuteWpAsync(wp, h.State, CancellationToken.None));
+        Assert.Equal(TenNinety.WpStatus.Pending, wp.Status);
+        Assert.True(h.Git.BranchExists("work/WP-001"));
+
+        var completed = await engine.ExecuteWpAsync(wp, h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Done, completed);
+        Assert.Equal(2, coder.Contexts.Count);
+        Assert.Equal(2, reviewer.Candidates.Count);
+        Assert.Equal(2, tester.Candidates.Count);
+        Assert.Equal(tester.Candidates[0], tester.Candidates[1]);
+        Assert.Single(h.Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");
+        Assert.Equal(2, h.Git.RecentCommits(10).Count);
+    }
+
+    [Theory]
+    [InlineData(CoderOutcome.NoChanges)]
+    [InlineData(CoderOutcome.CommandFailed)]
+    [InlineData(CoderOutcome.PolicyRejected)]
+    public async Task Empty_or_failed_initial_coder_result_never_reaches_downstream_gates(
+        CoderOutcome outcome)
+    {
+        using var h = new EngineHarness(maxAttempts: 1, maxTotal: 1);
+        var reviewer = new CountingPassingReviewer();
+        var tester = new CountingPassingTester();
+        var engine = new ExecutionEngine(
+            h.Git, h.Config, new MockFrontierClient(), new FixedOutcomeCoder(outcome),
+            reviewer, tester, h.States, h.Audit);
+
+        var result = await engine.ExecuteWpAsync(
+            h.Plan.WorkPackages[0], h.State, CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Blocked, result);
+        Assert.Empty(reviewer.Candidates);
+        Assert.Empty(tester.Candidates);
+        Assert.DoesNotContain(h.Audit.ReadTail(100), e => e.Event == "WP_PROMOTED");
+        Assert.Single(h.Git.RecentCommits(10));
+    }
+
     [Fact]
     public async Task Paused_then_resumed_reuses_the_existing_work_branch()
     {
@@ -581,6 +808,103 @@ public class BranchLifecycleRegressionTests
                 Passed = exists,
                 ExitCode = exists ? 0 : 1,
                 OutputTail = exists ? "present" : "required main file missing",
+                CandidateSha = ctx.Candidate.CommitSha,
+            });
+        }
+    }
+
+    private sealed class CommitThenNoOpCoder(string repoPath, bool pauseAfterFirstChange)
+        : ICoderAgent
+    {
+        public List<CoderRunContext> Contexts { get; } = [];
+
+        public Task<CoderResult> ImplementAsync(
+            CoderRunContext ctx, CancellationToken ct = default)
+        {
+            Contexts.Add(ctx);
+            if (Contexts.Count > 1)
+                return Task.FromResult(new CoderResult
+                {
+                    Outcome = CoderOutcome.NoChanges,
+                    Summary = "existing candidate is already complete",
+                });
+
+            File.WriteAllText(Path.Combine(repoPath, "resumable-candidate.txt"), "complete\n");
+            if (pauseAfterFirstChange)
+                ExecutionControl.SetPause(repoPath);
+            return Task.FromResult(new CoderResult
+            {
+                Outcome = CoderOutcome.ChangesProduced,
+                Summary = "created complete candidate",
+                FilesTouched = ["resumable-candidate.txt"],
+            });
+        }
+    }
+
+    private sealed class FixedOutcomeCoder(CoderOutcome outcome) : ICoderAgent
+    {
+        public Task<CoderResult> ImplementAsync(
+            CoderRunContext ctx, CancellationToken ct = default) =>
+            Task.FromResult(new CoderResult
+            {
+                Outcome = outcome,
+                Summary = "scripted unsuccessful result",
+                FailureReasons = outcome is CoderOutcome.CommandFailed
+                    ? ["coder command exited with definitive code 7."]
+                    : outcome is CoderOutcome.PolicyRejected
+                        ? ["'global.json' is a sensitive path."]
+                        : [],
+            });
+    }
+
+    private sealed class CountingPassingReviewer : IReviewerAgent
+    {
+        public List<string> Candidates { get; } = [];
+
+        public Task<ReviewResult> ReviewAsync(
+            ReviewerRunContext ctx, CancellationToken ct = default)
+        {
+            Candidates.Add(ctx.Candidate.CommitSha);
+            return Task.FromResult(new ReviewResult
+            {
+                Passed = true,
+                ReviewerModel = "counting-reviewer",
+                CandidateSha = ctx.Candidate.CommitSha,
+            });
+        }
+    }
+
+    private sealed class CountingPassingTester : ITesterAgent
+    {
+        public List<string> Candidates { get; } = [];
+
+        public Task<TestRunResult> RunTestsAsync(
+            TesterRunContext ctx, CancellationToken ct = default)
+        {
+            Candidates.Add(ctx.Candidate.CommitSha);
+            return Task.FromResult(new TestRunResult
+            {
+                Passed = true,
+                ExitCode = 0,
+                CandidateSha = ctx.Candidate.CommitSha,
+            });
+        }
+    }
+
+    private sealed class InfrastructureThenPassingTester : ITesterAgent
+    {
+        public List<string> Candidates { get; } = [];
+
+        public Task<TestRunResult> RunTestsAsync(
+            TesterRunContext ctx, CancellationToken ct = default)
+        {
+            Candidates.Add(ctx.Candidate.CommitSha);
+            if (Candidates.Count == 1)
+                throw new TesterInfrastructureException("simulated tester transport failure");
+            return Task.FromResult(new TestRunResult
+            {
+                Passed = true,
+                ExitCode = 0,
                 CandidateSha = ctx.Candidate.CommitSha,
             });
         }

@@ -288,7 +288,7 @@ public sealed class PromotionRecoveryTests
             File.WriteAllText(Path.Combine(root, "implementation.txt"), $"generation {Calls}\n");
             return Task.FromResult(new CoderResult
             {
-                ProducedChanges = true,
+                Outcome = CoderOutcome.ChangesProduced,
                 Summary = "sequence change",
             });
         }

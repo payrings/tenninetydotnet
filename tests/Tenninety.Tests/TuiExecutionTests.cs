@@ -16,7 +16,8 @@ public sealed class TuiExecutionTests
             "startup [red]failure[/] apiKey=" + secret + "; \u001b[31m\r\0\u0085" + new string('x', 5000));
         using var execution = new TuiExecution(
             _ => synchronous ? throw error : Task.FromException<OrchestratorExit>(error),
-            () => { }, () => { }, () => Assert.Fail("An already failed run must not be stopped."));
+            () => { }, _ => Task.FromResult(OrchestratorExit.Paused),
+            () => Assert.Fail("An already failed run must not be stopped."));
 
         await execution.ObserveCompletedAsync();
         var output = Render(execution);
@@ -41,7 +42,8 @@ public sealed class TuiExecutionTests
     public async Task Mid_execution_failure_is_observed_on_refresh_without_a_keypress()
     {
         var run = new TaskCompletionSource<OrchestratorExit>();
-        using var execution = new TuiExecution(_ => run.Task, () => { }, () => { }, () => { });
+        using var execution = new TuiExecution(
+            _ => run.Task, () => { }, _ => run.Task, () => { });
         await execution.ObserveCompletedAsync();
         Assert.True(execution.IsRunning);
         Assert.Contains("RUNNING", Render(execution));
@@ -65,7 +67,8 @@ public sealed class TuiExecutionTests
         OrchestratorExit exit, string status, int code)
     {
         using var execution = new TuiExecution(_ => Task.FromResult(exit),
-            () => { }, () => { }, () => Assert.Fail("An already completed run must not be stopped."));
+            () => { }, _ => Task.FromResult(exit),
+            () => Assert.Fail("An already completed run must not be stopped."));
 
         await execution.ObserveCompletedAsync();
 
@@ -80,7 +83,8 @@ public sealed class TuiExecutionTests
     public async Task Failure_during_pause_is_not_relabelled_paused_and_survives_resume_and_action_banners()
     {
         var run = new TaskCompletionSource<OrchestratorExit>();
-        using var execution = new TuiExecution(_ => run.Task, () => { }, () => { }, () => { });
+        using var execution = new TuiExecution(
+            _ => run.Task, () => { }, _ => run.Task, () => { });
         var pause = execution.PauseAsync();
         Assert.Contains("pausing", Render(execution));
         run.SetException(new IOException("failure while pausing"));
@@ -118,7 +122,7 @@ public sealed class TuiExecutionTests
     {
         var run = new TaskCompletionSource<OrchestratorExit>();
         using var execution = new TuiExecution(_ => run.Task,
-            () => run.SetResult(exit), () => { }, () => { });
+            () => run.SetResult(exit), _ => run.Task, () => { });
 
         await execution.PauseAsync();
 
@@ -138,7 +142,7 @@ public sealed class TuiExecutionTests
                 run.SetResult(OrchestratorExit.Completed);
                 pauseLatched = true;
             },
-            () => { }, () => { }, () => pauseLatched = false);
+            _ => run.Task, () => { }, () => pauseLatched = false);
 
         await execution.PauseAsync();
 
@@ -150,7 +154,8 @@ public sealed class TuiExecutionTests
     public async Task Resume_observes_the_previous_task_before_replacing_it_and_captures_a_new_failure()
     {
         var run = new TaskCompletionSource<OrchestratorExit>();
-        using var execution = new TuiExecution(_ => run.Task, () => { }, () => { }, () => { });
+        using var execution = new TuiExecution(
+            _ => run.Task, () => { }, _ => run.Task, () => { });
         run.SetException(new IOException("first failure"));
         run = new TaskCompletionSource<OrchestratorExit>();
 
@@ -172,7 +177,11 @@ public sealed class TuiExecutionTests
         var run = new TaskCompletionSource<OrchestratorExit>();
         var resumes = 0;
         using var execution = new TuiExecution(_ => run.Task,
-            () => run.SetResult(OrchestratorExit.Paused), () => resumes++, () => { });
+            () => run.SetResult(OrchestratorExit.Paused), _ =>
+            {
+                resumes++;
+                return run.Task;
+            }, () => { });
 
         await execution.PauseAsync();
         Assert.Equal("PAUSED", execution.Status);
@@ -193,7 +202,7 @@ public sealed class TuiExecutionTests
     public async Task Resume_control_failure_is_not_hidden_by_a_resumed_banner()
     {
         using var execution = new TuiExecution(_ => Task.FromResult(OrchestratorExit.Paused),
-            () => { }, () => throw new IOException("resume refused"), () => { });
+            () => { }, _ => throw new IOException("resume refused"), () => { });
 
         await execution.ResumeAsync();
 
@@ -209,7 +218,7 @@ public sealed class TuiExecutionTests
         var run = new TaskCompletionSource<OrchestratorExit>();
         CancellationToken token = default;
         using var execution = new TuiExecution(ct => { token = ct; return run.Task; },
-            () => { }, () => { }, () => run.SetResult(OrchestratorExit.Stopped));
+            () => { }, _ => run.Task, () => run.SetResult(OrchestratorExit.Stopped));
 
         Assert.Equal(0, await execution.ShutdownAsync());
         Assert.Equal("STOPPED", execution.Status);
@@ -224,7 +233,7 @@ public sealed class TuiExecutionTests
         {
             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return OrchestratorExit.Completed;
-        }, () => { }, () => { }, () => stops++);
+        }, () => { }, _ => Task.FromResult(OrchestratorExit.Paused), () => stops++);
 
         Assert.Equal(1, await execution.ShutdownAsync(TimeSpan.Zero).WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal(1, stops);
@@ -241,7 +250,7 @@ public sealed class TuiExecutionTests
         {
             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return OrchestratorExit.Completed;
-        }, () => { }, () => { }, () => stops++);
+        }, () => { }, _ => Task.FromResult(OrchestratorExit.Paused), () => stops++);
 
         execution.RequestShutdown(TimeSpan.Zero);
         var code = await execution.ShutdownAsync().WaitAsync(TimeSpan.FromSeconds(5));
@@ -255,7 +264,7 @@ public sealed class TuiExecutionTests
     public async Task Shutdown_observes_a_failure_after_stop_is_requested()
     {
         var run = new TaskCompletionSource<OrchestratorExit>();
-        using var execution = new TuiExecution(_ => run.Task, () => { }, () => { },
+        using var execution = new TuiExecution(_ => run.Task, () => { }, _ => run.Task,
             () => run.SetException(new IOException("shutdown failure")));
 
         Assert.Equal(1, await execution.ShutdownAsync());

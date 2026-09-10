@@ -21,8 +21,8 @@ public static class TuiHost
         Workspace ws, Plan plan, RuntimeState state, Orchestrator orchestrator)
     {
         using var execution = new TuiExecution(
-            orchestrator.RunAsync, orchestrator.Pause, orchestrator.Resume,
-            orchestrator.RequestStop, () => ExecutionControl.ClearAll(ws.Root));
+            orchestrator.RunAsync, orchestrator.Pause, orchestrator.ResumeAsync,
+            orchestrator.RequestStop, orchestrator.ClearControlRequestsIfIdle);
         var tester = new AgentFactory(ws.Config).CreateTester(ws.Git, line => ws.Audit.Append("TESTER", detail: line));
         var revertService = new RevertService(ws.Git, ws.Config, ws.CreateFrontier(), tester, ws.Audit,
             log: line => ws.Audit.Append("REVERT", detail: line));

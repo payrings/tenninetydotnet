@@ -160,14 +160,18 @@ public sealed class SandboxCoderGate : ICoderAgent
                 ctx.Candidate,
                 expectedHead: promotion.CommitSha ?? ctx.Candidate.CommitSha);
         }
-        catch (CandidatePolicyRejectedException)
+        catch (CandidatePolicyRejectedException ex)
         {
             await DeleteWorkspaceAndDisposeTransportAsync(state);
             return new CoderResult
             {
-                ProducedChanges = false,
+                Outcome = CoderOutcome.PolicyRejected,
                 Summary = "coder output was rejected by the trusted promotion policy",
                 FilesTouched = [],
+                FailureReasons = ex.Reasons
+                    .Take(5)
+                    .Select(reason => Bound(reason))
+                    .ToList(),
             };
         }
         catch (Exception ex)
@@ -188,7 +192,9 @@ public sealed class SandboxCoderGate : ICoderAgent
 
         return new CoderResult
         {
-            ProducedChanges = !promotion.NoChanges,
+            Outcome = promotion.NoChanges
+                ? CoderOutcome.NoChanges
+                : CoderOutcome.ChangesProduced,
             CommitSha = promotion.CommitSha,
             Summary = promotion.NoChanges
                 ? "coder completed without a promotable change"
@@ -481,9 +487,14 @@ public sealed class SandboxCoderGate : ICoderAgent
     private static CoderResult CandidateFailure(
         SandboxCommandResult result, CoderRunContext ctx) => new()
         {
-            ProducedChanges = false,
+            Outcome = CoderOutcome.CommandFailed,
             Summary = $"containerized coder exited {result.ExitCode} for {ctx.WorkPackage.Id}",
             FilesTouched = [],
+            FailureReasons =
+            [
+                Bound($"coder command exited with definitive code {result.ExitCode}. " +
+                      $"Output: {result.StdOutTail}\n{result.StdErrTail}"),
+            ],
         };
 
     private static void EnsureSeparated(string root, string repository)

@@ -85,6 +85,85 @@ public class HardeningTests
     }
 
     [Fact]
+    public async Task Tui_resume_refreshes_newer_progress_under_the_same_daemon_lease()
+    {
+        using var tmp = new TempDir();
+        var (git, plans, states, audit) = CreatePausedResumeWorkspace(tmp);
+        var dashboardPlan = plans.Load();
+        var dashboardState = states.Load();
+        var orchestrator = ResumeOrchestrator(
+            git, dashboardPlan, dashboardState, states, audit);
+
+        Assert.Equal(OrchestratorExit.Paused,
+            await orchestrator.RunAsync(CancellationToken.None));
+
+        // Workspace B loads and saves newer progress while dashboard A remains open.
+        var newer = states.Load();
+        foreach (var wp in dashboardPlan.WorkPackages)
+            newer.QueueStatus[wp.Id] = TenNinety.WpStatus.Done;
+        newer.Attempts["WP-001"] = new AttemptInfo
+        {
+            ExecutionId = "0123456789abcdef0123456789abcdef",
+            Count = 4,
+            Total = 7,
+            LastFailureType = TenNinety.FailureTypes.Tester,
+            LastFailureReasons = ["newer tester evidence"],
+            Feedback = ["[tester] newer tester evidence"],
+        };
+        states.Save(newer);
+
+        var result = await orchestrator.ResumeAsync(CancellationToken.None);
+
+        Assert.Equal(OrchestratorExit.Completed, result);
+        Assert.All(dashboardPlan.WorkPackages,
+            wp => Assert.Equal(TenNinety.WpStatus.Done, wp.Status));
+        var refreshedAttempt = dashboardState.Attempts["WP-001"];
+        Assert.Equal(7, refreshedAttempt.Total);
+        Assert.Equal("newer tester evidence", Assert.Single(refreshedAttempt.LastFailureReasons));
+        var persisted = states.Load();
+        Assert.All(persisted.QueueStatus.Values,
+            status => Assert.Equal(TenNinety.WpStatus.Done, status));
+        Assert.Equal(7, persisted.Attempts["WP-001"].Total);
+    }
+
+    [Fact]
+    public async Task Tui_resume_cannot_mutate_state_or_consume_controls_owned_by_a_new_daemon()
+    {
+        using var tmp = new TempDir();
+        var (git, plans, states, audit) = CreatePausedResumeWorkspace(tmp);
+        var dashboardPlan = plans.Load();
+        var dashboardState = states.Load();
+        var orchestrator = ResumeOrchestrator(
+            git, dashboardPlan, dashboardState, states, audit);
+
+        Assert.Equal(OrchestratorExit.Paused,
+            await orchestrator.RunAsync(CancellationToken.None));
+        var newer = states.Load();
+        newer.QueueStatus["WP-001"] = TenNinety.WpStatus.Done;
+        newer.Attempts["WP-001"] = new AttemptInfo
+        {
+            ExecutionId = "fedcba9876543210fedcba9876543210",
+            Count = 2,
+            Total = 5,
+            Feedback = ["new owner evidence"],
+        };
+        states.Save(newer);
+        ExecutionControl.SetPause(tmp.Root);
+        ExecutionControl.SetStop(tmp.Root);
+        var before = File.ReadAllText(states.Path);
+
+        using (DaemonLock.Acquire(tmp.Root))
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => orchestrator.ResumeAsync(CancellationToken.None));
+            Assert.Contains("another tenninety daemon", error.Message);
+            orchestrator.ClearControlRequestsIfIdle();
+            Assert.Equal(before, File.ReadAllText(states.Path));
+            Assert.Equal((true, true), ExecutionControl.ReadFlags(tmp.Root));
+        }
+    }
+
+    [Fact]
     public async Task Fresh_runtime_ignore_does_not_dirty_the_first_run()
     {
         using var tmp = new TempDir();
@@ -180,6 +259,43 @@ public class HardeningTests
         var audit = new AuditLog(System.IO.Path.Combine(tmp.Root, ".tenninety", "audit-log.jsonl"));
         return new Orchestrator(git, plan, state, new TenNinetyConfig(),
             new MockFrontierClient(), states, audit);
+    }
+
+    private static (GitService Git, PlanStore Plans, StateStore States, AuditLog Audit)
+        CreatePausedResumeWorkspace(TempDir tmp)
+    {
+        var git = new GitService(tmp.Root);
+        git.Init();
+        Directory.CreateDirectory(tmp.Path(TenNinety.StateDir));
+        File.WriteAllText(tmp.Path(".tenninety/.gitignore"),
+            RuntimeGitignoreMigration.Contents);
+        File.WriteAllText(tmp.Path("README.md"), "resume fixture\n");
+        var plans = new PlanStore(tmp.Path(".tenninety/plan.json"));
+        var plan = TestPlans.Simple();
+        plans.Save(plan);
+        git.CommitPaths(
+            [".tenninety/.gitignore", ".tenninety/plan.json", "README.md"], "initial");
+        var states = new StateStore(tmp.Path(".tenninety/state.json"));
+        var state = new RuntimeState { Paused = true };
+        foreach (var wp in plan.WorkPackages)
+            state.QueueStatus[wp.Id] = wp.Status;
+        states.Save(state);
+        return (git, plans, states,
+            new AuditLog(tmp.Path(".tenninety/audit-log.jsonl")));
+    }
+
+    private static Orchestrator ResumeOrchestrator(
+        GitService git, Plan plan, RuntimeState state, StateStore states, AuditLog audit)
+    {
+        var orchestrator = new Orchestrator(
+            git, plan, state, new TenNinetyConfig(), new MockFrontierClient(), states, audit);
+        orchestrator.RecoveryOverride = _ => Task.FromResult(new SandboxRecoveryInfo
+        {
+            Status = "clean",
+            LastRunUtc = DateTimeOffset.UtcNow.ToUniversalTime().ToString("O"),
+            Detail = "deterministic resume recovery",
+        });
+        return orchestrator;
     }
 
     // ---------- F4 · the reviewer sees the real bounded patch ----------

@@ -11,7 +11,7 @@ internal sealed class TuiExecution : IDisposable
 {
     private readonly Func<CancellationToken, Task<OrchestratorExit>> _run;
     private readonly Action _pause;
-    private readonly Action _resume;
+    private readonly Func<CancellationToken, Task<OrchestratorExit>> _resume;
     private readonly Action _stop;
     private readonly Action _clearControl;
     private CancellationTokenSource _cts = new();
@@ -21,14 +21,15 @@ internal sealed class TuiExecution : IDisposable
     private int _shutdownRequested;
 
     public TuiExecution(Func<CancellationToken, Task<OrchestratorExit>> run,
-        Action pause, Action resume, Action stop, Action? clearControl = null)
+        Action pause, Func<CancellationToken, Task<OrchestratorExit>> resume,
+        Action stop, Action? clearControl = null)
     {
         _run = run;
         _pause = pause;
         _resume = resume;
         _stop = stop;
         _clearControl = clearControl ?? (() => { });
-        _task = RunAsync(resuming: false);
+        _task = RunAsync(_run);
     }
 
     public bool IsRunning => !_task.IsCompleted;
@@ -79,7 +80,7 @@ internal sealed class TuiExecution : IDisposable
         _observation = null;
         Interlocked.Exchange(ref _shutdownRequested, 0);
         Banner = "resumed";
-        _task = RunAsync(resuming: true);
+        _task = RunAsync(_resume);
         await ObserveCompletedAsync();
     }
 
@@ -106,11 +107,9 @@ internal sealed class TuiExecution : IDisposable
         }
     }
 
-    private async Task<OrchestratorExit> RunAsync(bool resuming)
-    {
-        if (resuming) _resume();
-        return await _run(_cts.Token);
-    }
+    private async Task<OrchestratorExit> RunAsync(
+        Func<CancellationToken, Task<OrchestratorExit>> operation) =>
+        await operation(_cts.Token);
 
     private Task ObserveAsync() => _observation ??= ObserveRunAsync();
 
