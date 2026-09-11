@@ -20,6 +20,7 @@ public sealed class FrontierCallException(string message, Exception? inner = nul
 public sealed class HttpFrontierClient : IFrontierClient
 {
     private const int MaxResponseBytes = 4 * 1024 * 1024;
+    private const int MaxRepairJsonBytes = 128 * 1024;
     private readonly HttpClient _http;
     private readonly TenNinetyConfig _config;
     private readonly TimeSpan _requestTimeout;
@@ -55,7 +56,7 @@ public sealed class HttpFrontierClient : IFrontierClient
             ct);
 
     public Task<RepairAdvice> GetRepairAdviceAsync(RepairRequest request, CancellationToken ct = default) =>
-        CompleteAsync<RepairAdvice>(
+        CompleteAsync(
             Prompts.RepairPrompt.System,
             Prompts.RepairPrompt.BuildUserMessage(
                 Core.Security.Sanitizer.SanitizeText(Json.Serialize(request.WorkPackage)), request.TotalAttempts,
@@ -63,6 +64,7 @@ public sealed class HttpFrontierClient : IFrontierClient
                 Sanitizer.SanitizeText(request.PreviousAdvice ?? ""),
                 Sanitizer.SanitizeText(request.RecentAuditTail),
                 Sanitizer.SanitizeText(request.SanitizedDiff)),
+            ParseAndValidateRepairAdvice,
             ct);
 
     public Task<PivotProposal> ProposePivotAsync(PivotRequest request, CancellationToken ct = default) =>
@@ -177,6 +179,16 @@ public sealed class HttpFrontierClient : IFrontierClient
         foreach (var wp in plan.WorkPackages)
             wp.Status = TenNinety.WpStatus.Pending;
         return plan;
+    }
+
+    private static RepairAdvice ParseAndValidateRepairAdvice(string json)
+    {
+        var bytes = Encoding.UTF8.GetBytes(json);
+        StrictJsonIngestion.EnsureStrictShape(
+            bytes, MaxRepairJsonBytes, "frontier repair advice");
+        return RepairAdvice.ValidateAndCopy(
+            StrictJsonIngestion.Deserialize<RepairAdvice>(
+                bytes, "frontier repair advice"));
     }
 
     private static string JoinUrl(string baseUrl, string path) =>

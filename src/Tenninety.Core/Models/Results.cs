@@ -53,8 +53,55 @@ public sealed class CoderResult
 /// <summary>Frontier repair advice returned on attempt-10 escalation (Part IV.3).</summary>
 public sealed class RepairAdvice
 {
+    public const int MaxAnalysisChars = 4000;
+    public const int MaxAdviceItems = 20;
+    public const int MaxAdviceItemChars = 2000;
+    public const int MaxCombinedContentChars = 20_000;
+
+    [JsonRequired]
     public string Analysis { get; init; } = "";
+    [JsonRequired]
     public List<string> Advice { get; init; } = new();
+
+    /// <summary>Validates the untrusted repair contract and returns detached content so the
+    /// caller can prepare a complete state update before publishing any mutation.</summary>
+    public static RepairAdvice ValidateAndCopy(RepairAdvice? response)
+    {
+        if (response is null)
+            throw new InvalidOperationException("frontier repair advice was null.");
+        if (string.IsNullOrWhiteSpace(response.Analysis))
+            throw new InvalidOperationException("frontier repair analysis is missing or empty.");
+        if (response.Analysis.Length > MaxAnalysisChars)
+            throw new InvalidOperationException("frontier repair analysis exceeds its size bound.");
+        if (response.Advice is null)
+            throw new InvalidOperationException("frontier repair advice collection is null.");
+        if (response.Advice.Count is 0 or > MaxAdviceItems)
+            throw new InvalidOperationException(
+                $"frontier repair advice must contain 1 to {MaxAdviceItems} actions.");
+
+        var combinedChars = response.Analysis.Length;
+        var accepted = new List<string>(response.Advice.Count);
+        foreach (var item in response.Advice)
+        {
+            if (string.IsNullOrWhiteSpace(item))
+                throw new InvalidOperationException(
+                    "frontier repair advice contains a null or empty action.");
+            if (item.Length > MaxAdviceItemChars)
+                throw new InvalidOperationException(
+                    "frontier repair advice action exceeds its size bound.");
+            combinedChars += item.Length;
+            if (combinedChars > MaxCombinedContentChars)
+                throw new InvalidOperationException(
+                    "frontier repair advice exceeds its combined content bound.");
+            accepted.Add(item);
+        }
+
+        return new RepairAdvice
+        {
+            Analysis = response.Analysis,
+            Advice = accepted,
+        };
+    }
 }
 
 /// <summary>Frontier pivot analysis: KEEP / REWORK / CANCEL lists plus optional new WPs (Part IV.4).</summary>

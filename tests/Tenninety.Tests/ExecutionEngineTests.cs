@@ -312,6 +312,77 @@ public class ExecutionEngineTests
     }
 
     [Fact]
+    public async Task Malformed_repair_advice_never_resets_persisted_escalation_state()
+    {
+        using var h = new EngineHarness(maxAttempts: 2, maxTotal: 6);
+        var wp = h.Plan.WorkPackages[0];
+        var executionId = new string('e', 32);
+        h.State.Attempts[wp.Id] = new AttemptInfo
+        {
+            Count = 2,
+            Max = 2,
+            Total = 4,
+            ExecutionId = executionId,
+            LastFailureType = TenNinety.FailureTypes.Tester,
+            LastFailureReasons = ["prior tester failure"],
+            FrontierAdviceUsed = false,
+            Feedback = ["prior feedback"],
+            Advice = ["prior advice"],
+        };
+        h.States.Save(h.State);
+        var frontier = new SequenceRepairFrontier(
+            new RepairAdvice { Analysis = "diagnosis", Advice = null! },
+            new RepairAdvice(),
+            new RepairAdvice
+            {
+                Analysis = "valid diagnosis",
+                Advice = ["valid action"],
+            });
+
+        for (var restart = 0; restart < 2; restart++)
+        {
+            var engine = new ExecutionEngine(
+                h.Git, h.Config, frontier, h.Coder,
+                new FailIfCalledReviewer(), new FailIfCalledTester(),
+                h.States, h.Audit);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                engine.ExecuteWpAsync(wp, h.States.Load(), CancellationToken.None));
+
+            var persisted = h.States.Load();
+            var attempt = persisted.Attempts[wp.Id];
+            Assert.Equal(2, attempt.Count);
+            Assert.Equal(2, attempt.Max);
+            Assert.Equal(4, attempt.Total);
+            Assert.Equal(executionId, attempt.ExecutionId);
+            Assert.Equal(TenNinety.FailureTypes.Tester, attempt.LastFailureType);
+            Assert.Equal(["prior tester failure"], attempt.LastFailureReasons);
+            Assert.False(attempt.FrontierAdviceUsed);
+            Assert.Equal(["prior feedback"], attempt.Feedback);
+            Assert.Equal(["prior advice"], attempt.Advice);
+            Assert.Null(persisted.CurrentWp);
+            Assert.Equal(TenNinety.WpStatus.Pending, persisted.QueueStatus[wp.Id]);
+            Assert.Empty(h.Coder.Contexts);
+            Assert.DoesNotContain(h.Audit.ReadTail(100), e =>
+                e.Event == "ESCALATION_ADVICE");
+        }
+
+        var outcome = await new ExecutionEngine(
+            h.Git, h.Config, frontier, h.Coder,
+            new ScriptedReviewer(0), new ScriptedTester(0),
+            h.States, h.Audit).ExecuteWpAsync(
+                wp, h.States.Load(), CancellationToken.None);
+
+        Assert.Equal(WpOutcome.Done, outcome);
+        Assert.Equal(3, frontier.Calls);
+        var coder = Assert.Single(h.Coder.Contexts);
+        Assert.Equal(1, coder.Attempt);
+        Assert.Equal(["prior advice", "valid diagnosis", "valid action"], coder.Advice);
+        Assert.Single(h.Audit.ReadTail(100), e => e.Event == "ESCALATION_ADVICE");
+        Assert.Equal(2, h.Audit.ReadTail(100).Count(e => e.Event == "ADVICE_UNAVAILABLE"));
+    }
+
+    [Fact]
     public async Task Escalation_reset_grants_exactly_one_full_new_local_phase()
     {
         using var h = new EngineHarness(maxAttempts: 2, maxTotal: 10);
@@ -757,6 +828,35 @@ public class ExecutionEngineTests
                 Analysis = "remove the rejected sensitive path",
                 Advice = ["keep sensitive files out of the candidate"],
             });
+        }
+
+        public Task<PivotProposal> ProposePivotAsync(
+            PivotRequest request, CancellationToken ct = default) =>
+            Task.FromResult(new PivotProposal());
+
+        public Task<RevertGuidance> ProposeRevertAsync(
+            RevertRequest request, CancellationToken ct = default) =>
+            Task.FromResult(new RevertGuidance
+            {
+                Analysis = "unused",
+                MechanicalRevertSufficient = false,
+            });
+    }
+
+    private sealed class SequenceRepairFrontier(params RepairAdvice[] responses) : IFrontierClient
+    {
+        private readonly Queue<RepairAdvice> _responses = new(responses);
+        public int Calls { get; private set; }
+
+        public Task<Plan> GeneratePlanAsync(
+            string sanitizedSpecMarkdown, CancellationToken ct = default) =>
+            Task.FromResult(new Plan { ProjectName = "unused" });
+
+        public Task<RepairAdvice> GetRepairAdviceAsync(
+            RepairRequest request, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(_responses.Dequeue());
         }
 
         public Task<PivotProposal> ProposePivotAsync(

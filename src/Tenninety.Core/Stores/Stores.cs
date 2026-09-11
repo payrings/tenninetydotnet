@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Tenninety.Core.Models;
@@ -39,6 +40,9 @@ public sealed class PlanStore
     public string Path { get; }
     public PlanStore(string? path = null) => Path = path ?? TenNinety.Resolve(TenNinety.PlanFile);
 
+    /// <summary>Deterministic fault seam immediately before atomic replacement.</summary>
+    internal Action? BeforeReplace { get; set; }
+
     public bool Exists() => File.Exists(Path);
 
     /// <summary>Strict bounded load: plans are UNTRUSTED (they arrive from the Frontier and
@@ -54,12 +58,37 @@ public sealed class PlanStore
         return StrictJsonIngestion.Deserialize<Plan>(bytes, "plan.json");
     }
 
-    public void Save(Plan plan) => File.WriteAllText(Path, Json.Serialize(plan));
+    public void Save(Plan plan)
+    {
+        var bytes = Encoding.UTF8.GetBytes(Json.Serialize(plan));
+        if (bytes.LongLength > StrictJsonIngestion.MaxPlanBytes)
+            throw new InvalidOperationException("plan.json exceeds its persisted size bound.");
+
+        var directory = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(Path))!;
+        Directory.CreateDirectory(directory);
+        var tmp = System.IO.Path.Combine(
+            directory, System.IO.Path.GetFileName(Path) + $".tmp.{Guid.NewGuid():N}");
+        try
+        {
+            using (var stream = new FileStream(
+                       tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            BeforeReplace?.Invoke();
+            File.Move(tmp, Path, overwrite: true);
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { }
+        }
+    }
 }
 
 public sealed class StateStore
 {
-    private const int MaxStateBytes = 16 * 1024 * 1024;
+    public const int MaxStateBytes = 16 * 1024 * 1024;
     public string Path { get; }
     public StateStore(string? path = null) => Path = path ?? TenNinety.Resolve(TenNinety.StateFile);
 
@@ -122,10 +151,17 @@ public sealed class StateStore
         BeforeSave?.Invoke(state);
         var tmp = $"{Path}.tmp.{Guid.NewGuid():N}";
         var json = Json.Serialize(state);
-        if (System.Text.Encoding.UTF8.GetByteCount(json) > MaxStateBytes)
+        if (Encoding.UTF8.GetByteCount(json) > MaxStateBytes)
             throw new InvalidOperationException("state.json exceeds its persisted size bound.");
-        File.WriteAllText(tmp, json);
-        File.Move(tmp, Path, overwrite: true);
+        try
+        {
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, Path, overwrite: true);
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { }
+        }
     }
 
     private RuntimeState LoadFileOrDefault()
@@ -135,7 +171,7 @@ public sealed class StateStore
             throw new InvalidOperationException("state.json exceeds its persisted size bound.");
         var bytes = File.ReadAllBytes(Path);
         EnsureNoDuplicateFields(bytes);
-        return Json.Deserialize<RuntimeState>(System.Text.Encoding.UTF8.GetString(bytes));
+        return Json.Deserialize<RuntimeState>(Encoding.UTF8.GetString(bytes));
     }
 
     private static void EnsureNoDuplicateFields(byte[] json)

@@ -6,6 +6,7 @@ using Tenninety.Execution.Testing;
 using Tenninety.Execution.Mock;
 using Tenninety.Execution.OpenAi;
 using Tenninety.Core.Validation;
+using Tenninety.Cli;
 using Tenninety.Frontier;
 using Tenninety.Git;
 
@@ -161,6 +162,114 @@ public class HardeningTests
             Assert.Equal(before, File.ReadAllText(states.Path));
             Assert.Equal((true, true), ExecutionControl.ReadFlags(tmp.Root));
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cli_resume_obeys_the_common_git_daemon_lease_and_preserves_progress(
+        bool leaseFromLinkedWorktree)
+    {
+        using var repo = new TestGitRepo();
+        using var linkedParent = new TempDir();
+        var linkedPath = Path.Combine(linkedParent.Root, "checkout");
+        repo.WriteFile("README.md", "resume fixture\n");
+        repo.WriteFile(".tenninety/.gitignore", RuntimeGitignoreMigration.Contents);
+        repo.Commit("initial");
+
+        if (leaseFromLinkedWorktree)
+            repo.Git.RunForTest(
+                "worktree", "add", "-b", "linked-resume-owner", linkedPath,
+                TenNinety.MainBranch);
+
+        var states = new StateStore(repo.Dir.Path(".tenninety/state.json"));
+        var expected = new RuntimeState
+        {
+            CurrentWp = "WP-002",
+            Paused = true,
+            StopRequested = true,
+            SpecHash = new string('a', 64),
+            QueueStatus =
+            {
+                ["WP-001"] = TenNinety.WpStatus.Done,
+                ["WP-002"] = TenNinety.WpStatus.Pending,
+                ["WP-003"] = TenNinety.WpStatus.Cancelled,
+            },
+            Attempts =
+            {
+                ["WP-002"] = new AttemptInfo
+                {
+                    ExecutionId = "0123456789abcdef0123456789abcdef",
+                    Count = 3,
+                    Max = 9,
+                    Total = 7,
+                    LastFailureType = TenNinety.FailureTypes.Reviewer,
+                    LastFailureReasons = ["preserved reason"],
+                    FrontierAdviceUsed = true,
+                    Feedback = ["preserved feedback"],
+                    Advice = ["preserved advice"],
+                },
+            },
+        };
+        states.Save(expected);
+        ExecutionControl.SetPause(repo.Root);
+        ExecutionControl.SetStop(repo.Root);
+        var audit = new AuditLog(repo.Dir.Path(".tenninety/audit-log.jsonl"));
+        audit.Append("SEEDED");
+        var stateBefore = File.ReadAllBytes(states.Path);
+        var auditBefore = File.ReadAllBytes(audit.Path);
+        var pausePath = repo.Dir.Path(".tenninety/control/pause.request");
+        var stopPath = repo.Dir.Path(".tenninety/control/stop.request");
+        var pauseBefore = File.ReadAllBytes(pausePath);
+        var stopBefore = File.ReadAllBytes(stopPath);
+
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var originalError = Console.Error;
+        using var error = new StringWriter();
+        try
+        {
+            Directory.SetCurrentDirectory(repo.Root);
+            Console.SetError(error);
+            using (DaemonLock.Acquire(leaseFromLinkedWorktree ? linkedPath : repo.Root))
+            {
+                Assert.Equal(1, await Program.Main(["resume"]));
+                Assert.Contains("another tenninety daemon", error.ToString());
+                Assert.Equal(stateBefore, File.ReadAllBytes(states.Path));
+                Assert.Equal(auditBefore, File.ReadAllBytes(audit.Path));
+                Assert.Equal(pauseBefore, File.ReadAllBytes(pausePath));
+                Assert.Equal(stopBefore, File.ReadAllBytes(stopPath));
+            }
+
+            Assert.Equal(0, await Program.Main(["resume"]));
+        }
+        finally
+        {
+            Console.SetError(originalError);
+            Directory.SetCurrentDirectory(originalDirectory);
+            if (leaseFromLinkedWorktree)
+                repo.Git.RunForTest("worktree", "remove", "--force", linkedPath);
+        }
+
+        Assert.Equal((false, false), ExecutionControl.ReadFlags(repo.Root));
+        var resumed = states.Load();
+        Assert.False(resumed.Paused);
+        Assert.False(resumed.StopRequested);
+        Assert.Equal(expected.CurrentWp, resumed.CurrentWp);
+        Assert.Equal(expected.ExecutionMode, resumed.ExecutionMode);
+        Assert.Equal(expected.SpecHash, resumed.SpecHash);
+        Assert.Equal(expected.QueueStatus, resumed.QueueStatus);
+        var attempt = Assert.Single(resumed.Attempts).Value;
+        var expectedAttempt = expected.Attempts["WP-002"];
+        Assert.Equal(expectedAttempt.ExecutionId, attempt.ExecutionId);
+        Assert.Equal(expectedAttempt.Count, attempt.Count);
+        Assert.Equal(expectedAttempt.Max, attempt.Max);
+        Assert.Equal(expectedAttempt.Total, attempt.Total);
+        Assert.Equal(expectedAttempt.LastFailureType, attempt.LastFailureType);
+        Assert.Equal(expectedAttempt.LastFailureReasons, attempt.LastFailureReasons);
+        Assert.Equal(expectedAttempt.FrontierAdviceUsed, attempt.FrontierAdviceUsed);
+        Assert.Equal(expectedAttempt.Feedback, attempt.Feedback);
+        Assert.Equal(expectedAttempt.Advice, attempt.Advice);
+        Assert.Equal("RESUMED", audit.ReadTail().Last().Event);
     }
 
     [Fact]

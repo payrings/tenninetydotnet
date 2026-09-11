@@ -23,6 +23,8 @@ public enum WpOutcome
 /// </summary>
 public sealed class ExecutionEngine
 {
+    private const int MaxStoredAdviceItems = 100;
+    private const int MaxStoredAdviceChars = 100_000;
     private readonly IGitService _git;
     private readonly TenNinetyConfig _config;
     private readonly IFrontierClient _frontier;
@@ -496,7 +498,8 @@ public sealed class ExecutionEngine
             RepairAdvice advice;
             try
             {
-                advice = await _frontier.GetRepairAdviceAsync(request, ct);
+                advice = RepairAdvice.ValidateAndCopy(
+                    await _frontier.GetRepairAdviceAsync(request, ct));
             }
             catch (Exception ex)
             {
@@ -505,13 +508,44 @@ public sealed class ExecutionEngine
                 throw;
             }
 
+            var acceptedAdvice = new List<string>(info.Advice.Count + advice.Advice.Count + 1);
+            acceptedAdvice.AddRange(info.Advice);
+            acceptedAdvice.Add(advice.Analysis);
+            acceptedAdvice.AddRange(advice.Advice);
+            if (acceptedAdvice.Count > MaxStoredAdviceItems)
+                acceptedAdvice.RemoveRange(
+                    0, acceptedAdvice.Count - MaxStoredAdviceItems);
+            var acceptedAdviceChars = acceptedAdvice.Sum(item => (long)item.Length);
+            while (acceptedAdviceChars > MaxStoredAdviceChars)
+            {
+                acceptedAdviceChars -= acceptedAdvice[0].Length;
+                acceptedAdvice.RemoveAt(0);
+            }
+            var acceptedFeedback = info.Feedback.Count > 20
+                ? info.Feedback.TakeLast(20).ToList()
+                : new List<string>(info.Feedback);
+
+            var previousCount = info.Count;
+            var previousAdviceUsed = info.FrontierAdviceUsed;
+            var previousAdvice = info.Advice;
+            var previousFeedback = info.Feedback;
             info.Count = 0;
             info.FrontierAdviceUsed = true;
-            info.Advice.Add(advice.Analysis);
-            info.Advice.AddRange(advice.Advice);
+            info.Advice = acceptedAdvice;
             // Advice resets the local budget; cap stored context so prompts stay bounded.
-            if (info.Feedback.Count > 20) info.Feedback = info.Feedback.TakeLast(20).ToList();
-            Persist(state);
+            info.Feedback = acceptedFeedback;
+            try
+            {
+                Persist(state);
+            }
+            catch
+            {
+                info.Count = previousCount;
+                info.FrontierAdviceUsed = previousAdviceUsed;
+                info.Advice = previousAdvice;
+                info.Feedback = previousFeedback;
+                throw;
+            }
             _audit.Append("ESCALATION_ADVICE", wp.Id, Truncate(advice.Analysis, 200));
             Log($"[{wp.Id}] advice injected — local counter reset");
         }

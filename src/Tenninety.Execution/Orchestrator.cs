@@ -31,6 +31,7 @@ public sealed class Orchestrator
     private readonly AgentFactory _agents;
     private readonly StateStore _stateStore;
     private readonly PromotionTransactionStore _promotionStore;
+    private readonly PivotPersistence _pivotPersistence;
     private readonly AuditLog _audit;
     private readonly Action<string>? _log;
     private DaemonLockLease? _initialDaemonLock;
@@ -52,6 +53,10 @@ public sealed class Orchestrator
         _stateStore = stateStore;
         _promotionStore = new PromotionTransactionStore(
             Path.Combine(git.RepoPath, TenNinety.StateDir, TenNinety.PromotionFile));
+        _pivotPersistence = new PivotPersistence(
+            git,
+            new PlanStore(Path.Combine(git.RepoPath, TenNinety.StateDir, TenNinety.PlanFile)),
+            stateStore);
         _audit = audit;
         _log = log;
         initialDaemonLock?.ThrowIfNotLiveFor(git.RepoPath);
@@ -82,6 +87,7 @@ public sealed class Orchestrator
     public async Task<OrchestratorExit> ResumeAsync(CancellationToken ct)
     {
         using var daemonLock = DaemonLock.Acquire(_git.RepoPath);
+        _pivotPersistence.RecoverPending(daemonLock);
         RefreshWorkspaceUnderLease(daemonLock);
         ExecutionControl.ClearAll(_git.RepoPath);
         _state.Paused = false;
@@ -98,10 +104,28 @@ public sealed class Orchestrator
         DaemonLockLease daemonLock, CancellationToken ct)
     {
         daemonLock.ThrowIfNotLiveFor(_git.RepoPath);
-        // Recovery owns the daemon lock but does not require a clean/main checkout. A crashed
-        // job commonly leaves its work branch selected, and scoped Docker resources must be
-        // cleaned before any branch rejection can stop startup.
-        await RecoverSandboxResourcesAsync(ct);
+        var pivotPending = _pivotPersistence.HasPending ||
+                           RuntimeGitignoreMigration.CountPivotJournalsInOtherWorktrees(_git) > 0;
+        // Scoped sandbox cleanup still runs first, but its timestamp must not rewrite either
+        // side of a journaled plan/state pair before pivot recovery validates the hashes.
+        var sandboxRecovery = await InspectSandboxResourcesAsync(ct);
+        if (sandboxRecovery.Status == "quarantined" ||
+            sandboxRecovery.Quarantined.Count > 0)
+        {
+            if (pivotPending)
+                AuditSandboxRecovery(sandboxRecovery);
+            else
+                PersistSandboxRecovery(sandboxRecovery);
+            throw new InvalidOperationException(
+                "sandbox startup recovery did not prove complete cleanup; " +
+                "execution is refused until the scoped quarantine is resolved.");
+        }
+
+        if (pivotPending)
+            AuditSandboxRecovery(sandboxRecovery);
+        if (_pivotPersistence.RecoverPending(daemonLock))
+            RefreshWorkspaceUnderLease(daemonLock);
+        PersistSandboxRecovery(sandboxRecovery, appendAudit: !pivotPending);
         RefusePromotionJournalInOtherWorktree();
         RecoverPromotionTransaction();
         ReconcileInterruptedWorkBranch();
@@ -109,7 +133,7 @@ public sealed class Orchestrator
             throw new InvalidOperationException(
                 $"the framework must start from branch '{TenNinety.MainBranch}', not '{_git.CurrentBranch()}'.");
         var runtimeIgnore = $"{TenNinety.StateDir}/.gitignore";
-        if (!RuntimeGitignoreMigration.PromotionArtifactsAreIgnored(_git))
+        if (!RuntimeGitignoreMigration.RecoveryArtifactsAreIgnored(_git))
         {
             if (!_git.IsPathClean(runtimeIgnore))
                 throw new InvalidOperationException(
@@ -119,9 +143,9 @@ public sealed class Orchestrator
                     [runtimeIgnore],
                     "tenninety: update runtime ignores");
         }
-        if (!RuntimeGitignoreMigration.PromotionArtifactsAreIgnored(_git))
+        if (!RuntimeGitignoreMigration.RecoveryArtifactsAreIgnored(_git))
             throw new InvalidOperationException(
-                "promotion recovery journal files are not effectively ignored; remove overriding " +
+                "runtime recovery journal files are not effectively ignored; remove overriding " +
                 "ignore negations or ignore .tenninety/ before starting execution.");
         if (!_git.IsClean())
             throw new InvalidOperationException(
@@ -277,12 +301,11 @@ public sealed class Orchestrator
         _stateStore.Save(_state);
     }
 
-    private async Task RecoverSandboxResourcesAsync(CancellationToken ct)
+    private async Task<SandboxRecoveryInfo> InspectSandboxResourcesAsync(CancellationToken ct)
     {
-        SandboxRecoveryInfo recovery;
         try
         {
-            recovery = RecoveryOverride is { } recover
+            return RecoveryOverride is { } recover
                 ? await recover(ct)
                 : await new SandboxRecoveryService(_git, _config).RecoverAsync(ct);
         }
@@ -292,7 +315,7 @@ public sealed class Orchestrator
         }
         catch (Exception ex)
         {
-            recovery = new SandboxRecoveryInfo
+            return new SandboxRecoveryInfo
             {
                 Status = "quarantined",
                 LastRunUtc = DateTimeOffset.UtcNow.ToString("O"),
@@ -301,24 +324,29 @@ public sealed class Orchestrator
                          ex.GetType().Name + "); execution is refused.",
             };
         }
+    }
 
+    private void PersistSandboxRecovery(
+        SandboxRecoveryInfo recovery, bool appendAudit = true)
+    {
         _state.SandboxRecovery = recovery;
         // Do not synchronize queue statuses here: before interrupted-branch/promotion
         // reconciliation the freshly loaded plan intentionally maps stale ACTIVE to PENDING.
         // Overwriting the persisted ACTIVE identity would destroy exact recovery evidence.
         _stateStore.Save(_state);
+        if (appendAudit) AuditSandboxRecovery(recovery);
+    }
+
+    private void AuditSandboxRecovery(SandboxRecoveryInfo recovery)
+    {
         _audit.Append(
             recovery.Status == "quarantined"
                 ? "SANDBOX_RECOVERY_QUARANTINED"
                 : "SANDBOX_RECOVERY_COMPLETED",
             detail: $"status={recovery.Status} containers=" +
                     $"{recovery.ContainersRemoved}/{recovery.ContainersFound} workspaces=" +
-                    $"{recovery.WorkspacesRemoved}/{recovery.WorkspacesFound} " +
-                    $"quarantined={recovery.Quarantined.Count}");
-        if (recovery.Status == "quarantined" || recovery.Quarantined.Count > 0)
-            throw new InvalidOperationException(
-                "sandbox startup recovery did not prove complete cleanup; " +
-                "execution is refused until the scoped quarantine is resolved.");
+                     $"{recovery.WorkspacesRemoved}/{recovery.WorkspacesFound} " +
+                     $"quarantined={recovery.Quarantined.Count}");
     }
 
     private void RecoverPromotionTransaction()

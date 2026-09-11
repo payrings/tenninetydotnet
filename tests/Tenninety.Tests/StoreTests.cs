@@ -49,6 +49,40 @@ public class StoreRoundTripTests
     }
 
     [Fact]
+    public void Oversized_plan_save_preserves_the_previous_file()
+    {
+        using var tmp = new TempDir();
+        var store = new PlanStore(tmp.Path("plan.json"));
+        store.Save(TestPlans.Simple());
+        var before = File.ReadAllBytes(store.Path);
+        var oversized = TestPlans.Simple();
+        oversized.ProjectName = new string('x',
+            checked((int)StrictJsonIngestion.MaxPlanBytes + 1));
+
+        var error = Assert.Throws<InvalidOperationException>(() => store.Save(oversized));
+
+        Assert.Contains("size bound", error.Message);
+        Assert.Equal(before, File.ReadAllBytes(store.Path));
+    }
+
+    [Fact]
+    public void Plan_failure_before_atomic_replace_preserves_old_bytes_and_cleans_the_temp_file()
+    {
+        using var tmp = new TempDir();
+        var store = new PlanStore(tmp.Path("plan.json"));
+        store.Save(TestPlans.Simple());
+        var before = File.ReadAllBytes(store.Path);
+        var replacement = TestPlans.Simple();
+        replacement.ProjectName = "replacement";
+        store.BeforeReplace = () => throw new IOException("simulated interrupted write");
+
+        Assert.Throws<IOException>(() => store.Save(replacement));
+
+        Assert.Equal(before, File.ReadAllBytes(store.Path));
+        Assert.Empty(Directory.EnumerateFiles(tmp.Root, "plan.json.tmp.*"));
+    }
+
+    [Fact]
     public void Plan_json_uses_blueprint_field_names()
     {
         var plan = TestPlans.Simple();

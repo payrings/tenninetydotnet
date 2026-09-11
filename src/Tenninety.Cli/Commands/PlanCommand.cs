@@ -85,7 +85,7 @@ public static class PlanCommand
             return 0;
         }
 
-        IDisposable workspaceLock;
+        DaemonLockLease workspaceLock;
         try
         {
             workspaceLock = DaemonLock.Acquire(ws.Root);
@@ -99,6 +99,18 @@ public static class PlanCommand
 
         using (workspaceLock)
         {
+            try
+            {
+                new PivotPersistence(ws.Git, ws.Plans, ws.States)
+                    .RecoverPending(workspaceLock);
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine(
+                    $"[red]cannot accept plan:[/] pending pivot recovery failed: " +
+                    Markup.Escape(Diagnostic(ex.Message)));
+                return 1;
+            }
             if (ws.Git.CurrentBranch() != TenNinety.MainBranch)
             {
                 AnsiConsole.MarkupLine("[red]cannot accept plan:[/] workspace must be on main.");

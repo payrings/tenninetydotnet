@@ -190,7 +190,7 @@ public static class TuiHost
         Workspace ws, Plan plan, RuntimeState state, IFrontierClient frontier,
         CancellationToken ct)
     {
-        IDisposable workspaceLock;
+        DaemonLockLease workspaceLock;
         try
         {
             workspaceLock = DaemonLock.Acquire(ws.Root);
@@ -202,6 +202,15 @@ public static class TuiHost
 
         using (workspaceLock)
         {
+            var pivotPersistence = new PivotPersistence(ws.Git, ws.Plans, ws.States);
+            try
+            {
+                pivotPersistence.RecoverPending(workspaceLock);
+            }
+            catch (Exception ex)
+            {
+                return Diagnostic($"cannot recover an interrupted pivot: {ex.Message}");
+            }
             if (RuntimeGitignoreMigration.CountPromotionJournalsInOtherWorktrees(ws.Git) > 0)
                 return "a linked worktree owns pending promotion recovery evidence; run " +
                        "'tenninety start' from that worktree before applying a pivot.";
@@ -226,13 +235,14 @@ public static class TuiHost
                 }
             }
 
-            return await PivotFlowUnderLockAsync(ws, plan, state, frontier, ct);
+            return await PivotFlowUnderLockAsync(
+                ws, plan, state, frontier, pivotPersistence, workspaceLock, ct);
         }
     }
 
     private static async Task<string> PivotFlowUnderLockAsync(
         Workspace ws, Plan plan, RuntimeState state, IFrontierClient frontier,
-        CancellationToken ct)
+        PivotPersistence persistence, DaemonLockLease daemonLock, CancellationToken ct)
     {
         Console.Clear();
         AnsiConsole.Write(new Rule("[b]Snapshot & Pivot[/]").RuleStyle("aqua"));
@@ -288,10 +298,15 @@ public static class TuiHost
         if (!AnsiConsole.Confirm("\nApply this pivot?", false))
             return "Pivot discarded — daemon still paused ([P] to resume).";
 
-        var result = PivotService.Apply(proposal, plan, state);
-        ws.Plans.Save(plan);
-        ws.States.Save(state);
-        ws.Git.CommitPaths([TenNinety.StateDir + "/" + TenNinety.PlanFile], "pivot applied");
+        PivotService.ApplyResult result;
+        try
+        {
+            result = persistence.ApplyApproved(proposal, plan, state, daemonLock);
+        }
+        catch (Exception ex)
+        {
+            return Diagnostic($"pivot was not completed: {ex.Message}");
+        }
         ws.Audit.Append("PIVOT_APPLIED",
             detail: $"kept={result.Kept} rework=[{string.Join(",", result.Reworked)}] " +
                     $"cancel=[{string.Join(",", result.Cancelled)}] added=[{string.Join(",", result.Added)}]");

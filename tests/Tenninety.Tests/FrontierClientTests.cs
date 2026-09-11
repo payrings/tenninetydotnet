@@ -8,6 +8,49 @@ namespace Tenninety.Tests;
 
 public class FrontierClientTests
 {
+    public static TheoryData<string> InvalidRepairResponses() => new()
+    {
+        "{\"analysis\":\"diagnosis\",\"advice\":null}",
+        "{}",
+        "{\"analysis\":null,\"advice\":[\"act\"]}",
+        "{\"analysis\":\"diagnosis\"}",
+        "{\"advice\":[\"act\"]}",
+        "{\"analysis\":\"diagnosis\",\"advice\":[null]}",
+        "{\"analysis\":\"diagnosis\",\"advice\":[]}",
+        "{\"analysis\":\"   \",\"advice\":[\"act\"]}",
+        "{\"analysis\":\"first\",\"analysis\":\"second\",\"advice\":[\"act\"]}",
+        "{\"analysis\":\"diagnosis\",\"advice\":[\"act\"],\"unexpected\":true}",
+        JsonSerializer.Serialize(new
+        {
+            analysis = new string('x', 4001),
+            advice = new[] { "act" },
+        }),
+    };
+
+    [Theory]
+    [MemberData(nameof(InvalidRepairResponses))]
+    public async Task Repair_wire_contract_rejects_malformed_or_unusable_valid_json(string content)
+    {
+        var client = CreateClient(content);
+
+        var error = await Assert.ThrowsAsync<FrontierCallException>(() =>
+            client.GetRepairAdviceAsync(RepairRequest()));
+
+        Assert.Contains("failed to parse frontier JSON response", error.Message);
+    }
+
+    [Fact]
+    public async Task Repair_wire_contract_accepts_complete_actionable_advice()
+    {
+        var client = CreateClient(
+            "{\"analysis\":\"dependency mismatch\",\"advice\":[\"pin the expected version\"]}");
+
+        var result = await client.GetRepairAdviceAsync(RepairRequest());
+
+        Assert.Equal("dependency mismatch", result.Analysis);
+        Assert.Equal(["pin the expected version"], result.Advice);
+    }
+
     [Fact]
     public async Task Pivot_wire_contract_binds_snake_case_fields()
     {
@@ -192,6 +235,9 @@ public class FrontierClientTests
     {
         choices = new[] { new { message = new { role = "assistant", content } } },
     });
+
+    private static RepairRequest RepairRequest() => new(
+        TestPlans.Wp("WP-001"), 3, ["failure"], null, "audit", "diff");
 
     private sealed class StubHandler(
         Func<HttpRequestMessage, HttpResponseMessage> respond,

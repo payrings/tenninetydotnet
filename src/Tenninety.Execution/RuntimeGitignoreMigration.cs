@@ -8,12 +8,21 @@ public static class RuntimeGitignoreMigration
 {
     public static readonly string[] RequiredLines =
     [
+        "plan.json.tmp*",
         "state.json",
         "state.json.tmp*",
         "state.json.lock",
         "promotion-transaction.json",
         "promotion-transaction.json.tmp*",
         "promotion-transaction.json.lock",
+        "pivot-transaction.json",
+        "pivot-transaction.json.tmp*",
+        "pivot-transaction.json.lock",
+        "pivot-plan.next.json",
+        "pivot-plan.next.json.tmp*",
+        "pivot-state.next.json",
+        "pivot-state.next.json.tmp*",
+        "pivot-state.next.json.lock",
         "audit-log.jsonl",
         "sandbox-resources.json",
         "sandbox-resources.json.tmp*",
@@ -34,6 +43,26 @@ public static class RuntimeGitignoreMigration
         }.All(git.IsPathIgnored);
     }
 
+    public static bool PivotArtifactsAreIgnored(IGitService git)
+    {
+        var root = $"{TenNinety.StateDir}/";
+        return new[]
+        {
+            root + TenNinety.PivotFile,
+            root + TenNinety.PivotFile + ".tmp-migration-probe",
+            root + TenNinety.PivotFile + ".lock",
+            root + TenNinety.PivotPlanFile,
+            root + TenNinety.PivotPlanFile + ".tmp-migration-probe",
+            root + TenNinety.PivotStateFile,
+            root + TenNinety.PivotStateFile + ".tmp-migration-probe",
+            root + TenNinety.PivotStateFile + ".lock",
+        }.All(git.IsPathIgnored);
+    }
+
+    public static bool RecoveryArtifactsAreIgnored(IGitService git) =>
+        PromotionArtifactsAreIgnored(git) && PivotArtifactsAreIgnored(git) &&
+        git.IsPathIgnored($"{TenNinety.StateDir}/{TenNinety.PlanFile}.tmp-migration-probe");
+
     public static int CountPromotionJournalsInOtherWorktrees(IGitService git)
     {
         var current = Path.GetFullPath(git.RepoPath);
@@ -42,6 +71,16 @@ public static class RuntimeGitignoreMigration
                 Path.GetFullPath(path), current, StringComparison.Ordinal))
             .Select(path => Path.Combine(
                 path, TenNinety.StateDir, TenNinety.PromotionFile))
+            .Count(File.Exists);
+    }
+
+    public static int CountPivotJournalsInOtherWorktrees(IGitService git)
+    {
+        var current = Path.GetFullPath(git.RepoPath);
+        return git.WorktreePaths()
+            .Where(path => !string.Equals(
+                Path.GetFullPath(path), current, StringComparison.Ordinal))
+            .Select(path => Path.Combine(path, TenNinety.StateDir, TenNinety.PivotFile))
             .Count(File.Exists);
     }
 

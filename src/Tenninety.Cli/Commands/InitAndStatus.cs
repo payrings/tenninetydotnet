@@ -298,7 +298,9 @@ public static class ControlCommands
 
     public static int Resume()
     {
+        using var daemonLock = DaemonLock.Acquire(Directory.GetCurrentDirectory());
         var ws = Workspace.Load();
+        new PivotPersistence(ws.Git, ws.Plans, ws.States).RecoverPending(daemonLock);
         ExecutionControl.ClearAll(ws.Root);
         ws.States.Update(state =>
         {

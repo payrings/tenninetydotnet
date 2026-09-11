@@ -239,12 +239,23 @@ public sealed class RevertService
                           "transaction(s) require recovery; refusing to revert here.",
             };
 
+        var pendingPivots = RuntimeGitignoreMigration.CountPivotJournalsInOtherWorktrees(_git) +
+                            (File.Exists(Path.Combine(
+                                _git.RepoPath, TenNinety.StateDir, TenNinety.PivotFile)) ? 1 : 0);
+        if (pendingPivots > 0)
+            return new RevertOutcome
+            {
+                Success = false,
+                Message = $"{pendingPivots} pivot transaction(s) require recovery; run " +
+                          "'tenninety start' from the owning worktree before reverting.",
+            };
+
         var runtimeIgnore = $"{TenNinety.StateDir}/.gitignore";
         try
         {
             // A repository-level rule such as `.tenninety/` already protects every journal
             // artifact; do not try to force a nested ignore file into that repository.
-            if (!RuntimeGitignoreMigration.PromotionArtifactsAreIgnored(_git) &&
+            if (!RuntimeGitignoreMigration.RecoveryArtifactsAreIgnored(_git) &&
                 RuntimeGitignoreMigration.Ensure(_git.RepoPath))
                 _git.CommitPaths([runtimeIgnore], "tenninety: update runtime ignores");
         }
@@ -257,11 +268,11 @@ public sealed class RevertService
                     $"revert could not prepare the runtime recovery journal: {ex.Message}"),
             };
         }
-        if (!RuntimeGitignoreMigration.PromotionArtifactsAreIgnored(_git))
+        if (!RuntimeGitignoreMigration.RecoveryArtifactsAreIgnored(_git))
             return new RevertOutcome
             {
                 Success = false,
-                Message = "promotion recovery journal files are not effectively ignored; " +
+                Message = "runtime recovery journal files are not effectively ignored; " +
                           "remove overriding ignore negations or ignore .tenninety/ before reverting.",
             };
         if (!_git.IsClean())

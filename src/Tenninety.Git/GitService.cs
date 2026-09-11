@@ -24,6 +24,11 @@ public interface IGitService
     void Init();
     bool IsClean();
     bool IsPathClean(string relativePath);
+    /// <summary>True when no tracked, staged, or untracked changes exist except the named
+    /// repository-relative path.</summary>
+    bool IsCleanExcept(string relativePath) => false;
+    /// <summary>True when the commit changes exactly one expected repository-relative path.</summary>
+    bool CommitChangesOnlyPath(string commitSha, string expectedPath) => false;
     bool IsPathIgnored(string relativePath) => false;
     IReadOnlyList<string> WorktreePaths() => [RepoPath];
     string CurrentBranch();
@@ -393,6 +398,20 @@ public sealed class GitService : IGitService
 
     public bool IsPathClean(string relativePath) =>
         Run("status", "--porcelain", "--", relativePath).Output.Trim().Length == 0;
+
+    public bool IsCleanExcept(string relativePath) =>
+        Run("status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".",
+            $":(exclude){relativePath.Replace('\\', '/')}").Output.Length == 0;
+
+    public bool CommitChangesOnlyPath(string commitSha, string expectedPath)
+    {
+        var paths = Run(
+                "--no-replace-objects", "diff-tree", "--no-commit-id", "--name-only",
+                "-r", "-z", "--no-renames", commitSha)
+            .Output.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        return paths.Length == 1 &&
+               paths[0].Equals(expectedPath.Replace('\\', '/'), StringComparison.Ordinal);
+    }
 
     public bool IsPathIgnored(string relativePath) =>
         TryRun("check-ignore", "--quiet", "--", relativePath).ExitCode == 0;

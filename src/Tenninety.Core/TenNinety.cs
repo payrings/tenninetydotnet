@@ -8,6 +8,9 @@ public static class TenNinety
     public const string PlanFile = "plan.json";
     public const string StateFile = "state.json";
     public const string PromotionFile = "promotion-transaction.json";
+    public const string PivotFile = "pivot-transaction.json";
+    public const string PivotPlanFile = "pivot-plan.next.json";
+    public const string PivotStateFile = "pivot-state.next.json";
     public const string ConfigFile = "config.json";
     public const string AuditFile = "audit-log.jsonl";
     public const string WorkBranchPrefix = "work/";
